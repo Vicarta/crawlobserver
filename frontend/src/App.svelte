@@ -716,9 +716,14 @@
 
 {#if showOnboarding}
   <OnboardingWizard startStep={onboardingStartStep} oncomplete={onOnboardingComplete} />
-{:else if setupChecked && authChecked && !currentUser}
+{:else if !setupChecked || !authChecked}
+  <main class="app-loading-shell" aria-live="polite" aria-busy="true">
+    <div class="app-loading-mark" aria-hidden="true"></div>
+    <span>Loading {theme.app_name || 'CrawlObserver'}...</span>
+  </main>
+{:else if !currentUser}
   <LoginPage appName={theme.app_name} onlogin={handleLogin} />
-{:else if setupChecked}
+{:else}
   <a class="skip-link" href="#main-content">{t('app.skipToContent')}</a>
   <div class="layout">
     <div class="drag-bar"><span class="drag-bar-title">{theme.app_name}</span></div>
@@ -973,3 +978,32 @@
     />
   {/if}
 {/if}
+
+<style>
+  .app-loading-shell {
+    min-height: 100vh;
+    width: 100%;
+    display: grid;
+    place-items: center;
+    align-content: center;
+    gap: 14px;
+    background: var(--bg);
+    color: var(--text-muted);
+    font-size: 14px;
+  }
+
+  .app-loading-mark {
+    width: 36px;
+    height: 36px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: app-loading-spin 0.8s linear infinite;
+  }
+
+  @keyframes app-loading-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+</style>

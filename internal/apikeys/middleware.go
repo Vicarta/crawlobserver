@@ -111,7 +111,7 @@ func Authenticate(keyStore *Store, basicUser, basicPass string) func(http.Handle
 				}
 			}
 
-			if !strings.HasPrefix(r.URL.Path, "/api/auth/") {
+			if !strings.HasPrefix(r.URL.Path, "/api/") {
 				w.Header().Set("WWW-Authenticate", `Basic realm="CrawlObserver"`)
 			}
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)

@@ -841,11 +841,8 @@ func TestAuth_SecurityHeaders(t *testing.T) {
 }
 
 func TestAuth_HealthNoAuth(t *testing.T) {
-	// Health endpoint is behind the same auth middleware in the current code,
-	// but we test that it responds correctly when authorized.
 	_, handler, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/api/health", nil)
-	req.SetBasicAuth("admin", "secret")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -857,6 +854,33 @@ func TestAuth_HealthNoAuth(t *testing.T) {
 	decodeJSON(t, rec, &body)
 	if body["status"] != "ok" {
 		t.Errorf("expected status ok, got %q", body["status"])
+	}
+}
+
+func TestAuth_PublicBootstrapEndpointsNoAuth(t *testing.T) {
+	_, handler, _ := newTestServer(t)
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "theme", path: "/api/theme"},
+		{name: "setup status", path: "/api/setup/status"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tt.path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+			}
+			if rec.Header().Get("WWW-Authenticate") != "" {
+				t.Fatalf("did not expect WWW-Authenticate header on public bootstrap endpoint")
+			}
+		})
 	}
 }
 
@@ -5167,6 +5191,24 @@ func TestBasicAuth_NoCredentials(t *testing.T) {
 	}
 	if rec.Header().Get("WWW-Authenticate") == "" {
 		t.Error("expected WWW-Authenticate header")
+	}
+}
+
+func TestBasicAuth_APINoCredentialsNoChallenge(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := basicAuth(inner, "admin", "password")
+
+	req := httptest.NewRequest("GET", "/api/projects", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+	if rec.Header().Get("WWW-Authenticate") != "" {
+		t.Error("did not expect WWW-Authenticate header for API request")
 	}
 }
 

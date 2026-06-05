@@ -408,6 +408,12 @@ func isPublicPath(r *http.Request) bool {
 	if r.Method == http.MethodGet && r.URL.Path == "/api/health" {
 		return true
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/api/theme" {
+		return true
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/api/setup/status" {
+		return true
+	}
 	if r.URL.Path == "/api/auth/login" && r.Method == http.MethodPost {
 		return true
 	}
@@ -846,7 +852,9 @@ func basicAuth(next http.Handler, username, password string) http.Handler {
 		if !ok ||
 			subtle.ConstantTimeCompare([]byte(user), []byte(username)) != 1 ||
 			subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="CrawlObserver"`)
+			if !strings.HasPrefix(r.URL.Path, "/api/") {
+				w.Header().Set("WWW-Authenticate", `Basic realm="CrawlObserver"`)
+			}
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
