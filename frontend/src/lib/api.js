@@ -129,6 +129,46 @@ async function fetchJSON(path, options = {}) {
   return JSON.parse(text);
 }
 
+export async function login(username, password) {
+  return fetchJSON('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export async function logout() {
+  return fetchJSON('/auth/logout', { method: 'POST' });
+}
+
+export async function getCurrentUser() {
+  return fetchJSON('/auth/me');
+}
+
+export async function getUsers() {
+  return fetchJSON('/users');
+}
+
+export async function createUser(user) {
+  return fetchJSON('/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(user),
+  });
+}
+
+export async function updateUser(id, user) {
+  return fetchJSON(`/users/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(user),
+  });
+}
+
+export async function deleteUser(id) {
+  return fetchJSON(`/users/${id}`, { method: 'DELETE' });
+}
+
 /** @returns {Promise<Session[]>} */
 export async function getSessions() {
   return fetchJSON('/sessions');
