@@ -13,10 +13,10 @@ import (
 	"github.com/SEObserver/crawlobserver/internal/config"
 	"github.com/SEObserver/crawlobserver/internal/extraction"
 	"github.com/SEObserver/crawlobserver/internal/fetcher"
-	"github.com/SEObserver/crawlobserver/internal/schema"
 	"github.com/SEObserver/crawlobserver/internal/frontier"
 	"github.com/SEObserver/crawlobserver/internal/normalizer"
 	"github.com/SEObserver/crawlobserver/internal/parser"
+	"github.com/SEObserver/crawlobserver/internal/schema"
 	"github.com/SEObserver/crawlobserver/internal/storage"
 )
 
@@ -440,6 +440,63 @@ func TestIsInScope_Subdirectory(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestRegisterFinalURLScope_HostRedirectAlias(t *testing.T) {
+	cfg := &config.Config{
+		Crawler: config.CrawlerConfig{
+			UserAgent:  "TestBot/1.0",
+			CrawlScope: "host",
+		},
+	}
+	engine := NewEngine(cfg, nil)
+	engine.session = NewSession([]string{"https://diskinternals.com/raid-recovery/"}, cfg)
+	engine.buildScope()
+
+	if engine.isInScope("https://www.diskinternals.com/raid-recovery/how-to-recover-data-from-raid-drives/") {
+		t.Fatal("www host should not be in scope before registering the final redirect URL")
+	}
+
+	engine.registerFinalURLScope(&fetcher.FetchResult{
+		URL:           "https://diskinternals.com/raid-recovery/",
+		FinalURL:      "https://www.diskinternals.com/raid-recovery/",
+		RedirectChain: []fetcher.RedirectHop{{URL: "https://diskinternals.com/raid-recovery/", StatusCode: 301}},
+	})
+
+	if !engine.isInScope("https://www.diskinternals.com/raid-recovery/how-to-recover-data-from-raid-drives/") {
+		t.Fatal("www host should be in scope after registering the final redirect URL")
+	}
+}
+
+func TestRegisterFinalURLScope_SubdirectoryRedirectAlias(t *testing.T) {
+	cfg := &config.Config{
+		Crawler: config.CrawlerConfig{
+			UserAgent:  "TestBot/1.0",
+			CrawlScope: "subdirectory",
+		},
+	}
+	engine := NewEngine(cfg, nil)
+	engine.session = NewSession([]string{"https://diskinternals.com/raid-recovery/"}, cfg)
+	engine.buildScope()
+
+	inDirectory := "https://www.diskinternals.com/raid-recovery/how-to-recover-data-from-raid-drives/"
+	outsideDirectory := "https://www.diskinternals.com/vmfs-recovery/"
+	if engine.isInScope(inDirectory) {
+		t.Fatal("www subdirectory URL should not be in scope before registering the final redirect URL")
+	}
+
+	engine.registerFinalURLScope(&fetcher.FetchResult{
+		URL:           "https://diskinternals.com/raid-recovery/",
+		FinalURL:      "https://www.diskinternals.com/raid-recovery/",
+		RedirectChain: []fetcher.RedirectHop{{URL: "https://diskinternals.com/raid-recovery/", StatusCode: 301}},
+	})
+
+	if !engine.isInScope(inDirectory) {
+		t.Fatal("www subdirectory URL should be in scope after registering the final redirect URL")
+	}
+	if engine.isInScope(outsideDirectory) {
+		t.Fatal("redirect alias must not broaden subdirectory scope outside the final URL directory")
+	}
 }
 
 type successInserter struct{}
@@ -2349,9 +2406,9 @@ func TestIsExcluded(t *testing.T) {
 		{"https://example.com/login?next=/dashboard", true},
 		{"https://example.com/cart/item-123", true},
 		{"https://example.com/products/widget", false},
-		{"https://example.com/register", false},     // no ?redirect_url=
+		{"https://example.com/register", false},      // no ?redirect_url=
 		{"https://example.com/login", false},         // no trailing ?
-		{"https://example.com/shopping-cart", false},  // not /cart/
+		{"https://example.com/shopping-cart", false}, // not /cart/
 	}
 
 	for _, tt := range tests {

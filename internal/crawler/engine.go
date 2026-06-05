@@ -48,12 +48,13 @@ type Engine struct {
 	allowedHosts    map[string]bool
 	allowedDomains  map[string]bool
 	allowedPrefixes []string
+	scopeMu         sync.RWMutex
 
 	retryQueue       *RetryQueue
 	hostHealth       *HostHealth
 	retryPolicy      *RetryPolicy
 	pendingRetries   atomic.Int64
-	resultsProcessed atomic.Int64 // all results including retries, for circuit breaker
+	resultsProcessed atomic.Int64  // all results including retries, for circuit breaker
 	baseDelay        time.Duration // original frontier delay, for adaptive throttle
 
 	sitemapOnly      bool
@@ -87,7 +88,7 @@ type Engine struct {
 	cfResolver      cfsolve.ChallengeResolver
 	cfHoldQueue     map[string][]*RetryItem // host → URLs parked during CF solve
 	cfSolvingHosts  map[string]bool         // hosts currently being CF-solved
-	cfFailedHosts   map[string]time.Time     // host → time when block expires
+	cfFailedHosts   map[string]time.Time    // host → time when block expires
 	cfHoldMu        sync.Mutex
 	cookieJar       *cookiejar.Jar
 	pendingCFSolves atomic.Int64
@@ -187,34 +188,75 @@ func (e *Engine) MarkSeen(url string) {
 
 // buildScope extracts allowed hostnames/domains from the session's original seed URLs.
 func (e *Engine) buildScope() {
+	e.scopeMu.Lock()
+	defer e.scopeMu.Unlock()
+
 	e.allowedHosts = make(map[string]bool)
 	e.allowedDomains = make(map[string]bool)
 	e.allowedPrefixes = nil
 
 	seedURLs := e.session.SeedURLs
 	for _, seed := range seedURLs {
-		u, err := url.Parse(seed)
-		if err != nil {
-			continue
-		}
-		host := strings.ToLower(u.Hostname())
-		e.allowedHosts[host] = true
-		domain, err := publicsuffix.EffectiveTLDPlusOne(host)
-		if err == nil {
-			e.allowedDomains[strings.ToLower(domain)] = true
-		}
-		if e.cfg.Crawler.CrawlScope == "subdirectory" {
-			dir := path.Dir(u.Path)
-			if strings.HasSuffix(u.Path, "/") {
-				dir = u.Path
-			}
-			if !strings.HasSuffix(dir, "/") {
-				dir += "/"
-			}
-			prefix := strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + dir
-			e.allowedPrefixes = append(e.allowedPrefixes, prefix)
-		}
+		e.addScopeURLLocked(seed)
 	}
+}
+
+func (e *Engine) registerFinalURLScope(result *fetcher.FetchResult) {
+	if result == nil || result.FinalURL == "" || result.FinalURL == result.URL {
+		return
+	}
+	if !e.isInScope(result.URL) {
+		return
+	}
+
+	e.scopeMu.Lock()
+	defer e.scopeMu.Unlock()
+	e.addScopeURLLocked(result.FinalURL)
+}
+
+func (e *Engine) addScopeURLLocked(rawURL string) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return
+	}
+	e.allowedHosts[host] = true
+	domain, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err == nil {
+		e.allowedDomains[strings.ToLower(domain)] = true
+	}
+	if e.cfg.Crawler.CrawlScope == "subdirectory" {
+		prefix := strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + subdirectoryScopeDir(u.Path)
+		for _, existing := range e.allowedPrefixes {
+			if existing == prefix {
+				return
+			}
+		}
+		e.allowedPrefixes = append(e.allowedPrefixes, prefix)
+	}
+}
+
+func subdirectoryScopeDir(p string) string {
+	if p == "" || p == "." {
+		return "/"
+	}
+	dir := path.Dir(p)
+	if strings.HasSuffix(p, "/") {
+		dir = p
+	}
+	if dir == "." {
+		dir = "/"
+	}
+	if !strings.HasPrefix(dir, "/") {
+		dir = "/" + dir
+	}
+	if !strings.HasSuffix(dir, "/") {
+		dir += "/"
+	}
+	return dir
 }
 
 // isInScope checks if a URL falls within the configured crawl scope.
@@ -224,6 +266,9 @@ func (e *Engine) isInScope(targetURL string) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
+
+	e.scopeMu.RLock()
+	defer e.scopeMu.RUnlock()
 
 	switch e.cfg.Crawler.CrawlScope {
 	case "domain":
@@ -794,6 +839,9 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 		// Store the original redirect status code instead of the final 200,
 		// and skip content parsing (the body belongs to the final URL).
 		isRedirect := len(result.RedirectChain) > 0 && result.URL != result.FinalURL
+		if isRedirect {
+			e.registerFinalURLScope(result)
+		}
 
 		// Build page row
 		pageRow := storage.PageRow{
