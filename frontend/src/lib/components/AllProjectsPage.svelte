@@ -55,9 +55,11 @@
     <button class="btn btn-sm" onclick={loadProjects} disabled={loading}>
       {loading ? t('common.loading') : t('common.refresh')}
     </button>
-    <button class="btn btn-sm btn-primary" onclick={() => oncreateproject?.()}
-      >{t('projects.newProject')}</button
-    >
+    {#if oncreateproject}
+      <button class="btn btn-sm btn-primary" onclick={() => oncreateproject()}
+        >{t('projects.newProject')}</button
+      >
+    {/if}
   </div>
 </div>
 

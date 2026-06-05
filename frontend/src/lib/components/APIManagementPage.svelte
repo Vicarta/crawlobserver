@@ -1,5 +1,11 @@
 <script>
-  import { getProjects, getAPIKeys, createAPIKey, deleteAPIKey, getServerInfo } from '../api.js';
+  import {
+    getProjects,
+    getAPIKeys,
+    createAPIKey,
+    deleteAPIKey,
+    getServerInfo,
+  } from '../api.js';
   import { timeAgo, copyToClipboard } from '../utils.js';
   import { t } from '../i18n/index.svelte.js';
   import ConfirmModal from './ConfirmModal.svelte';
@@ -72,6 +78,18 @@
   }
 
   const apiRef = [
+    {
+      section: 'Auth',
+      endpoints: [
+        { method: 'POST', path: '/auth/login', desc: 'Log in with a local username/password' },
+        { method: 'POST', path: '/auth/logout', desc: 'Clear the browser session cookie' },
+        {
+          method: 'GET',
+          path: '/auth/me',
+          desc: 'Return the authenticated user or credential scope',
+        },
+      ],
+    },
     {
       section: 'Crawl Sessions',
       endpoints: [
@@ -213,7 +231,11 @@
     {
       section: 'Projects',
       endpoints: [
-        { method: 'GET', path: '/projects', desc: 'List all projects' },
+        {
+          method: 'GET',
+          path: '/projects',
+          desc: 'List visible projects for the current credential',
+        },
         { method: 'POST', path: '/projects', desc: 'Create a project' },
         { method: 'PUT', path: '/projects/{id}', desc: 'Rename a project' },
         { method: 'DELETE', path: '/projects/{id}', desc: 'Delete a project' },
@@ -235,6 +257,19 @@
         { method: 'GET', path: '/api-keys', desc: 'List API keys' },
         { method: 'POST', path: '/api-keys', desc: 'Create an API key' },
         { method: 'DELETE', path: '/api-keys/{id}', desc: 'Revoke an API key' },
+      ],
+    },
+    {
+      section: 'Users',
+      endpoints: [
+        { method: 'GET', path: '/users', desc: 'List local users (admin only)' },
+        { method: 'POST', path: '/users', desc: 'Create a local admin or project-scoped viewer' },
+        {
+          method: 'PUT',
+          path: '/users/{id}',
+          desc: 'Update role, active state, password, or projects',
+        },
+        { method: 'DELETE', path: '/users/{id}', desc: 'Delete a local user' },
       ],
     },
     {

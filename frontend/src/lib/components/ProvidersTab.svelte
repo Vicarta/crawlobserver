@@ -26,6 +26,7 @@
     initialSubView = 'overview',
     onerror,
     onpushurl,
+    isAdmin = false,
   } = $props();
 
   let subView = $state(initialSubView);
@@ -326,6 +327,7 @@
   onDestroy(() => stopPolling());
 
   async function doConnect() {
+    if (!isAdmin) return;
     if (!apiKeyInput || !domainInput) return;
     connecting = true;
     try {
@@ -343,6 +345,7 @@
   let fetchMenuOpen = $state(false);
 
   async function doFetch(dataTypes = [], force = false) {
+    if (!isAdmin) return;
     fetchMenuOpen = false;
     fetchingData = true;
     fetchStatus = { fetching: true, phase: 'starting', rows_so_far: 0 };
@@ -357,6 +360,7 @@
   }
 
   async function doStop() {
+    if (!isAdmin) return;
     try {
       await stopProviderFetch(projectId, provider);
       fetchingData = false;
@@ -369,6 +373,7 @@
   }
 
   async function doDisconnect() {
+    if (!isAdmin) return;
     try {
       await disconnectProvider(projectId, provider);
       stopPolling();
@@ -388,6 +393,7 @@
   }
 
   async function doUpdate() {
+    if (!isAdmin) return;
     if (!settingsDomain) return;
     updating = true;
     try {
@@ -478,6 +484,7 @@
   }
 
   function switchSubView(view) {
+    if (!isAdmin && view === 'settings') return;
     subView = view;
     if (view === 'backlinks') backlinksOffset = 0;
     if (view === 'refdomains') refdomainsOffset = 0;
@@ -496,6 +503,7 @@
     loadSubView(view);
   }
 
+  if (!isAdmin && subView === 'settings') subView = 'overview';
   loadStatus().then(() => {
     if (projectId) loadSubView(subView);
   });
@@ -518,42 +526,46 @@
           {t('providers.domain')} <strong>{status.domain}</strong>
           <span class="prov-provider-tag">({provider})</span>
         </span>
-        <div class="flex-center-gap">
-          {#if fetchingData}
-            <span class="fetch-indicator">
-              <span class="fetch-spinner"></span>
-              {fetchStatus?.phase || t('providers.fetchingPhase')}{fetchStatus?.rows_so_far
-                ? ` — ${fmtN(fetchStatus.rows_so_far)} rows`
-                : '...'}
-            </span>
-            <button class="btn btn-sm text-danger" onclick={doStop}>{t('common.stop')}</button>
-          {:else}
-            <div class="split-btn-wrap">
-              <button class="btn btn-sm" onclick={() => doFetch()}
-                >{t('providers.fetchData')}</button
-              >
-              <button
-                class="btn btn-sm split-btn-arrow"
-                onclick={(e) => {
-                  e.stopPropagation();
-                  fetchMenuOpen = !fetchMenuOpen;
-                }}
-                aria-label="More fetch options"
-              >
-                <svg width="10" height="6" viewBox="0 0 10 6" fill="currentColor"
-                  ><path d="M0 0l5 6 5-6z" /></svg
-                >
-              </button>
-              {#if fetchMenuOpen}
-                <div class="split-btn-menu" role="menu">
-                  <button class="split-btn-item" onclick={() => doFetch([], true)}
-                    >{t('providers.forceRefresh')}</button
-                  >
-                </div>
+        {#if isAdmin || fetchingData}
+          <div class="flex-center-gap">
+            {#if fetchingData}
+              <span class="fetch-indicator">
+                <span class="fetch-spinner"></span>
+                {fetchStatus?.phase || t('providers.fetchingPhase')}{fetchStatus?.rows_so_far
+                  ? ` — ${fmtN(fetchStatus.rows_so_far)} rows`
+                  : '...'}
+              </span>
+              {#if isAdmin}
+                <button class="btn btn-sm text-danger" onclick={doStop}>{t('common.stop')}</button>
               {/if}
-            </div>
-          {/if}
-        </div>
+            {:else}
+              <div class="split-btn-wrap">
+                <button class="btn btn-sm" onclick={() => doFetch()}
+                  >{t('providers.fetchData')}</button
+                >
+                <button
+                  class="btn btn-sm split-btn-arrow"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    fetchMenuOpen = !fetchMenuOpen;
+                  }}
+                  aria-label="More fetch options"
+                >
+                  <svg width="10" height="6" viewBox="0 0 10 6" fill="currentColor"
+                    ><path d="M0 0l5 6 5-6z" /></svg
+                  >
+                </button>
+                {#if fetchMenuOpen}
+                  <div class="split-btn-menu" role="menu">
+                    <button class="split-btn-item" onclick={() => doFetch([], true)}
+                      >{t('providers.forceRefresh')}</button
+                    >
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -588,16 +600,18 @@
         class:pr-subview-active={subView === 'api_calls'}
         onclick={() => switchSubView('api_calls')}>{t('providers.apiCallsTab')}</button
       >
-      <button
-        class="pr-subview-btn"
-        class:pr-subview-active={subView === 'settings'}
-        onclick={() => switchSubView('settings')}>{t('providers.settings')}</button
-      >
+      {#if isAdmin}
+        <button
+          class="pr-subview-btn"
+          class:pr-subview-active={subView === 'settings'}
+          onclick={() => switchSubView('settings')}>{t('providers.settings')}</button
+        >
+      {/if}
     </div>
 
     {#if !status.connected}
       <!-- Disconnected: locked previews to create desire -->
-      {#if subView === 'settings'}
+      {#if isAdmin && subView === 'settings'}
         <div class="prov-empty">
           <h3 class="prov-connect-title">{t('providers.connectTitle')}</h3>
           <p class="text-muted text-sm mb-md">{t('providers.connectDesc')}</p>
@@ -640,9 +654,11 @@
             />
           </svg>
           <p class="prov-lock-text">{t('providers.lockCta')}</p>
-          <button class="btn btn-primary" onclick={() => switchSubView('settings')}
-            >{t('providers.connectTitle')}</button
-          >
+          {#if isAdmin}
+            <button class="btn btn-primary" onclick={() => switchSubView('settings')}
+              >{t('providers.connectTitle')}</button
+            >
+          {/if}
         </div>
         <div class="prov-preview-wrapper">
           <div class="prov-preview-blur">
@@ -1266,7 +1282,7 @@
       {:else}
         <div class="chart-empty">
           <p>{t('providers.noTopPages')}</p>
-          {#if !fetchingData}
+          {#if isAdmin && !fetchingData}
             <button
               class="btn btn-primary"
               style="margin-top: 0.75rem"

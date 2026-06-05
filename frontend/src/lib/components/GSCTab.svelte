@@ -18,7 +18,7 @@
   import { t } from '../i18n/index.svelte.js';
   import SearchSelect from './SearchSelect.svelte';
 
-  let { projectId, initialSubView = 'overview', onerror, onpushurl } = $props();
+  let { projectId, initialSubView = 'overview', onerror, onpushurl, isAdmin = false } = $props();
 
   let subView = $state(initialSubView);
   let loading = $state(false);
@@ -81,6 +81,7 @@
   onDestroy(() => stopPolling());
 
   async function authorize() {
+    if (!isAdmin) return;
     try {
       const data = await startGSCAuthorize(projectId);
       if (data.url) window.location.href = data.url;
@@ -90,6 +91,7 @@
   }
 
   async function doFetch(propertyUrl = '') {
+    if (!isAdmin) return;
     fetchingData = true;
     fetchStatus = { fetching: true, rows_so_far: 0 };
     try {
@@ -109,6 +111,7 @@
   }
 
   async function doStop() {
+    if (!isAdmin) return;
     try {
       await stopGSCFetch(projectId);
       fetchingData = false;
@@ -121,6 +124,7 @@
   }
 
   async function doDisconnect() {
+    if (!isAdmin) return;
     try {
       await disconnectGSC(projectId);
       stopPolling();
@@ -192,7 +196,9 @@
       <p class="text-muted text-sm mb-md">
         {t('gsc.connectDesc')}
       </p>
-      <button class="btn btn-primary" onclick={authorize}>{t('gsc.connectBtn')}</button>
+      {#if isAdmin}
+        <button class="btn btn-primary" onclick={authorize}>{t('gsc.connectBtn')}</button>
+      {/if}
     </div>
   {:else if status.connected && !status.property_url}
     <div class="gsc-empty">
@@ -200,7 +206,7 @@
       <p class="text-muted text-sm mb-md">
         {t('gsc.selectPropertyDesc')}
       </p>
-      {#if status.properties?.length > 0}
+      {#if isAdmin && status.properties?.length > 0}
         <div class="flex-center-gap gsc-property-wrap">
           <SearchSelect
             bind:value={selectedProperty}
@@ -224,9 +230,11 @@
       {:else}
         <p class="text-muted">{t('gsc.noProperties')}</p>
       {/if}
-      <button class="btn btn-sm gsc-disconnect-btn" onclick={doDisconnect}
-        >{t('common.disconnect')}</button
-      >
+      {#if isAdmin}
+        <button class="btn btn-sm gsc-disconnect-btn" onclick={doDisconnect}
+          >{t('common.disconnect')}</button
+        >
+      {/if}
     </div>
   {:else}
     <!-- Connected with property selected -->
@@ -234,22 +242,31 @@
       <span class="text-sm text-secondary">
         {t('gsc.property')} <strong>{status.property_url}</strong>
       </span>
-      <div class="flex-center-gap">
-        {#if fetchingData}
-          <span class="fetch-indicator">
-            <span class="fetch-spinner"></span>
-            {fetchStatus?.rows_so_far
-              ? t('gsc.fetchingRows', { count: fmtN(fetchStatus.rows_so_far) })
-              : t('gsc.fetching')}
-          </span>
-          <button class="btn btn-sm text-danger" onclick={doStop}>{t('common.stop')}</button>
-        {:else}
-          <button class="btn btn-sm" onclick={() => doFetch()}>{t('gsc.refreshData')}</button>
-        {/if}
-        <button class="btn btn-sm text-muted" onclick={doDisconnect}
-          >{t('common.disconnect')}</button
-        >
-      </div>
+      {#if isAdmin}
+        <div class="flex-center-gap">
+          {#if fetchingData}
+            <span class="fetch-indicator">
+              <span class="fetch-spinner"></span>
+              {fetchStatus?.rows_so_far
+                ? t('gsc.fetchingRows', { count: fmtN(fetchStatus.rows_so_far) })
+                : t('gsc.fetching')}
+            </span>
+            <button class="btn btn-sm text-danger" onclick={doStop}>{t('common.stop')}</button>
+          {:else}
+            <button class="btn btn-sm" onclick={() => doFetch()}>{t('gsc.refreshData')}</button>
+          {/if}
+          <button class="btn btn-sm text-muted" onclick={doDisconnect}
+            >{t('common.disconnect')}</button
+          >
+        </div>
+      {:else if fetchingData}
+        <span class="fetch-indicator">
+          <span class="fetch-spinner"></span>
+          {fetchStatus?.rows_so_far
+            ? t('gsc.fetchingRows', { count: fmtN(fetchStatus.rows_so_far) })
+            : t('gsc.fetching')}
+        </span>
+      {/if}
     </div>
 
     <div class="pr-subview-bar">

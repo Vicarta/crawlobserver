@@ -13,8 +13,9 @@
   import { fmtSize } from '../utils.js';
   import { t, setLocale, getLocale } from '../i18n/index.svelte.js';
   import ConfirmModal from './ConfirmModal.svelte';
+  import UserManagement from './UserManagement.svelte';
 
-  let { initialTheme, onerror, onsave, oncancel, onsessionrecording } = $props();
+  let { initialTheme, onerror, onsave, oncancel, onsessionrecording, onprojectschanged } = $props();
 
   let confirmState = $state(null);
 
@@ -260,6 +261,8 @@
     </div>
   {/if}
 </div>
+
+<UserManagement {onerror} {onprojectschanged} />
 
 <!-- Backups -->
 <div class="page-header section-gap">

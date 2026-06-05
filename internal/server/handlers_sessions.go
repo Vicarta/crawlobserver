@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,17 +27,17 @@ import (
 )
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	auth := apikeys.FromContext(r.Context())
+	if auth != nil && !auth.IsAdmin() {
+		s.handleScopedSessions(w, r, auth)
+		return
+	}
+
 	// Paginated mode if ?limit= is present
 	if r.URL.Query().Get("limit") != "" {
 		limit, offset := clampPagination(queryInt(r, "limit", 30), queryInt(r, "offset", 0))
 		projectID := r.URL.Query().Get("project_id")
 		search := r.URL.Query().Get("search")
-
-		// If project API key, force project filter
-		auth := apikeys.FromContext(r.Context())
-		if auth != nil && auth.ProjectID != nil {
-			projectID = *auth.ProjectID
-		}
 
 		sessions, total, err := s.store.ListSessionsPaginated(r.Context(), limit, offset, projectID, search)
 		if err != nil {
@@ -77,13 +78,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	var sessions []storage.CrawlSession
 	var err error
 
-	// If project API key, filter by project
-	auth := apikeys.FromContext(r.Context())
-	if auth != nil && auth.ProjectID != nil {
-		sessions, err = s.store.ListSessions(r.Context(), *auth.ProjectID)
-	} else {
-		sessions, err = s.store.ListSessions(r.Context())
-	}
+	sessions, err = s.store.ListSessions(r.Context())
 	if err != nil {
 		internalError(w, r, err)
 		return
@@ -112,6 +107,85 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, resp)
+}
+
+func (s *Server) handleScopedSessions(w http.ResponseWriter, r *http.Request, auth *apikeys.AuthInfo) {
+	allowed := auth.AllowedProjectIDs()
+	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search")))
+	var sessions []storage.CrawlSession
+	for _, projectID := range allowed {
+		projectSessions, err := s.store.ListSessions(r.Context(), projectID)
+		if err != nil {
+			internalError(w, r, err)
+			return
+		}
+		for _, sess := range projectSessions {
+			if search != "" && !sessionMatchesSearch(sess, search) {
+				continue
+			}
+			sessions = append(sessions, sess)
+		}
+	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		return sessions[i].StartedAt.After(sessions[j].StartedAt)
+	})
+
+	resp := s.sessionListPayload(sessions)
+	if r.URL.Query().Get("limit") != "" {
+		limit, offset := clampPagination(queryInt(r, "limit", 30), queryInt(r, "offset", 0))
+		total := len(resp)
+		end := offset + limit
+		if offset > total {
+			offset = total
+		}
+		if end > total {
+			end = total
+		}
+		writeJSON(w, map[string]interface{}{
+			"sessions": resp[offset:end],
+			"total":    total,
+		})
+		return
+	}
+	writeJSON(w, resp)
+}
+
+func sessionMatchesSearch(sess storage.CrawlSession, search string) bool {
+	for _, seed := range sess.SeedURLs {
+		if strings.Contains(strings.ToLower(seed), search) {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(sess.ID), search) ||
+		strings.Contains(strings.ToLower(sess.Label), search)
+}
+
+func (s *Server) sessionListPayload(sessions []storage.CrawlSession) []map[string]interface{} {
+	var resp []map[string]interface{}
+	for _, sess := range sessions {
+		pagesCrawled := sess.PagesCrawled
+		if pages, _, running := s.manager.Progress(sess.ID); running {
+			pagesCrawled = uint64(pages)
+		}
+		resp = append(resp, map[string]interface{}{
+			"ID":           sess.ID,
+			"StartedAt":    sess.StartedAt,
+			"FinishedAt":   sess.FinishedAt,
+			"Status":       sess.Status,
+			"SeedURLs":     sess.SeedURLs,
+			"Config":       config.RedactSensitiveConfigJSON(sess.Config),
+			"PagesCrawled": pagesCrawled,
+			"UserAgent":    sess.UserAgent,
+			"ProjectID":    sess.ProjectID,
+			"Label":        sess.Label,
+			"is_running":   s.manager.IsRunning(sess.ID),
+			"is_queued":    s.manager.IsQueued(sess.ID),
+		})
+	}
+	if resp == nil {
+		resp = []map[string]interface{}{}
+	}
+	return resp
 }
 
 func (s *Server) handlePages(w http.ResponseWriter, r *http.Request) {
