@@ -36,6 +36,7 @@
   let fetchingData = $state(false);
   let fetchStatus = $state(null);
   let selectedProperty = $state('');
+  let changingProperty = $state(false);
   let pollTimer = null;
   const PAGE_LIMIT = 100;
 
@@ -43,6 +44,9 @@
     if (!projectId) return;
     try {
       status = await getGSCStatus(projectId);
+      if (!selectedProperty && status.property_url) {
+        selectedProperty = status.property_url;
+      }
       // Track fetch status from server
       if (status.fetch_status?.fetching) {
         fetchingData = true;
@@ -107,6 +111,7 @@
   async function selectPropertyAndFetch() {
     if (!selectedProperty) return;
     await doFetch(selectedProperty);
+    changingProperty = false;
     await loadStatus();
   }
 
@@ -134,9 +139,16 @@
       overview = null;
       queries = null;
       pages = null;
+      selectedProperty = '';
+      changingProperty = false;
     } catch (e) {
       onerror?.(e.message);
     }
+  }
+
+  function startChangingProperty() {
+    selectedProperty = status?.property_url || '';
+    changingProperty = true;
   }
 
   async function loadSubView(view) {
@@ -254,6 +266,9 @@
             <button class="btn btn-sm text-danger" onclick={doStop}>{t('common.stop')}</button>
           {:else}
             <button class="btn btn-sm" onclick={() => doFetch()}>{t('gsc.refreshData')}</button>
+            {#if status.properties?.length > 0}
+              <button class="btn btn-sm" onclick={startChangingProperty}>Change property</button>
+            {/if}
           {/if}
           <button class="btn btn-sm text-muted" onclick={doDisconnect}
             >{t('common.disconnect')}</button
@@ -268,6 +283,29 @@
         </span>
       {/if}
     </div>
+
+    {#if isAdmin && changingProperty}
+      <div class="gsc-property-switcher">
+        <SearchSelect
+          bind:value={selectedProperty}
+          placeholder={t('gsc.selectPlaceholder')}
+          options={[
+            { value: '', label: t('gsc.selectPlaceholder') },
+            ...(status.properties || []).map((p) => ({
+              value: p.site_url,
+              label: `${p.site_url} (${p.permission_level})`,
+            })),
+          ]}
+        />
+        <button
+          class="btn btn-sm btn-primary"
+          onclick={selectPropertyAndFetch}
+          disabled={!selectedProperty || selectedProperty === status.property_url || fetchingData}
+          >Use property & refresh</button
+        >
+        <button class="btn btn-sm" onclick={() => (changingProperty = false)}>Cancel</button>
+      </div>
+    {/if}
 
     <div class="pr-subview-bar">
       <button
@@ -738,6 +776,13 @@
   }
   .gsc-property-wrap {
     flex-wrap: wrap;
+  }
+  .gsc-property-switcher {
+    display: grid;
+    grid-template-columns: minmax(280px, 520px) auto auto;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 14px;
   }
   .gsc-disconnect-btn {
     margin-top: 12px;
