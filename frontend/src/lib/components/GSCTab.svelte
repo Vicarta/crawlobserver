@@ -18,7 +18,7 @@
   import { t } from '../i18n/index.svelte.js';
   import SearchSelect from './SearchSelect.svelte';
 
-  let { projectId, initialSubView = 'overview', onerror, onpushurl } = $props();
+  let { projectId, initialSubView = 'overview', onerror, onpushurl, isAdmin = false } = $props();
 
   let subView = $state(initialSubView);
   let loading = $state(false);
@@ -36,6 +36,7 @@
   let fetchingData = $state(false);
   let fetchStatus = $state(null);
   let selectedProperty = $state('');
+  let changingProperty = $state(false);
   let pollTimer = null;
   const PAGE_LIMIT = 100;
 
@@ -43,6 +44,9 @@
     if (!projectId) return;
     try {
       status = await getGSCStatus(projectId);
+      if (!selectedProperty && status.property_url) {
+        selectedProperty = status.property_url;
+      }
       // Track fetch status from server
       if (status.fetch_status?.fetching) {
         fetchingData = true;
@@ -81,6 +85,7 @@
   onDestroy(() => stopPolling());
 
   async function authorize() {
+    if (!isAdmin) return;
     try {
       const data = await startGSCAuthorize(projectId);
       if (data.url) window.location.href = data.url;
@@ -90,6 +95,7 @@
   }
 
   async function doFetch(propertyUrl = '') {
+    if (!isAdmin) return;
     fetchingData = true;
     fetchStatus = { fetching: true, rows_so_far: 0 };
     try {
@@ -105,10 +111,12 @@
   async function selectPropertyAndFetch() {
     if (!selectedProperty) return;
     await doFetch(selectedProperty);
+    changingProperty = false;
     await loadStatus();
   }
 
   async function doStop() {
+    if (!isAdmin) return;
     try {
       await stopGSCFetch(projectId);
       fetchingData = false;
@@ -121,6 +129,7 @@
   }
 
   async function doDisconnect() {
+    if (!isAdmin) return;
     try {
       await disconnectGSC(projectId);
       stopPolling();
@@ -130,9 +139,16 @@
       overview = null;
       queries = null;
       pages = null;
+      selectedProperty = '';
+      changingProperty = false;
     } catch (e) {
       onerror?.(e.message);
     }
+  }
+
+  function startChangingProperty() {
+    selectedProperty = status?.property_url || '';
+    changingProperty = true;
   }
 
   async function loadSubView(view) {
@@ -192,7 +208,9 @@
       <p class="text-muted text-sm mb-md">
         {t('gsc.connectDesc')}
       </p>
-      <button class="btn btn-primary" onclick={authorize}>{t('gsc.connectBtn')}</button>
+      {#if isAdmin}
+        <button class="btn btn-primary" onclick={authorize}>{t('gsc.connectBtn')}</button>
+      {/if}
     </div>
   {:else if status.connected && !status.property_url}
     <div class="gsc-empty">
@@ -200,7 +218,7 @@
       <p class="text-muted text-sm mb-md">
         {t('gsc.selectPropertyDesc')}
       </p>
-      {#if status.properties?.length > 0}
+      {#if isAdmin && status.properties?.length > 0}
         <div class="flex-center-gap gsc-property-wrap">
           <SearchSelect
             bind:value={selectedProperty}
@@ -224,9 +242,11 @@
       {:else}
         <p class="text-muted">{t('gsc.noProperties')}</p>
       {/if}
-      <button class="btn btn-sm gsc-disconnect-btn" onclick={doDisconnect}
-        >{t('common.disconnect')}</button
-      >
+      {#if isAdmin}
+        <button class="btn btn-sm gsc-disconnect-btn" onclick={doDisconnect}
+          >{t('common.disconnect')}</button
+        >
+      {/if}
     </div>
   {:else}
     <!-- Connected with property selected -->
@@ -234,23 +254,58 @@
       <span class="text-sm text-secondary">
         {t('gsc.property')} <strong>{status.property_url}</strong>
       </span>
-      <div class="flex-center-gap">
-        {#if fetchingData}
-          <span class="fetch-indicator">
-            <span class="fetch-spinner"></span>
-            {fetchStatus?.rows_so_far
-              ? t('gsc.fetchingRows', { count: fmtN(fetchStatus.rows_so_far) })
-              : t('gsc.fetching')}
-          </span>
-          <button class="btn btn-sm text-danger" onclick={doStop}>{t('common.stop')}</button>
-        {:else}
-          <button class="btn btn-sm" onclick={() => doFetch()}>{t('gsc.refreshData')}</button>
-        {/if}
-        <button class="btn btn-sm text-muted" onclick={doDisconnect}
-          >{t('common.disconnect')}</button
-        >
-      </div>
+      {#if isAdmin}
+        <div class="flex-center-gap">
+          {#if fetchingData}
+            <span class="fetch-indicator">
+              <span class="fetch-spinner"></span>
+              {fetchStatus?.rows_so_far
+                ? t('gsc.fetchingRows', { count: fmtN(fetchStatus.rows_so_far) })
+                : t('gsc.fetching')}
+            </span>
+            <button class="btn btn-sm text-danger" onclick={doStop}>{t('common.stop')}</button>
+          {:else}
+            <button class="btn btn-sm" onclick={() => doFetch()}>{t('gsc.refreshData')}</button>
+            {#if status.properties?.length > 0}
+              <button class="btn btn-sm" onclick={startChangingProperty}>Change property</button>
+            {/if}
+          {/if}
+          <button class="btn btn-sm text-muted" onclick={doDisconnect}
+            >{t('common.disconnect')}</button
+          >
+        </div>
+      {:else if fetchingData}
+        <span class="fetch-indicator">
+          <span class="fetch-spinner"></span>
+          {fetchStatus?.rows_so_far
+            ? t('gsc.fetchingRows', { count: fmtN(fetchStatus.rows_so_far) })
+            : t('gsc.fetching')}
+        </span>
+      {/if}
     </div>
+
+    {#if isAdmin && changingProperty}
+      <div class="gsc-property-switcher">
+        <SearchSelect
+          bind:value={selectedProperty}
+          placeholder={t('gsc.selectPlaceholder')}
+          options={[
+            { value: '', label: t('gsc.selectPlaceholder') },
+            ...(status.properties || []).map((p) => ({
+              value: p.site_url,
+              label: `${p.site_url} (${p.permission_level})`,
+            })),
+          ]}
+        />
+        <button
+          class="btn btn-sm btn-primary"
+          onclick={selectPropertyAndFetch}
+          disabled={!selectedProperty || selectedProperty === status.property_url || fetchingData}
+          >Use property & refresh</button
+        >
+        <button class="btn btn-sm" onclick={() => (changingProperty = false)}>Cancel</button>
+      </div>
+    {/if}
 
     <div class="pr-subview-bar">
       <button
@@ -721,6 +776,13 @@
   }
   .gsc-property-wrap {
     flex-wrap: wrap;
+  }
+  .gsc-property-switcher {
+    display: grid;
+    grid-template-columns: minmax(280px, 520px) auto auto;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 14px;
   }
   .gsc-disconnect-btn {
     margin-top: 12px;

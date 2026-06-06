@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/SEObserver/crawlobserver/internal/apikeys"
@@ -57,8 +59,8 @@ func (s *Server) handleGSCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Redirect to frontend with connected status
-	redirectURL := fmt.Sprintf("/?gsc_connected=%s", url.QueryEscape(state))
+	// Return to the project Search Console tab so the user can select a property.
+	redirectURL := fmt.Sprintf("/projects/%s/gsc", url.PathEscape(state))
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
@@ -87,32 +89,101 @@ func (s *Server) handleGSCStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.gscFetchMu.Unlock()
 
-	// If connected but no property selected, list available properties
-	if conn.PropertyURL == "" {
-		client, newToken, err := gsc.NewClientFromTokens(r.Context(), &s.cfg.GSC, conn.AccessToken, conn.RefreshToken, conn.TokenExpiry)
-		if err != nil {
-			applog.Errorf("gsc", "client error: %v", err)
-			writeJSON(w, result)
-			return
-		}
-		// Update token if refreshed
-		if newToken.AccessToken != conn.AccessToken {
-			conn.AccessToken = newToken.AccessToken
-			conn.TokenExpiry = newToken.Expiry
-			s.keyStore.SaveGSCConnection(conn)
-		}
-
-		props, err := client.ListProperties(r.Context())
-		if err != nil {
-			applog.Errorf("gsc", "list properties error: %v", err)
-		}
-		if props == nil {
-			props = []gsc.Property{}
-		}
-		result["properties"] = props
+	// Admins need the property list both before and after selection so they can
+	// correct a wrong HTTP/HTTPS/domain property without disconnecting.
+	if auth := apikeys.FromContext(r.Context()); auth == nil || auth.IsAdmin() {
+		result["properties"] = s.gscProperties(r.Context(), projectID, conn)
 	}
 
 	writeJSON(w, result)
+}
+
+func (s *Server) gscProperties(ctx context.Context, projectID string, conn *apikeys.GSCConnection) []gsc.Property {
+	client, newToken, err := gsc.NewClientFromTokens(ctx, &s.cfg.GSC, conn.AccessToken, conn.RefreshToken, conn.TokenExpiry)
+	if err != nil {
+		applog.Errorf("gsc", "client error: %v", err)
+		return []gsc.Property{}
+	}
+	if newToken.AccessToken != conn.AccessToken {
+		conn.AccessToken = newToken.AccessToken
+		conn.TokenExpiry = newToken.Expiry
+		_ = s.keyStore.SaveGSCConnection(conn)
+	}
+
+	props, err := client.ListProperties(ctx)
+	if err != nil {
+		applog.Errorf("gsc", "list properties error: %v", err)
+		return []gsc.Property{}
+	}
+	if props == nil {
+		props = []gsc.Property{}
+	}
+	s.sortGSCProperties(ctx, projectID, props)
+	return props
+}
+
+func (s *Server) sortGSCProperties(ctx context.Context, projectID string, props []gsc.Property) {
+	candidates := s.gscProjectDomainCandidates(ctx, projectID)
+	sort.SliceStable(props, func(i, j int) bool {
+		si := gscPropertyScore(props[i].SiteURL, candidates)
+		sj := gscPropertyScore(props[j].SiteURL, candidates)
+		if si != sj {
+			return si > sj
+		}
+		return props[i].SiteURL < props[j].SiteURL
+	})
+}
+
+func (s *Server) gscProjectDomainCandidates(ctx context.Context, projectID string) map[string]bool {
+	candidates := map[string]bool{}
+	sessions, err := s.store.ListSessions(ctx, projectID)
+	if err != nil {
+		return candidates
+	}
+	for _, sess := range sessions {
+		for _, seed := range sess.SeedURLs {
+			u, err := url.Parse(seed)
+			if err != nil || u.Hostname() == "" {
+				continue
+			}
+			host := strings.ToLower(u.Hostname())
+			candidates[host] = true
+			candidates[strings.TrimPrefix(host, "www.")] = true
+		}
+	}
+	return candidates
+}
+
+func gscPropertyScore(siteURL string, candidates map[string]bool) int {
+	site := strings.ToLower(strings.TrimSpace(siteURL))
+	score := 0
+	if strings.HasPrefix(site, "sc-domain:") {
+		score += 30
+		domain := strings.TrimPrefix(site, "sc-domain:")
+		if candidates[domain] {
+			score += 100
+		}
+		return score
+	}
+
+	u, err := url.Parse(site)
+	if err != nil || u.Hostname() == "" {
+		return score
+	}
+	host := strings.ToLower(u.Hostname())
+	if candidates[host] {
+		score += 90
+	}
+	if candidates[strings.TrimPrefix(host, "www.")] {
+		score += 70
+	}
+	if u.Scheme == "https" {
+		score += 20
+	}
+	if strings.HasPrefix(host, "www.") {
+		score += 5
+	}
+	return score
 }
 
 func (s *Server) handleGSCFetch(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +203,7 @@ func (s *Server) handleGSCFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update property URL if provided
+	// Update property URL if provided.
 	if body.PropertyURL != "" {
 		conn.PropertyURL = body.PropertyURL
 		if err := s.keyStore.SaveGSCConnection(conn); err != nil {
@@ -156,6 +227,13 @@ func (s *Server) handleGSCFetch(w http.ResponseWriter, r *http.Request) {
 		conn.AccessToken = newToken.AccessToken
 		conn.TokenExpiry = newToken.Expiry
 		s.keyStore.SaveGSCConnection(conn)
+	}
+
+	// Treat every manual fetch as a replacement for this project's GSC dataset.
+	// Otherwise repeated refreshes append duplicate rows and inflate totals.
+	if err := s.store.DeleteGSCData(r.Context(), projectID); err != nil {
+		internalError(w, r, err)
+		return
 	}
 
 	// Default date range: last 16 months (GSC maximum)
