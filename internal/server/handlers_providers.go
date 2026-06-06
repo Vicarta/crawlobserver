@@ -17,6 +17,9 @@ import (
 
 func (s *Server) handleListProviderConnections(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	conns, err := s.keyStore.ListProviderConnections(projectID)
 	if err != nil {
 		internalError(w, r, err)
@@ -26,7 +29,13 @@ func (s *Server) handleListProviderConnections(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleProviderConnect(w http.ResponseWriter, r *http.Request) {
+	if !requireFullAccess(w, r) {
+		return
+	}
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 
 	var body struct {
@@ -108,7 +117,13 @@ func (s *Server) handleProviderConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleProviderDisconnect(w http.ResponseWriter, r *http.Request) {
+	if !requireFullAccess(w, r) {
+		return
+	}
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 	s.keyStore.DeleteProviderConnection(projectID, provider)
 	s.store.DeleteProviderData(r.Context(), projectID, provider)
@@ -117,6 +132,9 @@ func (s *Server) handleProviderDisconnect(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleProviderStatus(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 
 	conn, err := s.keyStore.GetProviderConnection(projectID, provider)
@@ -153,7 +171,13 @@ func (s *Server) providerFetchKey(projectID, provider string) string {
 }
 
 func (s *Server) handleProviderFetch(w http.ResponseWriter, r *http.Request) {
+	if !requireFullAccess(w, r) {
+		return
+	}
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 
 	var body struct {
@@ -437,10 +461,10 @@ func (s *Server) runProviderFetch(ctx context.Context, cancel context.CancelFunc
 				dataRows := make([]storage.ProviderDataRow, len(pages))
 				for i, p := range pages {
 					strData := map[string]string{
-						"title":              p.Title,
-						"language":           p.Language,
-						"last_crawl_result":  p.LastCrawlResult,
-						"last_crawl_date":    p.LastCrawlDate,
+						"title":             p.Title,
+						"language":          p.Language,
+						"last_crawl_result": p.LastCrawlResult,
+						"last_crawl_date":   p.LastCrawlDate,
 					}
 					numData := map[string]float64{
 						"out_links": float64(p.OutLinks),
@@ -513,7 +537,13 @@ func parseDate(s string) time.Time {
 }
 
 func (s *Server) handleProviderStopFetch(w http.ResponseWriter, r *http.Request) {
+	if !requireFullAccess(w, r) {
+		return
+	}
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 	key := s.providerFetchKey(projectID, provider)
 	s.providerFetchMu.Lock()
@@ -527,6 +557,9 @@ func (s *Server) handleProviderStopFetch(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleProviderMetrics(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 	metrics, err := s.store.ProviderDomainMetrics(r.Context(), projectID, provider)
 	if err != nil {
@@ -538,6 +571,9 @@ func (s *Server) handleProviderMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleProviderBacklinks(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -561,6 +597,9 @@ func (s *Server) handleBacklinksTop(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "project_id is required")
 		return
 	}
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	if limit <= 0 {
@@ -579,6 +618,9 @@ func (s *Server) handleBacklinksTop(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleProviderRefDomains(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -596,6 +638,9 @@ func (s *Server) handleProviderRefDomains(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleProviderRankings(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -613,6 +658,9 @@ func (s *Server) handleProviderRankings(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleProviderVisibility(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 	rows, err := s.store.ProviderVisibilityHistory(r.Context(), projectID, provider)
 	if err != nil {
@@ -624,6 +672,9 @@ func (s *Server) handleProviderVisibility(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleProviderTopPages(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -641,6 +692,9 @@ func (s *Server) handleProviderTopPages(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleProviderAPICalls(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -658,6 +712,9 @@ func (s *Server) handleProviderAPICalls(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleProviderData(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	provider := r.PathValue("provider")
 	dataType := r.PathValue("dataType")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -684,6 +741,9 @@ func (s *Server) handleSessionAuthority(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !s.requireSessionAccess(w, r, sessionID) {
+		return
+	}
+	if !requireProjectAccess(w, r, projectID) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))

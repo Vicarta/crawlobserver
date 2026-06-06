@@ -129,6 +129,46 @@ async function fetchJSON(path, options = {}) {
   return JSON.parse(text);
 }
 
+export async function login(username, password) {
+  return fetchJSON('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export async function logout() {
+  return fetchJSON('/auth/logout', { method: 'POST' });
+}
+
+export async function getCurrentUser() {
+  return fetchJSON('/auth/me');
+}
+
+export async function getUsers() {
+  return fetchJSON('/users');
+}
+
+export async function createUser(user) {
+  return fetchJSON('/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(user),
+  });
+}
+
+export async function updateUser(id, user) {
+  return fetchJSON(`/users/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(user),
+  });
+}
+
+export async function deleteUser(id) {
+  return fetchJSON(`/users/${id}`, { method: 'DELETE' });
+}
+
 /** @returns {Promise<Session[]>} */
 export async function getSessions() {
   return fetchJSON('/sessions');
@@ -385,6 +425,19 @@ export async function retryFailed(sessionId, statusCode = 0, options = null) {
     opts.body = JSON.stringify(options);
   }
   return fetchJSON(`/sessions/${sessionId}/retry-failed${qs}`, opts);
+}
+
+/**
+ * @param {string} sessionId
+ * @param {string[]} urls
+ * @returns {Promise<Object>}
+ */
+export async function rescanPages(sessionId, urls) {
+  return fetchJSON(`/sessions/${sessionId}/rescan-pages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ urls }),
+  });
 }
 
 /**

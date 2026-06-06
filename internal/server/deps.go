@@ -214,6 +214,7 @@ type CrawlService interface {
 	StopCrawl(sessionID string) error
 	ResumeCrawl(sessionID string, overrides *crawler.CrawlRequest) (string, error)
 	RetryFailed(sessionID string, overrides *crawler.CrawlRequest) (int, error)
+	RescanPages(sessionID string, urls []string) (int, error)
 	QueuedSessions() []string
 	Shutdown(timeout time.Duration)
 	RecoverOrphanedSessions(ctx context.Context)

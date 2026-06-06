@@ -16,9 +16,15 @@ import (
 )
 
 func (s *Server) handleGSCAuthorize(w http.ResponseWriter, r *http.Request) {
+	if !requireFullAccess(w, r) {
+		return
+	}
 	projectID := r.URL.Query().Get("project_id")
 	if projectID == "" {
 		writeError(w, http.StatusBadRequest, "project_id required")
+		return
+	}
+	if !requireProjectAccess(w, r, projectID) {
 		return
 	}
 	if s.cfg.GSC.ClientID == "" || s.cfg.GSC.ClientSecret == "" {
@@ -64,6 +70,9 @@ func (s *Server) handleGSCCallback(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGSCStatus(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 
 	conn, err := s.keyStore.GetGSCConnection(projectID)
 	if err != nil {
@@ -116,7 +125,13 @@ func (s *Server) handleGSCStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGSCFetch(w http.ResponseWriter, r *http.Request) {
+	if !requireFullAccess(w, r) {
+		return
+	}
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 
 	// Parse optional property_url from body (for initial property selection)
 	var body struct {
@@ -234,7 +249,13 @@ func (s *Server) handleGSCFetch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGSCStopFetch(w http.ResponseWriter, r *http.Request) {
+	if !requireFullAccess(w, r) {
+		return
+	}
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	s.gscFetchMu.Lock()
 	if fs, ok := s.gscFetchStatus[projectID]; ok && fs.cancel != nil {
 		fs.cancel()
@@ -246,7 +267,13 @@ func (s *Server) handleGSCStopFetch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGSCDisconnect(w http.ResponseWriter, r *http.Request) {
+	if !requireFullAccess(w, r) {
+		return
+	}
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	s.keyStore.DeleteGSCConnection(projectID)
 	s.store.DeleteGSCData(r.Context(), projectID)
 	writeJSON(w, map[string]string{"status": "disconnected"})
@@ -254,6 +281,9 @@ func (s *Server) handleGSCDisconnect(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGSCOverview(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	stats, err := s.store.GSCOverview(r.Context(), projectID)
 	if err != nil {
 		internalError(w, r, err)
@@ -264,6 +294,9 @@ func (s *Server) handleGSCOverview(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGSCQueries(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	if limit <= 0 {
@@ -280,6 +313,9 @@ func (s *Server) handleGSCQueries(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGSCPages(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	if limit <= 0 {
@@ -296,6 +332,9 @@ func (s *Server) handleGSCPages(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGSCCountries(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	rows, err := s.store.GSCByCountry(r.Context(), projectID)
 	if err != nil {
 		internalError(w, r, err)
@@ -306,6 +345,9 @@ func (s *Server) handleGSCCountries(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGSCDevices(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	rows, err := s.store.GSCByDevice(r.Context(), projectID)
 	if err != nil {
 		internalError(w, r, err)
@@ -316,6 +358,9 @@ func (s *Server) handleGSCDevices(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGSCTimeline(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	rows, err := s.store.GSCTimeline(r.Context(), projectID)
 	if err != nil {
 		internalError(w, r, err)
@@ -326,6 +371,9 @@ func (s *Server) handleGSCTimeline(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGSCInspection(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	if limit <= 0 {

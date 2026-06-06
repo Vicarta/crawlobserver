@@ -15,6 +15,7 @@
     ondelete,
     onnewcrawl,
     onrefresh,
+    isAdmin = false,
   } = $props();
 
   let importing = $state(false);
@@ -87,41 +88,43 @@
 <div class="page-header">
   <h1>{t('sessions.title')}</h1>
   <div class="flex-center-gap">
-    <label class="btn btn-sm import-label">
-      <svg
-        viewBox="0 0 24 24"
-        width="14"
-        height="14"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        ><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline
-          points="17 8 12 3 7 8"
-        /><line x1="12" y1="3" x2="12" y2="15" /></svg
-      >
-      {importing ? t('common.importing') : t('common.import')}
-      <input
-        type="file"
-        accept=".gz,.jsonl.gz,.csv"
-        onchange={handleImport}
-        disabled={importing}
-        class="sr-only-input"
-      />
-    </label>
-    <button class="btn btn-primary" onclick={() => onnewcrawl?.()}>
-      <svg
-        viewBox="0 0 24 24"
-        width="16"
-        height="16"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        ><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg
-      >
-      {t('sessions.newCrawl')}
-    </button>
+    {#if isAdmin}
+      <label class="btn btn-sm import-label">
+        <svg
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          ><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline
+            points="17 8 12 3 7 8"
+          /><line x1="12" y1="3" x2="12" y2="15" /></svg
+        >
+        {importing ? t('common.importing') : t('common.import')}
+        <input
+          type="file"
+          accept=".gz,.jsonl.gz,.csv"
+          onchange={handleImport}
+          disabled={importing}
+          class="sr-only-input"
+        />
+      </label>
+      <button class="btn btn-primary" onclick={() => onnewcrawl?.()}>
+        <svg
+          viewBox="0 0 24 24"
+          width="16"
+          height="16"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          ><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg
+        >
+        {t('sessions.newCrawl')}
+      </button>
+    {/if}
   </div>
 </div>
 
@@ -135,13 +138,15 @@
   <div class="empty-state">
     <h2>{t('sessions.noSessions')}</h2>
     <p>{t('sessions.noSessionsDesc')}</p>
-    <button class="btn btn-primary mt-md" onclick={() => onnewcrawl?.()}
-      >{t('sessions.startCrawl')}</button
-    >
+    {#if isAdmin}
+      <button class="btn btn-primary mt-md" onclick={() => onnewcrawl?.()}
+        >{t('sessions.startCrawl')}</button
+      >
+    {/if}
   </div>
 {:else}
   <!-- Bulk action bar -->
-  {#if selectedIds.size > 0}
+  {#if isAdmin && selectedIds.size > 0}
     <div class="bulk-bar">
       <span class="bulk-count">{t('session.bulkSelected', { count: selectedIds.size })}</span>
       <div class="bulk-assign-wrapper">
@@ -181,13 +186,15 @@
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="session-row" onclick={() => onselectsession?.(s)}>
-        <label class="session-checkbox" onclick={(e) => e.stopPropagation()}>
+        {#if isAdmin}
           <input
+            class="session-checkbox"
             type="checkbox"
             checked={selectedIds.has(s.ID)}
+            aria-label="Select session"
             onclick={(e) => toggleSelect(s.ID, e)}
           />
-        </label>
+        {/if}
         <div class="session-info">
           <div class="session-seed">
             {s.SeedURLs?.[0] || 'Unknown'}
@@ -244,34 +251,36 @@
           </div>
         </div>
         <div class="session-actions" onclick={(e) => e.stopPropagation()}>
-          {#if s.Status === 'stopping'}
-            <!-- no actions while stopping -->
-          {:else if isRunning || isQueued}
-            <button class="btn btn-sm btn-danger" onclick={() => onstop?.(s.ID)}
-              >{t('common.stop')}</button
-            >
-          {:else}
-            <button class="btn btn-sm" onclick={() => onresume?.(s.ID)}
-              >{t('sessions.resume')}</button
-            >
-            <button
-              class="btn-ghost btn-delete-icon"
-              onclick={() => ondelete?.(s.ID)}
-              title={t('common.delete')}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                class="icon-trash"
-                ><polyline points="3 6 5 6 21 6" /><path
-                  d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
-                /></svg
+          {#if isAdmin}
+            {#if s.Status === 'stopping'}
+              <!-- no actions while stopping -->
+            {:else if isRunning || isQueued}
+              <button class="btn btn-sm btn-danger" onclick={() => onstop?.(s.ID)}
+                >{t('common.stop')}</button
               >
-            </button>
+            {:else}
+              <button class="btn btn-sm" onclick={() => onresume?.(s.ID)}
+                >{t('sessions.resume')}</button
+              >
+              <button
+                class="btn-ghost btn-delete-icon"
+                onclick={() => ondelete?.(s.ID)}
+                title={t('common.delete')}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  class="icon-trash"
+                  ><polyline points="3 6 5 6 21 6" /><path
+                    d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
+                  /></svg
+                >
+              </button>
+            {/if}
           {/if}
         </div>
       </div>
@@ -330,12 +339,7 @@
   }
 
   .session-checkbox {
-    display: flex;
-    align-items: center;
     flex-shrink: 0;
-    cursor: pointer;
-  }
-  .session-checkbox input {
     cursor: pointer;
   }
   .session-label {

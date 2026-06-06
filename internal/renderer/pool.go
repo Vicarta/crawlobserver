@@ -1,6 +1,7 @@
 package renderer
 
 import (
+	"os"
 	"sync"
 	"time"
 
@@ -46,7 +47,13 @@ func NewPool(opts PoolOptions) (*Pool, error) {
 		opts.PageTimeout = 15 * time.Second
 	}
 
-	l := launcher.New().Headless(opts.Headless)
+	l := launcher.New().
+		Headless(opts.Headless).
+		Set("no-sandbox").
+		Set("disable-dev-shm-usage")
+	if chromeBin := os.Getenv("CRAWLOBSERVER_CHROME_BIN"); chromeBin != "" {
+		l = l.Bin(chromeBin)
+	}
 	controlURL, err := l.Launch()
 	if err != nil {
 		return nil, err

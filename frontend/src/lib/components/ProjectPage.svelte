@@ -34,9 +34,11 @@
     onprojectrenamed,
     onprojectdeleted,
     onpushurl,
+    currentUser,
   } = $props();
 
   // --- Local state ---
+  let isAdmin = $derived(currentUser?.role === 'admin');
   let projectTab = $state(initialProjectTab);
   let projSessions = $state([]);
   let projSessionsTotal = $state(0);
@@ -68,6 +70,7 @@
   }
 
   function switchProjectTab(tab) {
+    if (!isAdmin && tab === 'providers') return;
     projectTab = tab;
     // Use "providers" in URL for any provider tab
     const urlTab = tab.startsWith('provider:') ? 'providers' : tab;
@@ -76,11 +79,13 @@
 
   // --- Rename ---
   function startRenameProject() {
+    if (!isAdmin) return;
     renamingProject = true;
     renameValue = project?.name || '';
   }
 
   async function confirmRenameProject() {
+    if (!isAdmin) return;
     const name = renameValue.trim();
     if (name && name !== project?.name) {
       try {
@@ -99,6 +104,7 @@
 
   // --- Delete ---
   function handleDeleteProject() {
+    if (!isAdmin) return;
     showConfirm(
       t('project.deleteProject') + ` "${project?.name}"?`,
       async () => {
@@ -114,6 +120,7 @@
   }
 
   function handleDeleteProjectWithSessions() {
+    if (!isAdmin) return;
     showConfirm(
       t('project.deleteProjectWithSessions') + ` "${project?.name}"?`,
       async () => {
@@ -197,22 +204,24 @@
   {:else}
     <button
       class="inline-btn breadcrumb-active"
-      ondblclick={startRenameProject}
-      title={t('project.doubleClickRename')}>{project.name}</button
+      ondblclick={isAdmin ? startRenameProject : undefined}
+      title={isAdmin ? t('project.doubleClickRename') : undefined}>{project.name}</button
     >
   {/if}
-  <button class="btn btn-primary btn-sm project-new-crawl" onclick={() => onnewcrawl?.()}>
-    <svg
-      viewBox="0 0 24 24"
-      width="16"
-      height="16"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      ><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg
-    >
-    {t('sessions.newCrawl')}
-  </button>
+  {#if isAdmin}
+    <button class="btn btn-primary btn-sm project-new-crawl" onclick={() => onnewcrawl?.()}>
+      <svg
+        viewBox="0 0 24 24"
+        width="16"
+        height="16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        ><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg
+      >
+      {t('sessions.newCrawl')}
+    </button>
+  {/if}
 </div>
 
 <div class="tab-bar">
@@ -239,7 +248,7 @@
         />{/if}{meta?.label || conn.provider} Data</button
     >
   {/each}
-  {#if providerConnections.length === 0}
+  {#if isAdmin && providerConnections.length === 0}
     <button
       class="tab"
       class:tab-active={projectTab === 'providers'}
@@ -279,36 +288,38 @@
               <td>{fmtN(s.PagesCrawled || 0)}</td>
               <td class="nowrap text-muted text-sm">{s.StartedAt ? timeAgo(s.StartedAt) : '-'}</td>
               <td onclick={(e) => e.stopPropagation()}>
-                <button
-                  class="btn-ghost btn-unlink"
-                  title={t('session.disassociate')}
-                  onclick={() =>
-                    showConfirm(t('session.disassociateConfirm'), async () => {
-                      try {
-                        await disassociateSession(project.id, s.ID);
-                        loadProjectSessions();
-                      } catch (e) {
-                        onerror?.(e.message);
-                      }
-                    })}
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    width="14"
-                    height="14"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    ><line x1="18" y1="6" x2="6" y2="18" /><line
-                      x1="6"
-                      y1="6"
-                      x2="18"
-                      y2="18"
-                    /></svg
+                {#if isAdmin}
+                  <button
+                    class="btn-ghost btn-unlink"
+                    title={t('session.disassociate')}
+                    onclick={() =>
+                      showConfirm(t('session.disassociateConfirm'), async () => {
+                        try {
+                          await disassociateSession(project.id, s.ID);
+                          loadProjectSessions();
+                        } catch (e) {
+                          onerror?.(e.message);
+                        }
+                      })}
                   >
-                </button>
+                    <svg
+                      viewBox="0 0 24 24"
+                      width="14"
+                      height="14"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      ><line x1="18" y1="6" x2="6" y2="18" /><line
+                        x1="6"
+                        y1="6"
+                        x2="18"
+                        y2="18"
+                      /></svg
+                    >
+                  </button>
+                {/if}
               </td>
             </tr>
           {/each}
@@ -346,18 +357,20 @@
     {:else}
       <div class="empty-state">
         <p>{t('project.noSessions')}</p>
-        <button class="btn btn-primary mt-md" onclick={() => onnewcrawl?.()}>
-          <svg
-            viewBox="0 0 24 24"
-            width="16"
-            height="16"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            ><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg
-          >
-          {t('sessions.newCrawl')}
-        </button>
+        {#if isAdmin}
+          <button class="btn btn-primary mt-md" onclick={() => onnewcrawl?.()}>
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              ><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg
+            >
+            {t('sessions.newCrawl')}
+          </button>
+        {/if}
       </div>
     {/if}
   {:else if projectTab === 'gsc'}
@@ -366,6 +379,7 @@
       initialSubView={gscSubView}
       onerror={(msg) => onerror?.(msg)}
       onpushurl={(u) => onpushurl?.(u)}
+      {isAdmin}
     />
   {:else if projectTab.startsWith('provider:')}
     <ProvidersTab
@@ -374,18 +388,20 @@
       initialSubView={providerSubView}
       onerror={(msg) => onerror?.(msg)}
       onpushurl={(u) => onpushurl?.(u)}
+      {isAdmin}
     />
-  {:else if projectTab === 'providers'}
+  {:else if projectTab === 'providers' && isAdmin}
     <ProvidersTab
       projectId={project.id}
       initialSubView={providerSubView}
       onerror={(msg) => onerror?.(msg)}
       onpushurl={(u) => onpushurl?.(u)}
+      {isAdmin}
     />
   {/if}
 </div>
 
-{#if projectTab === 'sessions'}
+{#if isAdmin && projectTab === 'sessions'}
   <details class="danger-zone">
     <summary>{t('project.dangerZone')}</summary>
     <div class="danger-zone-item">

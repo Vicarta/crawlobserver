@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +25,7 @@ const (
 	defaultResourceWorkers = 3
 	maxLastErrors          = 1000
 	defaultMaxPages        = 100000
+	maxRescanURLs          = 200
 )
 
 func applySavedCrawlerConfig(cfg *config.Config, saved config.CrawlerConfig) {
@@ -615,6 +618,158 @@ func (m *Manager) RetryFailed(sessionID string, overrides *CrawlRequest) (int, e
 	}
 
 	return deleted, nil
+}
+
+// RescanPages refetches explicit URLs inside an existing session without recomputing depth or PageRank.
+func (m *Manager) RescanPages(sessionID string, urls []string) (int, error) {
+	uniqueURLs, err := validateRescanURLs(urls)
+	if err != nil {
+		return 0, err
+	}
+
+	m.mu.RLock()
+	_, running := m.engines[sessionID]
+	m.mu.RUnlock()
+	if running {
+		return 0, fmt.Errorf("session %s is already running", sessionID)
+	}
+	if m.IsQueued(sessionID) {
+		return 0, fmt.Errorf("session %s is queued", sessionID)
+	}
+
+	originalSession, err := m.store.GetSession(context.Background(), sessionID)
+	if err != nil {
+		return 0, fmt.Errorf("fetching original session: %w", err)
+	}
+
+	rescanMeta := make(map[string]rescanPageMeta, len(uniqueURLs))
+	artifactURLs := append([]string(nil), uniqueURLs...)
+	for _, u := range uniqueURLs {
+		page, err := m.store.GetPage(context.Background(), sessionID, u)
+		if err != nil {
+			return 0, fmt.Errorf("page %q not found in session: %w", u, err)
+		}
+		rescanMeta[u] = rescanPageMeta{
+			Depth:    page.Depth,
+			FoundOn:  page.FoundOn,
+			PageRank: page.PageRank,
+		}
+		if page.FinalURL != "" && page.FinalURL != page.URL {
+			artifactURLs = append(artifactURLs, page.FinalURL)
+			if finalPage, err := m.store.GetPage(context.Background(), sessionID, page.FinalURL); err == nil {
+				rescanMeta[page.FinalURL] = rescanPageMeta{
+					Depth:    finalPage.Depth,
+					FoundOn:  finalPage.FoundOn,
+					PageRank: finalPage.PageRank,
+				}
+			}
+		}
+	}
+
+	cfg := *m.cfg
+	if originalSession.Config != "" {
+		var savedCfg config.Config
+		if err := json.Unmarshal([]byte(originalSession.Config), &savedCfg); err == nil {
+			applySavedCrawlerConfig(&cfg, savedCfg.Crawler)
+		}
+	}
+	cfg.Crawler.MaxPages = len(uniqueURLs)
+	if cfg.Crawler.Workers <= 0 || cfg.Crawler.Workers > len(uniqueURLs) {
+		cfg.Crawler.Workers = len(uniqueURLs)
+	}
+
+	engine := NewEngine(&cfg, m.store)
+	engine.ResumeSession(sessionID, originalSession.SeedURLs)
+	engine.session.ProjectID = originalSession.ProjectID
+	engine.rescanOnly = true
+	engine.skipSessionWrites = true
+	engine.rescanMeta = rescanMeta
+	engine.fetchSitemaps = false
+	engine.checkExternal = false
+	engine.checkResources = false
+	engine.excludePatterns = cfg.Crawler.ExcludePatterns
+
+	select {
+	case m.sem <- struct{}{}:
+	default:
+		return 0, fmt.Errorf("crawler is busy; try again when a crawl slot is free")
+	}
+	defer func() {
+		<-m.sem
+		m.promoteNext()
+	}()
+
+	if err := m.store.DeletePageOutgoingArtifacts(context.Background(), sessionID, dedupeRescanArtifactURLs(artifactURLs)); err != nil {
+		return 0, err
+	}
+
+	m.mu.Lock()
+	m.engines[sessionID] = engine
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.engines, sessionID)
+		m.mu.Unlock()
+	}()
+
+	applog.Infof("crawler", "Rescanning %d selected URL(s) for session %s", len(uniqueURLs), sessionID)
+	if err := engine.Run(uniqueURLs); err != nil {
+		m.mu.Lock()
+		if len(m.lastErrors) >= maxLastErrors {
+			for k := range m.lastErrors {
+				delete(m.lastErrors, k)
+				break
+			}
+		}
+		m.lastErrors[sessionID] = err.Error()
+		m.mu.Unlock()
+		return 0, err
+	}
+	m.mu.Lock()
+	delete(m.lastErrors, sessionID)
+	m.mu.Unlock()
+	return len(uniqueURLs), nil
+}
+
+func validateRescanURLs(urls []string) ([]string, error) {
+	seen := make(map[string]bool, len(urls))
+	unique := make([]string, 0, len(urls))
+	for _, raw := range urls {
+		u := strings.TrimSpace(raw)
+		if u == "" || seen[u] {
+			continue
+		}
+		parsed, err := url.Parse(u)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return nil, fmt.Errorf("invalid URL: %q", raw)
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return nil, fmt.Errorf("unsupported URL scheme for %q", raw)
+		}
+		seen[u] = true
+		unique = append(unique, u)
+	}
+	if len(unique) == 0 {
+		return nil, fmt.Errorf("at least one URL is required")
+	}
+	if len(unique) > maxRescanURLs {
+		return nil, fmt.Errorf("too many URLs selected; maximum is %d", maxRescanURLs)
+	}
+	return unique, nil
+}
+
+func dedupeRescanArtifactURLs(urls []string) []string {
+	seen := make(map[string]bool, len(urls))
+	unique := make([]string, 0, len(urls))
+	for _, raw := range urls {
+		u := strings.TrimSpace(raw)
+		if u == "" || seen[u] {
+			continue
+		}
+		seen[u] = true
+		unique = append(unique, u)
+	}
+	return unique
 }
 
 // markSessionCrashed updates a session's status to "crashed" in ClickHouse.

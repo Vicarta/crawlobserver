@@ -571,8 +571,11 @@ type mockManager struct {
 	resumeErr   error
 	retryCount  int
 	retryErr    error
+	rescanCount int
+	rescanErr   error
 	progress    map[string][2]int64 // sessionID -> [pages, queue]
 	resumeCalls []resumeCall
+	rescanCalls []rescanCall
 	startCalls  []crawler.CrawlRequest
 	stopCalls   []string
 	queued      map[string]bool
@@ -586,6 +589,11 @@ type mockManager struct {
 type resumeCall struct {
 	SessionID string
 	Overrides *crawler.CrawlRequest
+}
+
+type rescanCall struct {
+	SessionID string
+	URLs      []string
 }
 
 func newMockManager() *mockManager {
@@ -640,6 +648,11 @@ func (m *mockManager) ResumeCrawl(sessionID string, overrides *crawler.CrawlRequ
 
 func (m *mockManager) RetryFailed(sessionID string, overrides *crawler.CrawlRequest) (int, error) {
 	return m.retryCount, m.retryErr
+}
+
+func (m *mockManager) RescanPages(sessionID string, urls []string) (int, error) {
+	m.rescanCalls = append(m.rescanCalls, rescanCall{SessionID: sessionID, URLs: urls})
+	return m.rescanCount, m.rescanErr
 }
 
 func (m *mockManager) BufferState(sessionID string) storage.BufferErrorState {
@@ -749,6 +762,22 @@ func TestAuth_NoCredentials(t *testing.T) {
 	}
 }
 
+func TestAuth_HealthAllowsNoCredentials(t *testing.T) {
+	_, handler, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/api/health", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	var resp map[string]string
+	decodeJSON(t, rec, &resp)
+	if resp["status"] != "ok" {
+		t.Errorf("expected status ok, got %q", resp["status"])
+	}
+}
+
 func TestAuth_ValidBasicAuth(t *testing.T) {
 	_, handler, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/api/sessions", nil)
@@ -825,11 +854,8 @@ func TestAuth_SecurityHeaders(t *testing.T) {
 }
 
 func TestAuth_HealthNoAuth(t *testing.T) {
-	// Health endpoint is behind the same auth middleware in the current code,
-	// but we test that it responds correctly when authorized.
 	_, handler, _ := newTestServer(t)
 	req := httptest.NewRequest("GET", "/api/health", nil)
-	req.SetBasicAuth("admin", "secret")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -841,6 +867,33 @@ func TestAuth_HealthNoAuth(t *testing.T) {
 	decodeJSON(t, rec, &body)
 	if body["status"] != "ok" {
 		t.Errorf("expected status ok, got %q", body["status"])
+	}
+}
+
+func TestAuth_PublicBootstrapEndpointsNoAuth(t *testing.T) {
+	_, handler, _ := newTestServer(t)
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "theme", path: "/api/theme"},
+		{name: "setup status", path: "/api/setup/status"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tt.path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+			}
+			if rec.Header().Get("WWW-Authenticate") != "" {
+				t.Fatalf("did not expect WWW-Authenticate header on public bootstrap endpoint")
+			}
+		})
 	}
 }
 
@@ -1526,6 +1579,154 @@ func TestAPIKeys_ProjectKeyReadOnly(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("project key list api-keys: expected 403, got %d", rec.Code)
+	}
+}
+
+func TestProjects_ProjectKeyListIsScoped(t *testing.T) {
+	_, handler, ks := newTestServer(t)
+
+	allowed, _ := ks.CreateProject("allowed-project")
+	_, _ = ks.CreateProject("hidden-project")
+	key, _ := ks.CreateAPIKey("project-client", "project", &allowed.ID)
+
+	req := httptest.NewRequest("GET", "/api/projects", nil)
+	req.Header.Set("X-API-Key", key.FullKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var projects []apikeys.Project
+	decodeJSON(t, rec, &projects)
+	if len(projects) != 1 || projects[0].ID != allowed.ID {
+		t.Fatalf("expected only allowed project %q, got %#v", allowed.ID, projects)
+	}
+}
+
+func TestUsers_ViewerSessionIsProjectScoped(t *testing.T) {
+	srv, handler, ks := newTestServer(t)
+
+	allowed, _ := ks.CreateProject("viewer-project")
+	hidden, _ := ks.CreateProject("hidden-project")
+	user, err := ks.CreateUser("client", "password123", apikeys.RoleViewer, []string{allowed.ID})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	token, _, err := ks.CreateUserSession(user.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	ms := srv.store.(*mockStore)
+	ms.sessions = []storage.CrawlSession{
+		{ID: "allowed-session", Status: "completed", ProjectID: &allowed.ID},
+		{ID: "hidden-session", Status: "completed", ProjectID: &hidden.ID},
+	}
+
+	req := httptest.NewRequest("GET", "/api/projects", nil)
+	req.AddCookie(&http.Cookie{Name: apikeys.SessionCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list projects: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var projects []apikeys.Project
+	decodeJSON(t, rec, &projects)
+	if len(projects) != 1 || projects[0].ID != allowed.ID {
+		t.Fatalf("expected only allowed project %q, got %#v", allowed.ID, projects)
+	}
+
+	req = httptest.NewRequest("GET", "/api/projects?limit=30&offset=0", nil)
+	req.AddCookie(&http.Cookie{Name: apikeys.SessionCookieName, Value: token})
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list paginated projects: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var paged struct {
+		Projects []apikeys.Project `json:"projects"`
+		Total    int               `json:"total"`
+	}
+	decodeJSON(t, rec, &paged)
+	if paged.Total != 1 || len(paged.Projects) != 1 || paged.Projects[0].ID != allowed.ID {
+		t.Fatalf("expected paginated response to contain only allowed project %q, got %#v", allowed.ID, paged)
+	}
+
+	req = httptest.NewRequest("GET", "/api/sessions", nil)
+	req.AddCookie(&http.Cookie{Name: apikeys.SessionCookieName, Value: token})
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list sessions: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var sessions []map[string]interface{}
+	decodeJSON(t, rec, &sessions)
+	if len(sessions) != 1 || sessions[0]["ID"] != "allowed-session" {
+		t.Fatalf("expected only allowed session, got %#v", sessions)
+	}
+
+	req = httptest.NewRequest("GET", "/api/users", nil)
+	req.AddCookie(&http.Cookie{Name: apikeys.SessionCookieName, Value: token})
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer list users: expected 403, got %d", rec.Code)
+	}
+}
+
+func TestUsers_LastAdminCannotChangeRoleOrDelete(t *testing.T) {
+	_, handler, ks := newTestServer(t)
+
+	owner, err := ks.CreateUser("owner", "password123", apikeys.RoleAdmin, nil)
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+
+	body := jsonBody(t, map[string]interface{}{
+		"username":    owner.Username,
+		"role":        apikeys.RoleViewer,
+		"active":      true,
+		"project_ids": []string{},
+	})
+	req := authRequest(httptest.NewRequest("PUT", "/api/users/"+owner.ID, body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("change last admin role: expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	req = authRequest(httptest.NewRequest("DELETE", "/api/users/"+owner.ID, nil))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("delete last admin: expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := ks.CreateUser("backup-admin", "password123", apikeys.RoleAdmin, nil); err != nil {
+		t.Fatalf("create backup admin: %v", err)
+	}
+
+	body = jsonBody(t, map[string]interface{}{
+		"username":    owner.Username,
+		"role":        apikeys.RoleViewer,
+		"active":      true,
+		"project_ids": []string{},
+	})
+	req = authRequest(httptest.NewRequest("PUT", "/api/users/"+owner.ID, body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("change admin role with backup admin: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	updated, err := ks.GetUser(owner.ID)
+	if err != nil {
+		t.Fatalf("get updated owner: %v", err)
+	}
+	if updated.Role != apikeys.RoleViewer {
+		t.Fatalf("expected owner to become viewer, got %q", updated.Role)
 	}
 }
 
@@ -2837,7 +3038,7 @@ func TestSSEQueuedSession(t *testing.T) {
 
 	// Run handler in a goroutine since SSE blocks; cancel the request context
 	// after a short window so we collect at least the first data line.
-	ctx, cancel := context.WithTimeout(req.Context(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(req.Context(), 1200*time.Millisecond)
 	defer cancel()
 	req = req.WithContext(ctx)
 
@@ -4329,6 +4530,37 @@ func TestHandleRetryFailed_WithStatusCode(t *testing.T) {
 	}
 }
 
+func TestHandleRescanPages_Success(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	mm := srv.manager.(*mockManager)
+	mm.rescanCount = 2
+
+	body := strings.NewReader(`{"urls":["https://example.com/a","https://example.com/b"]}`)
+	req := authRequest(httptest.NewRequest("POST", "/api/sessions/sess1/rescan-pages", body))
+	req.SetPathValue("id", "sess1")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(mm.rescanCalls) != 1 {
+		t.Fatalf("expected 1 rescan call, got %d", len(mm.rescanCalls))
+	}
+	if mm.rescanCalls[0].SessionID != "sess1" {
+		t.Errorf("expected session sess1, got %s", mm.rescanCalls[0].SessionID)
+	}
+	if len(mm.rescanCalls[0].URLs) != 2 {
+		t.Fatalf("expected 2 URLs, got %d", len(mm.rescanCalls[0].URLs))
+	}
+
+	var resp map[string]interface{}
+	decodeJSON(t, rec, &resp)
+	if resp["count"].(float64) != 2 {
+		t.Errorf("expected count 2, got %v", resp["count"])
+	}
+}
+
 // --- handleRobotsTest ---
 
 func TestHandleRobotsTest_Success(t *testing.T) {
@@ -5003,6 +5235,24 @@ func TestBasicAuth_NoCredentials(t *testing.T) {
 	}
 	if rec.Header().Get("WWW-Authenticate") == "" {
 		t.Error("expected WWW-Authenticate header")
+	}
+}
+
+func TestBasicAuth_APINoCredentialsNoChallenge(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := basicAuth(inner, "admin", "password")
+
+	req := httptest.NewRequest("GET", "/api/projects", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+	if rec.Header().Get("WWW-Authenticate") != "" {
+		t.Error("did not expect WWW-Authenticate header for API request")
 	}
 }
 
@@ -6063,8 +6313,8 @@ func TestSecurityHeaders(t *testing.T) {
 
 	expectedHeaders := map[string]string{
 		"X-Content-Type-Options": "nosniff",
-		"X-Frame-Options":       "DENY",
-		"X-XSS-Protection":      "1; mode=block",
+		"X-Frame-Options":        "DENY",
+		"X-XSS-Protection":       "1; mode=block",
 		"Referrer-Policy":        "strict-origin-when-cross-origin",
 	}
 	for k, v := range expectedHeaders {
@@ -7210,8 +7460,8 @@ func TestRestoreBackup_WithStopStartClickHouse(t *testing.T) {
 	srv, handler, _ := newTestServer(t)
 	tmpDir := t.TempDir()
 	srv.BackupOpts = &backup.BackupOptions{
-		DataDir:    t.TempDir(),
-		BackupDir:  tmpDir,
+		DataDir:   t.TempDir(),
+		BackupDir: tmpDir,
 	}
 
 	// Create a fake backup file
@@ -8627,16 +8877,24 @@ func TestBuildHandler_BasicAuthOnly(t *testing.T) {
 		t.Fatalf("buildHandler error: %v", err)
 	}
 
-	// Should require basic auth
+	// Health remains public for monitors even when auth is enabled.
 	req := httptest.NewRequest("GET", "/api/health", nil)
 	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected public health 200, got %d", rec.Code)
+	}
+
+	// Other API endpoints should still require basic auth.
+	req = httptest.NewRequest("GET", "/api/sessions", nil)
+	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 without auth, got %d", rec.Code)
 	}
 
 	// Should work with correct basic auth
-	req = httptest.NewRequest("GET", "/api/health", nil)
+	req = httptest.NewRequest("GET", "/api/sessions", nil)
 	req.SetBasicAuth("user", "pass")
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

@@ -259,6 +259,48 @@ func (s *Store) GetPageHTML(ctx context.Context, sessionID, url string) (string,
 	return html, nil
 }
 
+func placeholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.TrimRight(strings.Repeat("?,", n), ",")
+}
+
+// DeletePageOutgoingArtifacts removes per-page outgoing data that will be replaced by a targeted rescan.
+func (s *Store) DeletePageOutgoingArtifacts(ctx context.Context, sessionID string, urls []string) error {
+	if len(urls) == 0 {
+		return nil
+	}
+	if !isValidUUID(sessionID) {
+		return fmt.Errorf("invalid session ID: %s", sessionID)
+	}
+
+	args := make([]interface{}, 0, len(urls)+1)
+	args = append(args, sessionID)
+	for _, u := range urls {
+		args = append(args, u)
+	}
+	inClause := placeholders(len(urls))
+
+	if err := s.conn.Exec(ctx,
+		fmt.Sprintf(`ALTER TABLE crawlobserver.links DELETE
+			WHERE crawl_session_id = ? AND source_url IN (%s)
+			SETTINGS mutations_sync = 1`, inClause),
+		args...,
+	); err != nil {
+		return fmt.Errorf("deleting outgoing links: %w", err)
+	}
+	if err := s.conn.Exec(ctx,
+		fmt.Sprintf(`ALTER TABLE crawlobserver.page_resource_refs DELETE
+			WHERE crawl_session_id = ? AND page_url IN (%s)
+			SETTINGS mutations_sync = 1`, inClause),
+		args...,
+	); err != nil {
+		return fmt.Errorf("deleting page resource refs: %w", err)
+	}
+	return nil
+}
+
 // PageLinksResult holds outbound links, inbound links (paginated), and counts.
 type PageLinksResult struct {
 	OutLinks      []LinkRow `json:"out_links"`
@@ -604,12 +646,12 @@ func (s *Store) ComputePageRank(ctx context.Context, sessionID string) error {
 	defer urlRows.Close()
 
 	type pageInfo struct {
-		url            string
-		finalURL       string
-		statusCode     uint16
-		canonical      string
-		canonicalSelf  bool
-		redirectHops   uint64
+		url           string
+		finalURL      string
+		statusCode    uint16
+		canonical     string
+		canonicalSelf bool
+		redirectHops  uint64
 	}
 
 	var allPages []pageInfo
@@ -905,7 +947,6 @@ func (s *Store) ComputePageRank(ctx context.Context, sessionID string) error {
 
 	// 5. PageRank iteration + normalization
 	rank := ComputePageRankIterations(n, outLinks, totalOutLinks, edgeWeights)
-
 
 	// 7. Write back via temp table + single mutation (avoids 100s of mutations)
 	if !isValidUUID(sessionID) {
@@ -2394,9 +2435,9 @@ type StatusTimelineBucket struct {
 	Redirect   uint64    `json:"redirect"`
 	Status403  uint64    `json:"s403"`
 	Status429  uint64    `json:"s429"`
-	ClientErr  uint64    `json:"client_err"`  // 4xx excluding 403/429
-	ServerErr  uint64    `json:"server_err"`  // 5xx
-	FetchErr   uint64    `json:"fetch_err"`   // status_code = 0
+	ClientErr  uint64    `json:"client_err"` // 4xx excluding 403/429
+	ServerErr  uint64    `json:"server_err"` // 5xx
+	FetchErr   uint64    `json:"fetch_err"`  // status_code = 0
 	Total      uint64    `json:"total"`
 	Retried403 uint64    `json:"retried_403"`
 	Retried429 uint64    `json:"retried_429"`

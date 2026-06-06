@@ -1,11 +1,12 @@
 <script>
   import { onMount } from 'svelte';
-  import { getPages, getRedirectPages, buildApiPath } from '../api.js';
+  import { getPages, getRedirectPages, buildApiPath, rescanPages } from '../api.js';
   import { statusBadge, fmt, fmtSize, fmtN, trunc, fetchAll, downloadCSV } from '../utils.js';
   import { PAGE_SIZE, TAB_FILTERS } from '../tabColumns.js';
   import { t } from '../i18n/index.svelte.js';
   import DataTable from './DataTable.svelte';
   import UrlActions from './UrlActions.svelte';
+  import OverflowText from './OverflowText.svelte';
   import ExportDropdown from './ExportDropdown.svelte';
   import NearDuplicatesTab from './NearDuplicatesTab.svelte';
   import HreflangValidationTab from './HreflangValidationTab.svelte';
@@ -63,6 +64,9 @@
   let redirectPages = $state([]);
   let redirectPagesOffset = $state(0);
   let hasMoreRedirectPages = $state(false);
+  let selectedURLs = $state({});
+  let rescanning = $state(false);
+  let selectedList = $derived(Object.keys(selectedURLs).filter((u) => selectedURLs[u]));
 
   function basePath() {
     return `/sessions/${sessionId}/pages`;
@@ -122,6 +126,7 @@
     redirectPagesOffset = 0;
     sortColumn = '';
     sortOrder = '';
+    selectedURLs = {};
     pushFilters(sv, {}, 0);
     if (!DELEGATED_VIEWS.has(sv)) {
       loadData();
@@ -166,6 +171,7 @@
   function clearFilters() {
     filters = {};
     pagesOffset = 0;
+    selectedURLs = {};
     pushFilters(null, {}, 0);
     loadData();
   }
@@ -294,6 +300,33 @@
     onnavigate?.(urlDetailHref(url));
   }
 
+  function toggleSelected(url, checked) {
+    selectedURLs = { ...selectedURLs, [url]: checked };
+  }
+
+  function clearSelection() {
+    selectedURLs = {};
+  }
+
+  async function handleRescanSelected() {
+    if (rescanning || selectedList.length === 0) return;
+    const ok = window.confirm(
+      `Rescan ${selectedList.length} selected page(s)?\n\nThis will refetch the exact selected URLs and update their page data. Internal PageRank and depth will not be recomputed.`,
+    );
+    if (!ok) return;
+
+    rescanning = true;
+    try {
+      await rescanPages(sessionId, selectedList);
+      clearSelection();
+      await loadData();
+    } catch (e) {
+      onerror?.(e.message);
+    } finally {
+      rescanning = false;
+    }
+  }
+
   let apiPath = $derived.by(() => {
     const endpoint =
       subView === 'redirects'
@@ -332,21 +365,32 @@
   </div>
 
   {#if subView === 'all'}
+    {#if selectedList.length > 0}
+      <div class="bulk-action-bar">
+        <span>{selectedList.length} selected</span>
+        <button class="btn btn-sm btn-primary" onclick={handleRescanSelected} disabled={rescanning}>
+          {rescanning ? 'Rescanning...' : 'Rescan selected'}
+        </button>
+        <button class="btn btn-sm" onclick={clearSelection} disabled={rescanning}>Clear</button>
+      </div>
+    {/if}
     <DataTable
+      tableId="pages-all"
       columns={[
-        { label: t('session.url'), sortKey: 'url' },
-        { label: t('session.status'), sortKey: 'status_code' },
-        { label: t('session.title'), sortKey: 'title' },
-        { label: t('session.words'), sortKey: 'word_count' },
-        { label: t('session.intOut'), sortKey: 'internal_links_out' },
-        { label: t('session.extOut'), sortKey: 'external_links_out' },
-        { label: t('common.size'), sortKey: 'body_size' },
-        { label: t('session.time'), sortKey: 'fetch_duration_ms' },
-        { label: t('session.depth'), sortKey: 'depth' },
-        { label: t('session.pr'), sortKey: 'pagerank' },
-        { label: '' },
+        { label: '', defaultWidth: 42, minWidth: 42, resizable: false, class: 'select-col' },
+        { label: t('session.url'), sortKey: 'url', defaultWidth: 380, minWidth: 180 },
+        { label: t('session.status'), sortKey: 'status_code', defaultWidth: 92, minWidth: 76 },
+        { label: t('session.title'), sortKey: 'title', defaultWidth: 300, minWidth: 160 },
+        { label: t('session.words'), sortKey: 'word_count', defaultWidth: 92, minWidth: 74 },
+        { label: t('session.intOut'), sortKey: 'internal_links_out', defaultWidth: 108, minWidth: 84 },
+        { label: t('session.extOut'), sortKey: 'external_links_out', defaultWidth: 108, minWidth: 84 },
+        { label: t('common.size'), sortKey: 'body_size', defaultWidth: 92, minWidth: 74 },
+        { label: t('session.time'), sortKey: 'fetch_duration_ms', defaultWidth: 92, minWidth: 74 },
+        { label: t('session.depth'), sortKey: 'depth', defaultWidth: 80, minWidth: 64 },
+        { label: t('session.pr'), sortKey: 'pagerank', defaultWidth: 82, minWidth: 64 },
+        { label: '', defaultWidth: 52, minWidth: 44, resizable: false },
       ]}
-      filterKeys={TAB_FILTERS.overview}
+      filterKeys={[null, ...TAB_FILTERS.overview]}
       {filters}
       data={pages}
       offset={pagesOffset}
@@ -364,14 +408,27 @@
     >
       {#snippet row(p)}
         <tr>
+          <td class="cell-select">
+            <input
+              type="checkbox"
+              checked={!!selectedURLs[p.URL]}
+              aria-label="Select {p.URL}"
+              onchange={(e) => toggleSelected(p.URL, e.target.checked)}
+              onclick={(e) => e.stopPropagation()}
+            />
+          </td>
           <td class="cell-url"
             ><span class="cell-url-inner"
-              ><a href={urlDetailHref(p.URL)} onclick={(e) => goToUrlDetail(e, p.URL)}>{p.URL}</a
+              ><OverflowText
+                text={p.URL}
+                href={urlDetailHref(p.URL)}
+                onclick={(e) => goToUrlDetail(e, p.URL)}
+              />
               ><UrlActions url={p.URL} /></span
             ></td
           >
           <td><span class="badge {statusBadge(p.StatusCode)}">{p.StatusCode}</span></td>
-          <td class="cell-title">{trunc(p.Title, 60)}</td>
+          <td class="cell-title"><OverflowText text={p.Title || '-'} /></td>
           <td>{fmtN(p.WordCount)}</td>
           <td>{fmtN(p.InternalLinksOut)}</td>
           <td>{fmtN(p.ExternalLinksOut)}</td>
@@ -731,5 +788,31 @@
     background: var(--border);
     align-self: stretch;
     margin: 4px 4px;
+  }
+
+  .bulk-action-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 44px;
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-card);
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+
+  .cell-select {
+    text-align: center;
+    padding-left: 10px;
+    padding-right: 8px;
+  }
+
+  .cell-select input {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent);
   }
 </style>

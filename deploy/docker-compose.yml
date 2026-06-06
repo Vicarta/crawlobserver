@@ -1,0 +1,72 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${CRAWLOBSERVER_VERSION:-docker}
+    image: crawlobserver:${CRAWLOBSERVER_VERSION:-local}
+    container_name: crawlobserver-app
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    command: ["serve", "--config", "/etc/crawlobserver/config.yaml"]
+    user: "${APP_UID:-1005}:${APP_GID:-1005}"
+    environment:
+      HOME: /var/lib/crawlobserver
+    ports:
+      - "127.0.0.1:${CRAWLOBSERVER_HOST_PORT:-8899}:8899"
+    volumes:
+      - ./config.yaml:/etc/crawlobserver/config.yaml:ro
+      - ./state:/var/lib/crawlobserver
+      - ./backups:/var/backups/crawlobserver
+    networks:
+      - internal
+
+  migrate:
+    image: crawlobserver:${CRAWLOBSERVER_VERSION:-local}
+    profiles: ["tools"]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    command: ["migrate", "--config", "/etc/crawlobserver/config.yaml"]
+    user: "${APP_UID:-1005}:${APP_GID:-1005}"
+    environment:
+      HOME: /var/lib/crawlobserver
+    volumes:
+      - ./config.yaml:/etc/crawlobserver/config.yaml:ro
+      - ./state:/var/lib/crawlobserver
+    networks:
+      - internal
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION:-25.5}
+    container_name: crawlobserver-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/.env}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user \"$${CLICKHOUSE_USER}\" --password \"$${CLICKHOUSE_PASSWORD}\" --query 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - internal
+
+volumes:
+  clickhouse_data:
+  clickhouse_logs:
+
+networks:
+  internal:
+    driver: bridge

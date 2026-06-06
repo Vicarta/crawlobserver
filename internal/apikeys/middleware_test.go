@@ -102,8 +102,27 @@ func TestAuthenticateNoCredentials(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", rec.Code)
 	}
+	if rec.Header().Get("WWW-Authenticate") != "" {
+		t.Fatal("did not expect WWW-Authenticate header for API request")
+	}
+}
+
+func TestAuthenticateNoCredentialsHTMLChallenge(t *testing.T) {
+	s := newTestStore(t)
+
+	handler := Authenticate(s, "admin", "secret")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/protected", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
 	if rec.Header().Get("WWW-Authenticate") == "" {
-		t.Fatal("expected WWW-Authenticate header")
+		t.Fatal("expected WWW-Authenticate header for non-API request")
 	}
 }
 

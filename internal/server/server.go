@@ -202,13 +202,17 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("GET /api/compare/stats", s.handleCompareStats)
 	mux.HandleFunc("GET /api/compare/pages", s.handleComparePages)
 	mux.HandleFunc("GET /api/compare/links", s.handleCompareLinks)
+	mux.HandleFunc("GET /api/auth/me", s.handleAuthMe)
 
 	// API routes - write
+	mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
+	mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
 	mux.HandleFunc("PUT /api/theme", s.handleUpdateTheme)
 	mux.HandleFunc("POST /api/check-ip", s.handleCheckIP)
 	mux.HandleFunc("POST /api/crawl", s.handleStartCrawl)
 	mux.HandleFunc("POST /api/sessions/{id}/stop", s.handleStopCrawl)
 	mux.HandleFunc("POST /api/sessions/{id}/resume", s.handleResumeCrawl)
+	mux.HandleFunc("POST /api/sessions/{id}/rescan-pages", s.handleRescanPages)
 	mux.HandleFunc("POST /api/sessions/{id}/recompute-depths", s.handleRecomputeDepths)
 	mux.HandleFunc("POST /api/sessions/{id}/compute-pagerank", s.handleComputePageRank)
 	mux.HandleFunc("POST /api/sessions/{id}/compute-near-duplicates", s.handleComputeNearDuplicates)
@@ -254,6 +258,10 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("GET /api/api-keys", s.handleListAPIKeys)
 	mux.HandleFunc("POST /api/api-keys", s.handleCreateAPIKey)
 	mux.HandleFunc("DELETE /api/api-keys/{id}", s.handleDeleteAPIKey)
+	mux.HandleFunc("GET /api/users", s.handleListUsers)
+	mux.HandleFunc("POST /api/users", s.handleCreateUser)
+	mux.HandleFunc("PUT /api/users/{id}", s.handleUpdateUser)
+	mux.HandleFunc("DELETE /api/users/{id}", s.handleDeleteUser)
 
 	// GSC (Google Search Console) routes
 	mux.HandleFunc("GET /api/gsc/authorize", s.handleGSCAuthorize)
@@ -364,10 +372,10 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	var handler http.Handler = mux
 	switch {
 	case s.keyStore != nil && s.cfg.Server.Username != "" && s.cfg.Server.Password != "":
-		handler = apikeys.Authenticate(s.keyStore, s.cfg.Server.Username, s.cfg.Server.Password)(mux)
+		handler = allowPublicPaths(apikeys.Authenticate(s.keyStore, s.cfg.Server.Username, s.cfg.Server.Password)(mux), mux)
 		applog.Infof("server", "Authentication enabled (API keys + basic auth) — user: %s, password in config.yaml", s.cfg.Server.Username)
 	case s.cfg.Server.Username != "" && s.cfg.Server.Password != "":
-		handler = basicAuth(mux, s.cfg.Server.Username, s.cfg.Server.Password)
+		handler = allowPublicPaths(basicAuth(mux, s.cfg.Server.Username, s.cfg.Server.Password), mux)
 		applog.Infof("server", "Basic authentication enabled — user: %s, password in config.yaml", s.cfg.Server.Username)
 	default:
 		if s.cfg.Server.Host == "0.0.0.0" || (s.cfg.Server.Host != "127.0.0.1" && s.cfg.Server.Host != "localhost") {
@@ -385,6 +393,35 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	handler = s.requireReady(handler)
 	handler = s.securityHeaders(handler)
 	return handler, nil
+}
+
+func allowPublicPaths(authenticated http.Handler, mux http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPublicPath(r) {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		authenticated.ServeHTTP(w, r)
+	})
+}
+
+func isPublicPath(r *http.Request) bool {
+	if r.Method == http.MethodGet && r.URL.Path == "/api/health" {
+		return true
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/api/theme" {
+		return true
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/api/setup/status" {
+		return true
+	}
+	if r.URL.Path == "/api/auth/login" && r.Method == http.MethodPost {
+		return true
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		return false
+	}
+	return r.Method == http.MethodGet || r.Method == http.MethodHead
 }
 
 const banner = `
@@ -480,7 +517,6 @@ func (s *Server) Start() error {
 
 	return s.server.ListenAndServe()
 }
-
 
 // Stop gracefully shuts down the server.
 func (s *Server) Stop(ctx context.Context) error {
@@ -765,20 +801,38 @@ func (s *Server) handleUpdateSessionRecording(w http.ResponseWriter, r *http.Req
 
 // --- Auth helpers ---
 
-// requireFullAccess returns 403 if the caller is a project-scoped key.
+// requireFullAccess returns 403 if the caller has read-only scoped credentials.
 func requireFullAccess(w http.ResponseWriter, r *http.Request) bool {
 	auth := apikeys.FromContext(r.Context())
 	if auth != nil && auth.IsReadOnly() {
-		writeError(w, http.StatusForbidden, "project API keys do not have access to this endpoint")
+		writeError(w, http.StatusForbidden, "read-only credentials do not have access to this endpoint")
 		return false
 	}
 	return true
 }
 
+func requireAdminAccess(w http.ResponseWriter, r *http.Request) bool {
+	auth := apikeys.FromContext(r.Context())
+	if auth != nil && !auth.IsAdmin() {
+		writeError(w, http.StatusForbidden, "admin access required")
+		return false
+	}
+	return true
+}
+
+func requireProjectAccess(w http.ResponseWriter, r *http.Request, projectID string) bool {
+	auth := apikeys.FromContext(r.Context())
+	if auth == nil || auth.HasProjectAccess(projectID) {
+		return true
+	}
+	writeError(w, http.StatusForbidden, "project not accessible")
+	return false
+}
+
 // requireSessionAccess checks that a project key can access the given session.
 func (s *Server) requireSessionAccess(w http.ResponseWriter, r *http.Request, sessionID string) bool {
 	auth := apikeys.FromContext(r.Context())
-	if auth == nil || auth.ProjectID == nil {
+	if auth == nil || auth.IsAdmin() {
 		return true
 	}
 	sess, err := s.store.GetSession(r.Context(), sessionID)
@@ -786,7 +840,7 @@ func (s *Server) requireSessionAccess(w http.ResponseWriter, r *http.Request, se
 		writeError(w, http.StatusNotFound, "session not found")
 		return false
 	}
-	if sess.ProjectID == nil || *sess.ProjectID != *auth.ProjectID {
+	if sess.ProjectID == nil || !auth.HasProjectAccess(*sess.ProjectID) {
 		writeError(w, http.StatusForbidden, "session not accessible with this API key")
 		return false
 	}
@@ -799,7 +853,9 @@ func basicAuth(next http.Handler, username, password string) http.Handler {
 		if !ok ||
 			subtle.ConstantTimeCompare([]byte(user), []byte(username)) != 1 ||
 			subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="CrawlObserver"`)
+			if !strings.HasPrefix(r.URL.Path, "/api/") {
+				w.Header().Set("WWW-Authenticate", `Basic realm="CrawlObserver"`)
+			}
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}

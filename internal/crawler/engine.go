@@ -48,12 +48,13 @@ type Engine struct {
 	allowedHosts    map[string]bool
 	allowedDomains  map[string]bool
 	allowedPrefixes []string
+	scopeMu         sync.RWMutex
 
 	retryQueue       *RetryQueue
 	hostHealth       *HostHealth
 	retryPolicy      *RetryPolicy
 	pendingRetries   atomic.Int64
-	resultsProcessed atomic.Int64 // all results including retries, for circuit breaker
+	resultsProcessed atomic.Int64  // all results including retries, for circuit breaker
 	baseDelay        time.Duration // original frontier delay, for adaptive throttle
 
 	sitemapOnly      bool
@@ -87,17 +88,27 @@ type Engine struct {
 	cfResolver      cfsolve.ChallengeResolver
 	cfHoldQueue     map[string][]*RetryItem // host → URLs parked during CF solve
 	cfSolvingHosts  map[string]bool         // hosts currently being CF-solved
-	cfFailedHosts   map[string]time.Time     // host → time when block expires
+	cfFailedHosts   map[string]time.Time    // host → time when block expires
 	cfHoldMu        sync.Mutex
 	cookieJar       *cookiejar.Jar
 	pendingCFSolves atomic.Int64
 
 	excludePatterns []string // URL substrings: if URL contains any, skip fetching
 
+	rescanOnly        bool
+	skipSessionWrites bool
+	rescanMeta        map[string]rescanPageMeta
+
 	ctx     context.Context
 	cancel  context.CancelFunc
 	done    chan struct{} // closed when workers are drained (before finalization)
 	stopped atomic.Bool   // true when Stop() was called (voluntary stop)
+}
+
+type rescanPageMeta struct {
+	Depth    uint16
+	FoundOn  string
+	PageRank float64
 }
 
 // renderItem transports data from parseWorker to renderWorker.
@@ -185,36 +196,90 @@ func (e *Engine) MarkSeen(url string) {
 	e.front.MarkSeen(url)
 }
 
+func (e *Engine) applyRescanMeta(page *storage.PageRow) {
+	if !e.rescanOnly || page == nil || e.rescanMeta == nil {
+		return
+	}
+	meta, ok := e.rescanMeta[page.URL]
+	if !ok {
+		return
+	}
+	page.Depth = meta.Depth
+	page.FoundOn = meta.FoundOn
+	page.PageRank = meta.PageRank
+}
+
 // buildScope extracts allowed hostnames/domains from the session's original seed URLs.
 func (e *Engine) buildScope() {
+	e.scopeMu.Lock()
+	defer e.scopeMu.Unlock()
+
 	e.allowedHosts = make(map[string]bool)
 	e.allowedDomains = make(map[string]bool)
 	e.allowedPrefixes = nil
 
 	seedURLs := e.session.SeedURLs
 	for _, seed := range seedURLs {
-		u, err := url.Parse(seed)
-		if err != nil {
-			continue
-		}
-		host := strings.ToLower(u.Hostname())
-		e.allowedHosts[host] = true
-		domain, err := publicsuffix.EffectiveTLDPlusOne(host)
-		if err == nil {
-			e.allowedDomains[strings.ToLower(domain)] = true
-		}
-		if e.cfg.Crawler.CrawlScope == "subdirectory" {
-			dir := path.Dir(u.Path)
-			if strings.HasSuffix(u.Path, "/") {
-				dir = u.Path
-			}
-			if !strings.HasSuffix(dir, "/") {
-				dir += "/"
-			}
-			prefix := strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + dir
-			e.allowedPrefixes = append(e.allowedPrefixes, prefix)
-		}
+		e.addScopeURLLocked(seed)
 	}
+}
+
+func (e *Engine) registerFinalURLScope(result *fetcher.FetchResult) {
+	if result == nil || result.FinalURL == "" || result.FinalURL == result.URL {
+		return
+	}
+	if !e.isInScope(result.URL) {
+		return
+	}
+
+	e.scopeMu.Lock()
+	defer e.scopeMu.Unlock()
+	e.addScopeURLLocked(result.FinalURL)
+}
+
+func (e *Engine) addScopeURLLocked(rawURL string) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return
+	}
+	e.allowedHosts[host] = true
+	domain, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err == nil {
+		e.allowedDomains[strings.ToLower(domain)] = true
+	}
+	if e.cfg.Crawler.CrawlScope == "subdirectory" {
+		prefix := strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + subdirectoryScopeDir(u.Path)
+		for _, existing := range e.allowedPrefixes {
+			if existing == prefix {
+				return
+			}
+		}
+		e.allowedPrefixes = append(e.allowedPrefixes, prefix)
+	}
+}
+
+func subdirectoryScopeDir(p string) string {
+	if p == "" || p == "." {
+		return "/"
+	}
+	dir := path.Dir(p)
+	if strings.HasSuffix(p, "/") {
+		dir = p
+	}
+	if dir == "." {
+		dir = "/"
+	}
+	if !strings.HasPrefix(dir, "/") {
+		dir = "/" + dir
+	}
+	if !strings.HasSuffix(dir, "/") {
+		dir += "/"
+	}
+	return dir
 }
 
 // isInScope checks if a URL falls within the configured crawl scope.
@@ -224,6 +289,9 @@ func (e *Engine) isInScope(targetURL string) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
+
+	e.scopeMu.RLock()
+	defer e.scopeMu.RUnlock()
 
 	switch e.cfg.Crawler.CrawlScope {
 	case "domain":
@@ -283,7 +351,9 @@ func (e *Engine) initCrawl(seeds []string) error {
 		// Don't overwrite SeedURLs — on resume/retry, seeds param contains
 		// uncrawled/failed URLs, not the original seed URLs. Keep the originals
 		// so RecomputeDepths assigns depth 0 only to the true seeds.
-		e.session.Status = "running"
+		if !e.skipSessionWrites {
+			e.session.Status = "running"
+		}
 	}
 	e.maxPages = int64(e.cfg.Crawler.MaxPages)
 	e.buildScope()
@@ -296,8 +366,10 @@ func (e *Engine) initCrawl(seeds []string) error {
 		e.Stop()
 	})
 
-	if err := e.store.InsertSession(e.ctx, e.session.ToStorageRow()); err != nil {
-		return fmt.Errorf("inserting session: %w", err)
+	if !e.skipSessionWrites {
+		if err := e.store.InsertSession(e.ctx, e.session.ToStorageRow()); err != nil {
+			return fmt.Errorf("inserting session: %w", err)
+		}
 	}
 
 	// Initialize shared cookie jar so cookies (e.g. cf_clearance) persist across requests
@@ -526,6 +598,10 @@ func (e *Engine) startWorkers() (chan *frontier.CrawlURL, func(), func()) {
 		if bufState.LostPages > 0 || bufState.LostLinks > 0 {
 			applog.Warnf("crawler", "%s Crawl ended with data loss: %d pages, %d links dropped",
 				e.logTag(), bufState.LostPages, bufState.LostLinks)
+		}
+		if e.skipSessionWrites {
+			applog.Infof("crawler", "%s Rescan complete; skipped session finalization and analytics recomputation", e.logTag())
+			return
 		}
 		e.finalizeSession(bufState)
 	}
@@ -794,6 +870,9 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 		// Store the original redirect status code instead of the final 200,
 		// and skip content parsing (the body belongs to the final URL).
 		isRedirect := len(result.RedirectChain) > 0 && result.URL != result.FinalURL
+		if isRedirect {
+			e.registerFinalURLScope(result)
+		}
 
 		// Build page row
 		pageRow := storage.PageRow{
@@ -811,6 +890,7 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 			CrawledAt:       now,
 			Headers:         result.Headers,
 		}
+		e.applyRescanMeta(&pageRow)
 
 		// For redirects, store the first hop's status code (e.g. 301)
 		// instead of the final response code (e.g. 200).
@@ -857,6 +937,7 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 				CrawledAt:       now,
 				Headers:         result.Headers,
 			}
+			e.applyRescanMeta(&pageRow)
 			if enc, ok := result.Headers["Content-Encoding"]; ok {
 				pageRow.ContentEncoding = enc
 			}
@@ -974,7 +1055,7 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 					if link.IsInternal {
 						internalOut++
 						// Check crawl scope and exclude patterns before adding to frontier
-						if !e.sitemapOnly && e.isInScope(link.TargetURL) && !e.isExcluded(link.TargetURL) {
+						if !e.rescanOnly && !e.sitemapOnly && e.isInScope(link.TargetURL) && !e.isExcluded(link.TargetURL) {
 							newDepth := result.Depth + 1
 							if e.cfg.Crawler.MaxDepth == 0 || newDepth <= e.cfg.Crawler.MaxDepth {
 								priority := newDepth

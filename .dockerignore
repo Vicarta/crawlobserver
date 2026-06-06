@@ -1,0 +1,12 @@
+.git
+.planning
+data
+deploy/.env
+deploy/config.yaml
+deploy/state
+deploy/backups
+frontend/node_modules
+frontend/dist
+coverage.out
+coverage.html
+crawlobserver
