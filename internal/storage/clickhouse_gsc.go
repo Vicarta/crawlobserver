@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -22,6 +23,14 @@ type GSCPageRow struct {
 	Impressions uint64  `json:"impressions"`
 	CTR         float64 `json:"ctr"`
 	Position    float64 `json:"position"`
+}
+
+type GSCListOptions struct {
+	Limit     int
+	Offset    int
+	Search    string
+	Sort      string
+	Direction string
 }
 
 type GSCCountryRow struct {
@@ -170,22 +179,29 @@ func (s *Store) GSCOverview(ctx context.Context, projectID string) (*GSCOverview
 	return &stats, nil
 }
 
-func (s *Store) GSCTopQueries(ctx context.Context, projectID string, limit, offset int) ([]GSCQueryRow, int, error) {
+func (s *Store) GSCTopQueries(ctx context.Context, projectID string, opts GSCListOptions) ([]GSCQueryRow, int, error) {
+	sortExpr, sortDir := gscSortClause(opts.Sort, opts.Direction, "query")
+	where, args := gscDimensionFilter("query", projectID, opts.Search)
+
 	var total uint64
-	if err := s.conn.QueryRow(ctx, `
-		SELECT uniqExact(query) FROM crawlobserver.gsc_analytics FINAL WHERE project_id = ?`, projectID).Scan(&total); err != nil {
+	countQuery := `SELECT uniqExact(query) FROM crawlobserver.gsc_analytics FINAL WHERE ` + where
+	if err := s.conn.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting gsc queries: %w", err)
 	}
 
-	rows, err := s.conn.Query(ctx, `
-		SELECT query, sum(clicks), sum(impressions),
-			if(sum(impressions) > 0, sum(clicks) / sum(impressions), 0),
-			if(sum(impressions) > 0, sum(position * impressions) / sum(impressions), 0)
-		FROM crawlobserver.gsc_analytics FINAL
-		WHERE project_id = ?
-		GROUP BY query
-		ORDER BY sum(clicks) DESC
-		LIMIT ? OFFSET ?`, projectID, limit, offset)
+	query := `
+			SELECT query,
+				sum(clicks) AS total_clicks,
+				sum(impressions) AS total_impressions,
+				if(sum(impressions) > 0, sum(clicks) / sum(impressions), 0) AS ctr,
+				if(sum(impressions) > 0, sum(position * impressions) / sum(impressions), 0) AS avg_position
+			FROM crawlobserver.gsc_analytics FINAL
+			WHERE ` + where + `
+			GROUP BY query
+			ORDER BY ` + sortExpr + ` ` + sortDir + `
+			LIMIT ? OFFSET ?`
+	args = append(args, opts.Limit, opts.Offset)
+	rows, err := s.conn.Query(ctx, query, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("querying gsc top queries: %w", err)
 	}
@@ -205,22 +221,29 @@ func (s *Store) GSCTopQueries(ctx context.Context, projectID string, limit, offs
 	return result, int(total), nil
 }
 
-func (s *Store) GSCTopPages(ctx context.Context, projectID string, limit, offset int) ([]GSCPageRow, int, error) {
+func (s *Store) GSCTopPages(ctx context.Context, projectID string, opts GSCListOptions) ([]GSCPageRow, int, error) {
+	sortExpr, sortDir := gscSortClause(opts.Sort, opts.Direction, "page")
+	where, args := gscDimensionFilter("page", projectID, opts.Search)
+
 	var total uint64
-	if err := s.conn.QueryRow(ctx, `
-		SELECT uniqExact(page) FROM crawlobserver.gsc_analytics FINAL WHERE project_id = ?`, projectID).Scan(&total); err != nil {
+	countQuery := `SELECT uniqExact(page) FROM crawlobserver.gsc_analytics FINAL WHERE ` + where
+	if err := s.conn.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting gsc pages: %w", err)
 	}
 
-	rows, err := s.conn.Query(ctx, `
-		SELECT page, sum(clicks), sum(impressions),
-			if(sum(impressions) > 0, sum(clicks) / sum(impressions), 0),
-			if(sum(impressions) > 0, sum(position * impressions) / sum(impressions), 0)
-		FROM crawlobserver.gsc_analytics FINAL
-		WHERE project_id = ?
-		GROUP BY page
-		ORDER BY sum(clicks) DESC
-		LIMIT ? OFFSET ?`, projectID, limit, offset)
+	query := `
+			SELECT page,
+				sum(clicks) AS total_clicks,
+				sum(impressions) AS total_impressions,
+				if(sum(impressions) > 0, sum(clicks) / sum(impressions), 0) AS ctr,
+				if(sum(impressions) > 0, sum(position * impressions) / sum(impressions), 0) AS avg_position
+			FROM crawlobserver.gsc_analytics FINAL
+			WHERE ` + where + `
+			GROUP BY page
+			ORDER BY ` + sortExpr + ` ` + sortDir + `
+			LIMIT ? OFFSET ?`
+	args = append(args, opts.Limit, opts.Offset)
+	rows, err := s.conn.Query(ctx, query, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("querying gsc top pages: %w", err)
 	}
@@ -238,6 +261,36 @@ func (s *Store) GSCTopPages(ctx context.Context, projectID string, limit, offset
 		result = []GSCPageRow{}
 	}
 	return result, int(total), nil
+}
+
+func gscDimensionFilter(dimension, projectID, search string) (string, []any) {
+	where := "project_id = ?"
+	args := []any{projectID}
+	search = strings.TrimSpace(search)
+	if search != "" {
+		where += " AND positionCaseInsensitive(" + dimension + ", ?) > 0"
+		args = append(args, search)
+	}
+	return where, args
+}
+
+func gscSortClause(sort, direction, dimension string) (string, string) {
+	sortMap := map[string]string{
+		dimension:     dimension,
+		"clicks":      "total_clicks",
+		"impressions": "total_impressions",
+		"ctr":         "ctr",
+		"position":    "avg_position",
+	}
+	sortExpr, ok := sortMap[sort]
+	if !ok {
+		sortExpr = "total_clicks"
+	}
+	sortDir := "DESC"
+	if strings.EqualFold(direction, "asc") {
+		sortDir = "ASC"
+	}
+	return sortExpr, sortDir
 }
 
 func (s *Store) GSCByCountry(ctx context.Context, projectID string) ([]GSCCountryRow, error) {

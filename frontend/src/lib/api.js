@@ -826,8 +826,12 @@ export async function getGSCOverview(projectId) {
  * @param {number} offset
  * @returns {Promise<Object[]>}
  */
-export async function getGSCQueries(projectId, limit = DEFAULT_LIMIT, offset = 0) {
-  return fetchJSON(`/projects/${projectId}/gsc/queries?limit=${limit}&offset=${offset}`);
+export async function getGSCQueries(projectId, limit = DEFAULT_LIMIT, offset = 0, options = {}) {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (options.q) params.set('q', options.q);
+  if (options.sort) params.set('sort', options.sort);
+  if (options.dir) params.set('dir', options.dir);
+  return fetchJSON(`/projects/${projectId}/gsc/queries?${params.toString()}`);
 }
 
 /**
@@ -836,8 +840,12 @@ export async function getGSCQueries(projectId, limit = DEFAULT_LIMIT, offset = 0
  * @param {number} offset
  * @returns {Promise<Object[]>}
  */
-export async function getGSCPages(projectId, limit = DEFAULT_LIMIT, offset = 0) {
-  return fetchJSON(`/projects/${projectId}/gsc/pages?limit=${limit}&offset=${offset}`);
+export async function getGSCPages(projectId, limit = DEFAULT_LIMIT, offset = 0, options = {}) {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (options.q) params.set('q', options.q);
+  if (options.sort) params.set('sort', options.sort);
+  if (options.dir) params.set('dir', options.dir);
+  return fetchJSON(`/projects/${projectId}/gsc/pages?${params.toString()}`);
 }
 
 /**
