@@ -263,12 +263,65 @@ func (s *Store) GSCTopPages(ctx context.Context, projectID string, opts GSCListO
 	return result, int(total), nil
 }
 
+func (s *Store) GSCQueriesForPage(ctx context.Context, projectID, page string, opts GSCListOptions) ([]GSCQueryRow, int, error) {
+	sortExpr, sortDir := gscSortClause(opts.Sort, opts.Direction, "query")
+	where, args := gscPageQueryFilter(projectID, page, opts.Search)
+
+	var total uint64
+	countQuery := `SELECT uniqExact(query) FROM crawlobserver.gsc_analytics FINAL WHERE ` + where
+	if err := s.conn.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting gsc page queries: %w", err)
+	}
+
+	query := `
+			SELECT query,
+				sum(clicks) AS total_clicks,
+				sum(impressions) AS total_impressions,
+				if(sum(impressions) > 0, sum(clicks) / sum(impressions), 0) AS ctr,
+				if(sum(impressions) > 0, sum(position * impressions) / sum(impressions), 0) AS avg_position
+			FROM crawlobserver.gsc_analytics FINAL
+			WHERE ` + where + `
+			GROUP BY query
+			ORDER BY ` + sortExpr + ` ` + sortDir + `
+			LIMIT ? OFFSET ?`
+	args = append(args, opts.Limit, opts.Offset)
+	rows, err := s.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("querying gsc page queries: %w", err)
+	}
+	defer rows.Close()
+
+	var result []GSCQueryRow
+	for rows.Next() {
+		var r GSCQueryRow
+		if err := rows.Scan(&r.Query, &r.Clicks, &r.Impressions, &r.CTR, &r.Position); err != nil {
+			return nil, 0, fmt.Errorf("scanning gsc page query row: %w", err)
+		}
+		result = append(result, r)
+	}
+	if result == nil {
+		result = []GSCQueryRow{}
+	}
+	return result, int(total), nil
+}
+
 func gscDimensionFilter(dimension, projectID, search string) (string, []any) {
 	where := "project_id = ?"
 	args := []any{projectID}
 	search = strings.TrimSpace(search)
 	if search != "" {
 		where += " AND positionCaseInsensitive(" + dimension + ", ?) > 0"
+		args = append(args, search)
+	}
+	return where, args
+}
+
+func gscPageQueryFilter(projectID, page, search string) (string, []any) {
+	where := "project_id = ? AND page = ?"
+	args := []any{projectID, page}
+	search = strings.TrimSpace(search)
+	if search != "" {
+		where += " AND positionCaseInsensitive(query, ?) > 0"
 		args = append(args, search)
 	}
 	return where, args

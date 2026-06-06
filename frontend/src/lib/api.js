@@ -850,6 +850,31 @@ export async function getGSCPages(projectId, limit = DEFAULT_LIMIT, offset = 0, 
 
 /**
  * @param {string} projectId
+ * @param {string} page
+ * @param {number} limit
+ * @param {number} offset
+ * @returns {Promise<Object[]>}
+ */
+export async function getGSCPageQueries(
+  projectId,
+  page,
+  limit = DEFAULT_LIMIT,
+  offset = 0,
+  options = {},
+) {
+  const params = new URLSearchParams({
+    page,
+    limit: String(limit),
+    offset: String(offset),
+  });
+  if (options.q) params.set('q', options.q);
+  if (options.sort) params.set('sort', options.sort);
+  if (options.dir) params.set('dir', options.dir);
+  return fetchJSON(`/projects/${projectId}/gsc/page-queries?${params.toString()}`);
+}
+
+/**
+ * @param {string} projectId
  * @returns {Promise<Object[]>}
  */
 export async function getGSCCountries(projectId) {

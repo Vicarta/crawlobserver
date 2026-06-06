@@ -384,6 +384,44 @@ func (s *Server) handleGSCPages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"rows": rows, "total": total})
 }
 
+func (s *Server) handleGSCPageQueries(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
+	page := strings.TrimSpace(r.URL.Query().Get("page"))
+	if page == "" {
+		writeError(w, http.StatusBadRequest, "page required")
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if limit <= 0 {
+		limit = 50
+	}
+	limit, offset = clampPagination(limit, offset)
+	sort := r.URL.Query().Get("sort")
+	if sort == "" {
+		sort = "impressions"
+	}
+	dir := r.URL.Query().Get("dir")
+	if dir == "" {
+		dir = "desc"
+	}
+	rows, total, err := s.store.GSCQueriesForPage(r.Context(), projectID, page, storage.GSCListOptions{
+		Limit:     limit,
+		Offset:    offset,
+		Search:    r.URL.Query().Get("q"),
+		Sort:      sort,
+		Direction: dir,
+	})
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"rows": rows, "total": total, "page": page})
+}
+
 func (s *Server) handleGSCCountries(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
 	rows, err := s.store.GSCByCountry(r.Context(), projectID)

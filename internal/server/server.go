@@ -265,6 +265,7 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("GET /api/projects/{id}/gsc/overview", s.handleGSCOverview)
 	mux.HandleFunc("GET /api/projects/{id}/gsc/queries", s.handleGSCQueries)
 	mux.HandleFunc("GET /api/projects/{id}/gsc/pages", s.handleGSCPages)
+	mux.HandleFunc("GET /api/projects/{id}/gsc/page-queries", s.handleGSCPageQueries)
 	mux.HandleFunc("GET /api/projects/{id}/gsc/countries", s.handleGSCCountries)
 	mux.HandleFunc("GET /api/projects/{id}/gsc/devices", s.handleGSCDevices)
 	mux.HandleFunc("GET /api/projects/{id}/gsc/timeline", s.handleGSCTimeline)

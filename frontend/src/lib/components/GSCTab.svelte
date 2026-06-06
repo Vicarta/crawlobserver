@@ -9,6 +9,7 @@
     getGSCOverview,
     getGSCQueries,
     getGSCPages,
+    getGSCPageQueries,
     getGSCCountries,
     getGSCDevices,
     getGSCTimeline,
@@ -45,9 +46,17 @@
   let pageSearch = $state('');
   let pageSort = $state('clicks');
   let pageDir = $state('desc');
+  let expandedPage = $state('');
+  let pageQueries = $state(null);
+  let pageQueriesOffset = $state(0);
+  let pageQueriesSearch = $state('');
+  let pageQueriesSort = $state('impressions');
+  let pageQueriesDir = $state('desc');
+  let pageQueriesLoading = $state(false);
   let pollTimer = null;
   let searchTimer = null;
   const PAGE_LIMIT = 100;
+  const PAGE_QUERY_LIMIT = 25;
 
   async function loadStatus() {
     if (!projectId) return;
@@ -192,6 +201,9 @@
           sort: pageSort,
           dir: pageDir,
         });
+        if (expandedPage && !pages.rows?.some((r) => r.page === expandedPage)) {
+          collapsePageQueries();
+        }
       } else if (view === 'countries') {
         const [c, d] = await Promise.all([getGSCCountries(projectId), getGSCDevices(projectId)]);
         countries = c;
@@ -250,6 +262,68 @@
     loadSubView('pages');
   }
 
+  function pagePath(page) {
+    return page.replace(/^https?:\/\/[^/]+/, '') || '/';
+  }
+
+  function collapsePageQueries() {
+    expandedPage = '';
+    pageQueries = null;
+    pageQueriesOffset = 0;
+    pageQueriesSearch = '';
+    pageQueriesSort = 'impressions';
+    pageQueriesDir = 'desc';
+    pageQueriesLoading = false;
+  }
+
+  async function loadPageQueries() {
+    if (!expandedPage) return;
+    pageQueriesLoading = true;
+    try {
+      pageQueries = await getGSCPageQueries(
+        projectId,
+        expandedPage,
+        PAGE_QUERY_LIMIT,
+        pageQueriesOffset,
+        {
+          q: pageQueriesSearch.trim(),
+          sort: pageQueriesSort,
+          dir: pageQueriesDir,
+        },
+      );
+    } catch (e) {
+      onerror?.(e.message);
+      pageQueries = null;
+    } finally {
+      pageQueriesLoading = false;
+    }
+  }
+
+  async function togglePageQueries(page) {
+    if (expandedPage === page) {
+      collapsePageQueries();
+      return;
+    }
+    expandedPage = page;
+    pageQueries = null;
+    pageQueriesOffset = 0;
+    pageQueriesSearch = '';
+    pageQueriesSort = 'impressions';
+    pageQueriesDir = 'desc';
+    await loadPageQueries();
+  }
+
+  function setPageQuerySort(key) {
+    if (pageQueriesSort === key) {
+      pageQueriesDir = pageQueriesDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      pageQueriesSort = key;
+      pageQueriesDir = nextDefaultDir(key);
+    }
+    pageQueriesOffset = 0;
+    loadPageQueries();
+  }
+
   function scheduleSearch(table) {
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(() => applySearch(table), 300);
@@ -265,6 +339,11 @@
       loadSubView('queries');
       return;
     }
+    if (table === 'pageQueries') {
+      pageQueriesOffset = 0;
+      loadPageQueries();
+      return;
+    }
     pagesOffset = 0;
     loadSubView('pages');
   }
@@ -274,6 +353,12 @@
       if (!querySearch) return;
       querySearch = '';
       applySearch('queries');
+      return;
+    }
+    if (table === 'pageQueries') {
+      if (!pageQueriesSearch) return;
+      pageQueriesSearch = '';
+      applySearch('pageQueries');
       return;
     }
     if (!pageSearch) return;
@@ -713,19 +798,158 @@
                 ><span class="sort-header"
                   >{t('gsc.position')}{sortArrow(pageSort, pageDir, 'position')}</span
                 ></th
-              ></tr
+              ><th>{t('gsc.keywords')}</th></tr
             ></thead
           >
           <tbody>
             {#each pages.rows as r, i}
-              <tr>
+              <tr class:row-expanded={expandedPage === r.page}>
                 <td class="row-num">{pagesOffset + i + 1}</td>
-                <td class="cell-url">{r.page}</td>
+                <td class="cell-url" title={r.page}>{r.page}</td>
                 <td>{fmtN(r.clicks)}</td>
                 <td>{fmtN(r.impressions)}</td>
                 <td>{(r.ctr * 100).toFixed(1)}%</td>
                 <td>{r.position.toFixed(1)}</td>
+                <td>
+                  <button class="btn btn-sm" onclick={() => togglePageQueries(r.page)}>
+                    {expandedPage === r.page ? t('gsc.hideKeywords') : t('gsc.viewKeywords')}
+                  </button>
+                </td>
               </tr>
+              {#if expandedPage === r.page}
+                <tr class="gsc-page-query-row">
+                  <td colspan="7">
+                    <div class="gsc-page-query-panel">
+                      <div class="gsc-page-query-header">
+                        <div>
+                          <div class="table-meta">{t('gsc.rankingQueriesFor')}</div>
+                          <div class="cell-url gsc-expanded-page" title={expandedPage}>
+                            {pagePath(expandedPage)}
+                          </div>
+                        </div>
+                        <div class="gsc-search-wrap gsc-page-query-search">
+                          <input
+                            class="gsc-search-input"
+                            type="search"
+                            placeholder={t('gsc.searchPageQueries')}
+                            bind:value={pageQueriesSearch}
+                            oninput={() => scheduleSearch('pageQueries')}
+                            onkeydown={(e) => e.key === 'Enter' && applySearch('pageQueries')}
+                          />
+                          {#if pageQueriesSearch}
+                            <button class="btn btn-sm" onclick={() => clearSearch('pageQueries')}
+                              >{t('common.clear')}</button
+                            >
+                          {/if}
+                        </div>
+                      </div>
+
+                      {#if pageQueriesLoading}
+                        <p class="loading-msg">{t('common.loading')}</p>
+                      {:else if pageQueries?.rows?.length > 0}
+                        <div class="table-meta">
+                          {t('gsc.pageQueriesCount', { count: fmtN(pageQueries.total || 0) })}
+                        </div>
+                        <table class="gsc-page-query-table">
+                          <thead>
+                            <tr>
+                              <th>#</th>
+                              <th class="sortable" onclick={() => setPageQuerySort('query')}>
+                                <span class="sort-header"
+                                  >{t('gsc.query')}{sortArrow(
+                                    pageQueriesSort,
+                                    pageQueriesDir,
+                                    'query',
+                                  )}</span
+                                >
+                              </th>
+                              <th class="sortable" onclick={() => setPageQuerySort('clicks')}>
+                                <span class="sort-header"
+                                  >{t('gsc.clicks')}{sortArrow(
+                                    pageQueriesSort,
+                                    pageQueriesDir,
+                                    'clicks',
+                                  )}</span
+                                >
+                              </th>
+                              <th class="sortable" onclick={() => setPageQuerySort('impressions')}>
+                                <span class="sort-header"
+                                  >{t('gsc.impressions')}{sortArrow(
+                                    pageQueriesSort,
+                                    pageQueriesDir,
+                                    'impressions',
+                                  )}</span
+                                >
+                              </th>
+                              <th class="sortable" onclick={() => setPageQuerySort('ctr')}>
+                                <span class="sort-header"
+                                  >{t('gsc.ctr')}{sortArrow(
+                                    pageQueriesSort,
+                                    pageQueriesDir,
+                                    'ctr',
+                                  )}</span
+                                >
+                              </th>
+                              <th class="sortable" onclick={() => setPageQuerySort('position')}>
+                                <span class="sort-header"
+                                  >{t('gsc.position')}{sortArrow(
+                                    pageQueriesSort,
+                                    pageQueriesDir,
+                                    'position',
+                                  )}</span
+                                >
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {#each pageQueries.rows as qr, qi}
+                              <tr>
+                                <td class="row-num">{pageQueriesOffset + qi + 1}</td>
+                                <td class="cell-url" title={qr.query}>{qr.query}</td>
+                                <td>{fmtN(qr.clicks)}</td>
+                                <td>{fmtN(qr.impressions)}</td>
+                                <td>{(qr.ctr * 100).toFixed(1)}%</td>
+                                <td>{qr.position.toFixed(1)}</td>
+                              </tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                        {#if pageQueries.total > PAGE_QUERY_LIMIT}
+                          <div class="pagination">
+                            <button
+                              class="btn btn-sm"
+                              disabled={pageQueriesOffset === 0}
+                              onclick={() => {
+                                pageQueriesOffset = Math.max(
+                                  0,
+                                  pageQueriesOffset - PAGE_QUERY_LIMIT,
+                                );
+                                loadPageQueries();
+                              }}>{t('common.previous')}</button
+                            >
+                            <span class="pagination-info"
+                              >{pageQueriesOffset + 1} - {Math.min(
+                                pageQueriesOffset + PAGE_QUERY_LIMIT,
+                                pageQueries.total,
+                              )} of {fmtN(pageQueries.total)}</span
+                            >
+                            <button
+                              class="btn btn-sm"
+                              disabled={pageQueriesOffset + PAGE_QUERY_LIMIT >= pageQueries.total}
+                              onclick={() => {
+                                pageQueriesOffset += PAGE_QUERY_LIMIT;
+                                loadPageQueries();
+                              }}>{t('common.next')}</button
+                            >
+                          </div>
+                        {/if}
+                      {:else}
+                        <p class="chart-empty">{t('gsc.noPageQueries')}</p>
+                      {/if}
+                    </div>
+                  </td>
+                </tr>
+              {/if}
             {/each}
           </tbody>
         </table>
@@ -1005,6 +1229,37 @@
     align-items: center;
     gap: 2px;
     white-space: nowrap;
+  }
+  tr.row-expanded {
+    background: var(--bg-alt);
+  }
+  .gsc-page-query-row > td {
+    padding: 0;
+    background: var(--bg);
+  }
+  .gsc-page-query-panel {
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 16px 16px;
+    background: var(--bg);
+  }
+  .gsc-page-query-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 10px;
+  }
+  .gsc-expanded-page {
+    max-width: 640px;
+    margin-top: 3px;
+    font-weight: 600;
+  }
+  .gsc-page-query-search {
+    max-width: 360px;
+  }
+  .gsc-page-query-table {
+    margin-top: 8px;
   }
   .gsc-stats {
     margin-bottom: 20px;

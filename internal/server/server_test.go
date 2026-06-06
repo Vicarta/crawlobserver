@@ -319,6 +319,9 @@ func (m *mockStore) GSCTopQueries(_ context.Context, _ string, _ storage.GSCList
 func (m *mockStore) GSCTopPages(_ context.Context, _ string, _ storage.GSCListOptions) ([]storage.GSCPageRow, int, error) {
 	return []storage.GSCPageRow{}, 0, m.err
 }
+func (m *mockStore) GSCQueriesForPage(_ context.Context, _, _ string, _ storage.GSCListOptions) ([]storage.GSCQueryRow, int, error) {
+	return []storage.GSCQueryRow{}, 0, m.err
+}
 func (m *mockStore) GSCByCountry(_ context.Context, _ string) ([]storage.GSCCountryRow, error) {
 	return []storage.GSCCountryRow{}, m.err
 }

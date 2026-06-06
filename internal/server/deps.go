@@ -157,6 +157,7 @@ type GSCStore interface {
 	GSCOverview(ctx context.Context, projectID string) (*storage.GSCOverviewStats, error)
 	GSCTopQueries(ctx context.Context, projectID string, opts storage.GSCListOptions) ([]storage.GSCQueryRow, int, error)
 	GSCTopPages(ctx context.Context, projectID string, opts storage.GSCListOptions) ([]storage.GSCPageRow, int, error)
+	GSCQueriesForPage(ctx context.Context, projectID, page string, opts storage.GSCListOptions) ([]storage.GSCQueryRow, int, error)
 	GSCByCountry(ctx context.Context, projectID string) ([]storage.GSCCountryRow, error)
 	GSCByDevice(ctx context.Context, projectID string) ([]storage.GSCDeviceRow, error)
 	GSCTimeline(ctx context.Context, projectID string) ([]storage.GSCTimelineRow, error)
