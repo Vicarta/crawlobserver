@@ -17,6 +17,7 @@
   import { fmtN } from '../utils.js';
   import { t } from '../i18n/index.svelte.js';
   import SearchSelect from './SearchSelect.svelte';
+  import ConfirmModal from './ConfirmModal.svelte';
 
   let { projectId, initialSubView = 'overview', onerror, onpushurl, isAdmin = false } = $props();
 
@@ -37,7 +38,15 @@
   let fetchStatus = $state(null);
   let selectedProperty = $state('');
   let changingProperty = $state(false);
+  let confirmState = $state(null);
+  let querySearch = $state('');
+  let querySort = $state('clicks');
+  let queryDir = $state('desc');
+  let pageSearch = $state('');
+  let pageSort = $state('clicks');
+  let pageDir = $state('desc');
   let pollTimer = null;
+  let searchTimer = null;
   const PAGE_LIMIT = 100;
 
   async function loadStatus() {
@@ -82,7 +91,10 @@
     }
   }
 
-  onDestroy(() => stopPolling());
+  onDestroy(() => {
+    stopPolling();
+    if (searchTimer) clearTimeout(searchTimer);
+  });
 
   async function authorize() {
     if (!isAdmin) return;
@@ -146,6 +158,16 @@
     }
   }
 
+  function requestDisconnect() {
+    if (!isAdmin) return;
+    confirmState = {
+      message: t('gsc.disconnectConfirm'),
+      danger: true,
+      confirmLabel: t('common.disconnect'),
+      onConfirm: doDisconnect,
+    };
+  }
+
   function startChangingProperty() {
     selectedProperty = status?.property_url || '';
     changingProperty = true;
@@ -159,9 +181,17 @@
         overview = ov;
         timeline = tl;
       } else if (view === 'queries') {
-        queries = await getGSCQueries(projectId, PAGE_LIMIT, queriesOffset);
+        queries = await getGSCQueries(projectId, PAGE_LIMIT, queriesOffset, {
+          q: querySearch.trim(),
+          sort: querySort,
+          dir: queryDir,
+        });
       } else if (view === 'pages') {
-        pages = await getGSCPages(projectId, PAGE_LIMIT, pagesOffset);
+        pages = await getGSCPages(projectId, PAGE_LIMIT, pagesOffset, {
+          q: pageSearch.trim(),
+          sort: pageSort,
+          dir: pageDir,
+        });
       } else if (view === 'countries') {
         const [c, d] = await Promise.all([getGSCCountries(projectId), getGSCDevices(projectId)]);
         countries = c;
@@ -187,6 +217,68 @@
     if (view === 'inspection') inspectionOffset = 0;
     onpushurl?.(`/projects/${projectId}/gsc/${view}`);
     loadSubView(view);
+  }
+
+  function sortArrow(activeSort, activeDir, key) {
+    if (activeSort !== key) return '';
+    return activeDir === 'asc' ? ' ↑' : ' ↓';
+  }
+
+  function nextDefaultDir(key) {
+    return key === 'query' || key === 'page' ? 'asc' : 'desc';
+  }
+
+  function setTableSort(table, key) {
+    if (table === 'queries') {
+      if (querySort === key) {
+        queryDir = queryDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        querySort = key;
+        queryDir = nextDefaultDir(key);
+      }
+      queriesOffset = 0;
+      loadSubView('queries');
+      return;
+    }
+    if (pageSort === key) {
+      pageDir = pageDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      pageSort = key;
+      pageDir = nextDefaultDir(key);
+    }
+    pagesOffset = 0;
+    loadSubView('pages');
+  }
+
+  function scheduleSearch(table) {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => applySearch(table), 300);
+  }
+
+  function applySearch(table) {
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+    }
+    if (table === 'queries') {
+      queriesOffset = 0;
+      loadSubView('queries');
+      return;
+    }
+    pagesOffset = 0;
+    loadSubView('pages');
+  }
+
+  function clearSearch(table) {
+    if (table === 'queries') {
+      if (!querySearch) return;
+      querySearch = '';
+      applySearch('queries');
+      return;
+    }
+    if (!pageSearch) return;
+    pageSearch = '';
+    applySearch('pages');
   }
 
   // Init
@@ -243,7 +335,7 @@
         <p class="text-muted">{t('gsc.noProperties')}</p>
       {/if}
       {#if isAdmin}
-        <button class="btn btn-sm gsc-disconnect-btn" onclick={doDisconnect}
+        <button class="btn btn-sm gsc-disconnect-btn" onclick={requestDisconnect}
           >{t('common.disconnect')}</button
         >
       {/if}
@@ -270,7 +362,7 @@
               <button class="btn btn-sm" onclick={startChangingProperty}>Change property</button>
             {/if}
           {/if}
-          <button class="btn btn-sm text-muted" onclick={doDisconnect}
+          <button class="btn btn-sm text-muted" onclick={requestDisconnect}
             >{t('common.disconnect')}</button
           >
         </div>
@@ -493,14 +585,49 @@
         <p class="chart-empty">{t('gsc.noData')}</p>
       {/if}
     {:else if subView === 'queries'}
+      <div class="gsc-table-controls">
+        <div class="gsc-search-wrap">
+          <input
+            class="gsc-search-input"
+            type="search"
+            placeholder={t('gsc.searchQueries')}
+            bind:value={querySearch}
+            oninput={() => scheduleSearch('queries')}
+            onkeydown={(e) => e.key === 'Enter' && applySearch('queries')}
+          />
+          {#if querySearch}
+            <button class="btn btn-sm" onclick={() => clearSearch('queries')}
+              >{t('common.clear')}</button
+            >
+          {/if}
+        </div>
+        <div class="table-meta">{t('gsc.queriesCount', { count: fmtN(queries?.total || 0) })}</div>
+      </div>
       {#if queries?.rows?.length > 0}
-        <div class="table-meta">{t('gsc.queriesCount', { count: fmtN(queries.total) })}</div>
         <table>
           <thead
             ><tr
-              ><th>#</th><th>{t('gsc.query')}</th><th>{t('gsc.clicks')}</th><th
-                >{t('gsc.impressions')}</th
-              ><th>{t('gsc.ctr')}</th><th>{t('gsc.position')}</th></tr
+              ><th>#</th><th class="sortable" onclick={() => setTableSort('queries', 'query')}
+                ><span class="sort-header"
+                  >{t('gsc.query')}{sortArrow(querySort, queryDir, 'query')}</span
+                ></th
+              ><th class="sortable" onclick={() => setTableSort('queries', 'clicks')}
+                ><span class="sort-header"
+                  >{t('gsc.clicks')}{sortArrow(querySort, queryDir, 'clicks')}</span
+                ></th
+              ><th class="sortable" onclick={() => setTableSort('queries', 'impressions')}
+                ><span class="sort-header"
+                  >{t('gsc.impressions')}{sortArrow(querySort, queryDir, 'impressions')}</span
+                ></th
+              ><th class="sortable" onclick={() => setTableSort('queries', 'ctr')}
+                ><span class="sort-header"
+                  >{t('gsc.ctr')}{sortArrow(querySort, queryDir, 'ctr')}</span
+                ></th
+              ><th class="sortable" onclick={() => setTableSort('queries', 'position')}
+                ><span class="sort-header"
+                  >{t('gsc.position')}{sortArrow(querySort, queryDir, 'position')}</span
+                ></th
+              ></tr
             ></thead
           >
           <tbody>
@@ -545,14 +672,48 @@
         <p class="chart-empty">{t('gsc.noQueryData')}</p>
       {/if}
     {:else if subView === 'pages'}
+      <div class="gsc-table-controls">
+        <div class="gsc-search-wrap">
+          <input
+            class="gsc-search-input"
+            type="search"
+            placeholder={t('gsc.searchPages')}
+            bind:value={pageSearch}
+            oninput={() => scheduleSearch('pages')}
+            onkeydown={(e) => e.key === 'Enter' && applySearch('pages')}
+          />
+          {#if pageSearch}
+            <button class="btn btn-sm" onclick={() => clearSearch('pages')}
+              >{t('common.clear')}</button
+            >
+          {/if}
+        </div>
+        <div class="table-meta">{t('gsc.pagesCount', { count: fmtN(pages?.total || 0) })}</div>
+      </div>
       {#if pages?.rows?.length > 0}
-        <div class="table-meta">{t('gsc.pagesCount', { count: fmtN(pages.total) })}</div>
         <table>
           <thead
             ><tr
-              ><th>#</th><th>{t('gsc.page')}</th><th>{t('gsc.clicks')}</th><th
-                >{t('gsc.impressions')}</th
-              ><th>{t('gsc.ctr')}</th><th>{t('gsc.position')}</th></tr
+              ><th>#</th><th class="sortable" onclick={() => setTableSort('pages', 'page')}
+                ><span class="sort-header"
+                  >{t('gsc.page')}{sortArrow(pageSort, pageDir, 'page')}</span
+                ></th
+              ><th class="sortable" onclick={() => setTableSort('pages', 'clicks')}
+                ><span class="sort-header"
+                  >{t('gsc.clicks')}{sortArrow(pageSort, pageDir, 'clicks')}</span
+                ></th
+              ><th class="sortable" onclick={() => setTableSort('pages', 'impressions')}
+                ><span class="sort-header"
+                  >{t('gsc.impressions')}{sortArrow(pageSort, pageDir, 'impressions')}</span
+                ></th
+              ><th class="sortable" onclick={() => setTableSort('pages', 'ctr')}
+                ><span class="sort-header">{t('gsc.ctr')}{sortArrow(pageSort, pageDir, 'ctr')}</span
+                ></th
+              ><th class="sortable" onclick={() => setTableSort('pages', 'position')}
+                ><span class="sort-header"
+                  >{t('gsc.position')}{sortArrow(pageSort, pageDir, 'position')}</span
+                ></th
+              ></tr
             ></thead
           >
           <tbody>
@@ -714,6 +875,19 @@
       {/if}
     {/if}
   {/if}
+
+  {#if confirmState}
+    <ConfirmModal
+      message={confirmState.message}
+      danger={confirmState.danger}
+      confirmLabel={confirmState.confirmLabel}
+      onconfirm={() => {
+        confirmState.onConfirm();
+        confirmState = null;
+      }}
+      oncancel={() => (confirmState = null)}
+    />
+  {/if}
 </div>
 
 <style>
@@ -792,6 +966,45 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: 12px;
+  }
+  .gsc-table-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .gsc-search-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 260px;
+    max-width: 520px;
+    flex: 1;
+  }
+  .gsc-search-input {
+    width: 100%;
+    min-width: 220px;
+    height: 34px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-input);
+    color: var(--text);
+    padding: 0 10px;
+    font-size: 13px;
+  }
+  th.sortable {
+    cursor: pointer;
+    user-select: none;
+  }
+  th.sortable:hover {
+    color: var(--accent);
+  }
+  .sort-header {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    white-space: nowrap;
   }
   .gsc-stats {
     margin-bottom: 20px;

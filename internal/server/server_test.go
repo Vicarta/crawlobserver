@@ -313,10 +313,10 @@ func (m *mockStore) InsertGSCInspection(_ context.Context, _ string, _ []storage
 func (m *mockStore) GSCOverview(_ context.Context, _ string) (*storage.GSCOverviewStats, error) {
 	return &storage.GSCOverviewStats{}, m.err
 }
-func (m *mockStore) GSCTopQueries(_ context.Context, _ string, _, _ int) ([]storage.GSCQueryRow, int, error) {
+func (m *mockStore) GSCTopQueries(_ context.Context, _ string, _ storage.GSCListOptions) ([]storage.GSCQueryRow, int, error) {
 	return []storage.GSCQueryRow{}, 0, m.err
 }
-func (m *mockStore) GSCTopPages(_ context.Context, _ string, _, _ int) ([]storage.GSCPageRow, int, error) {
+func (m *mockStore) GSCTopPages(_ context.Context, _ string, _ storage.GSCListOptions) ([]storage.GSCPageRow, int, error) {
 	return []storage.GSCPageRow{}, 0, m.err
 }
 func (m *mockStore) GSCByCountry(_ context.Context, _ string) ([]storage.GSCCountryRow, error) {
