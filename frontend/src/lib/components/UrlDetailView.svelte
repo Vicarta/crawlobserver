@@ -5,6 +5,7 @@
     getStructuredData,
     getHreflangValidation,
     computeHreflangValidation,
+    getGSCPageQueries,
   } from '../api.js';
   import { statusBadge, fmt, fmtSize, fmtN } from '../utils.js';
   import { t } from '../i18n/index.svelte.js';
@@ -129,6 +130,13 @@
   let blFilters = $state({});
   let blLoaded = $state(false);
 
+  // GSC ranking keywords
+  let gscKeywordsAll = $state(null);
+  let gscKeywords28d = $state(null);
+  let gscKeywordsLoading = $state(false);
+  let gscKeywordsURL = $state('');
+  const GSC_KEYWORDS_LIMIT = 10;
+
   async function loadPageDetail(outOffset = 0, inOffset = 0) {
     pageDetailLoading = true;
     try {
@@ -153,10 +161,53 @@
             finalUrlStatus = null;
           });
       }
+      loadGSCKeywords(pg);
     } catch (e) {
       onerror?.(e.message);
     } finally {
       pageDetailLoading = false;
+    }
+  }
+
+  async function fetchGSCKeywordsForPage(page, options = {}) {
+    return getGSCPageQueries(projectId, page, GSC_KEYWORDS_LIMIT, 0, {
+      sort: 'impressions',
+      dir: 'desc',
+      ...options,
+    });
+  }
+
+  async function loadGSCKeywords(pg) {
+    if (!projectId || !pg) return;
+    const candidates = [...new Set([pg.FinalURL, pg.URL].filter(Boolean))];
+    if (candidates.length === 0) return;
+
+    gscKeywordsLoading = true;
+    gscKeywordsAll = null;
+    gscKeywords28d = null;
+    gscKeywordsURL = candidates[0];
+    try {
+      for (const candidate of candidates) {
+        const [all, recent] = await Promise.all([
+          fetchGSCKeywordsForPage(candidate),
+          fetchGSCKeywordsForPage(candidate, { period: '28d' }),
+        ]);
+        if (
+          (all?.total || 0) > 0 ||
+          (recent?.total || 0) > 0 ||
+          candidate === candidates[candidates.length - 1]
+        ) {
+          gscKeywordsURL = candidate;
+          gscKeywordsAll = all;
+          gscKeywords28d = recent;
+          break;
+        }
+      }
+    } catch (e) {
+      gscKeywordsAll = { rows: [], total: 0 };
+      gscKeywords28d = { rows: [], total: 0 };
+    } finally {
+      gscKeywordsLoading = false;
     }
   }
 
@@ -318,6 +369,85 @@
       <div class="stat-label">{t('urlDetail.crawledAt')}</div>
     </div>
   </div>
+
+  {#if projectId}
+    <div class="card card-section gsc-keywords-section">
+      <div class="section-title-row">
+        <h3 class="section-title">{t('urlDetail.gscKeywords')}</h3>
+        {#if gscKeywordsURL}
+          <span class="gsc-keywords-url" title={gscKeywordsURL}>{gscKeywordsURL}</span>
+        {/if}
+      </div>
+      {#if gscKeywordsLoading}
+        <p class="loading-msg">{t('common.loading')}</p>
+      {:else if (gscKeywordsAll?.rows?.length || 0) > 0 || (gscKeywords28d?.rows?.length || 0) > 0}
+        <div class="gsc-keywords-grid">
+          <div class="gsc-keywords-panel">
+            <div class="gsc-keywords-heading">
+              <span>{t('urlDetail.gscKeywordsAllTime')}</span>
+              <span class="table-meta">{fmtN(gscKeywordsAll?.total || 0)}</span>
+            </div>
+            {#if gscKeywordsAll?.rows?.length > 0}
+              <table class="gsc-keywords-table">
+                <thead>
+                  <tr>
+                    <th>{t('gsc.query')}</th>
+                    <th>{t('gsc.impressions')}</th>
+                    <th>{t('gsc.clicks')}</th>
+                    <th>{t('gsc.position')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each gscKeywordsAll.rows as row}
+                    <tr>
+                      <td class="cell-title" title={row.query}>{row.query}</td>
+                      <td>{fmtN(row.impressions)}</td>
+                      <td>{fmtN(row.clicks)}</td>
+                      <td>{row.position.toFixed(1)}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {:else}
+              <p class="chart-empty">{t('urlDetail.gscNoKeywords')}</p>
+            {/if}
+          </div>
+          <div class="gsc-keywords-panel">
+            <div class="gsc-keywords-heading">
+              <span>{t('urlDetail.gscKeywords28d')}</span>
+              <span class="table-meta">{fmtN(gscKeywords28d?.total || 0)}</span>
+            </div>
+            {#if gscKeywords28d?.rows?.length > 0}
+              <table class="gsc-keywords-table">
+                <thead>
+                  <tr>
+                    <th>{t('gsc.query')}</th>
+                    <th>{t('gsc.impressions')}</th>
+                    <th>{t('gsc.clicks')}</th>
+                    <th>{t('gsc.position')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each gscKeywords28d.rows as row}
+                    <tr>
+                      <td class="cell-title" title={row.query}>{row.query}</td>
+                      <td>{fmtN(row.impressions)}</td>
+                      <td>{fmtN(row.clicks)}</td>
+                      <td>{row.position.toFixed(1)}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {:else}
+              <p class="chart-empty">{t('urlDetail.gscNoKeywords')}</p>
+            {/if}
+          </div>
+        </div>
+      {:else}
+        <p class="chart-empty">{t('urlDetail.gscNoKeywords')}</p>
+      {/if}
+    </div>
+  {/if}
 
   {#if pg.Error}
     <div class="alert alert-error card-section">
@@ -1247,6 +1377,52 @@
     vertical-align: middle;
     margin-left: 6px;
   }
+  .section-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .gsc-keywords-url {
+    min-width: 0;
+    max-width: 55%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .gsc-keywords-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+  .gsc-keywords-panel {
+    min-width: 0;
+  }
+  .gsc-keywords-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+  .gsc-keywords-table {
+    table-layout: fixed;
+    width: 100%;
+  }
+  .gsc-keywords-table th:first-child,
+  .gsc-keywords-table td:first-child {
+    width: 52%;
+  }
+  .gsc-keywords-table th,
+  .gsc-keywords-table td {
+    font-size: 12px;
+  }
   .links-pagination {
     display: flex;
     gap: 8px;
@@ -1325,5 +1501,17 @@
     max-width: 400px;
     margin: 0 auto;
     line-height: 1.5;
+  }
+  @media (max-width: 900px) {
+    .gsc-keywords-grid {
+      grid-template-columns: 1fr;
+    }
+    .gsc-keywords-url {
+      max-width: 100%;
+    }
+    .section-title-row {
+      align-items: flex-start;
+      flex-direction: column;
+    }
   }
 </style>

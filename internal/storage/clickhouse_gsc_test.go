@@ -60,17 +60,24 @@ func TestGSCSortClauseWhitelistsColumnsAndDirection(t *testing.T) {
 }
 
 func TestGSCPageQueryFilterBindsExactPageAndOptionalSearch(t *testing.T) {
-	where, args := gscPageQueryFilter("project-1", "https://example.com/page/", "linux")
+	where, args := gscPageQueryFilter("project-1", "https://example.com/page/", "linux", "", "")
 	wantWhere := "project_id = ? AND page = ? AND positionCaseInsensitive(query, ?) > 0"
 	wantArgs := []any{"project-1", "https://example.com/page/", "linux"}
 	if where != wantWhere || !reflect.DeepEqual(args, wantArgs) {
 		t.Fatalf("gscPageQueryFilter with search = (%q, %#v), want (%q, %#v)", where, args, wantWhere, wantArgs)
 	}
 
-	where, args = gscPageQueryFilter("project-1", "https://example.com/page/", " ")
+	where, args = gscPageQueryFilter("project-1", "https://example.com/page/", " ", "", "")
 	wantWhere = "project_id = ? AND page = ?"
 	wantArgs = []any{"project-1", "https://example.com/page/"}
 	if where != wantWhere || !reflect.DeepEqual(args, wantArgs) {
 		t.Fatalf("gscPageQueryFilter without search = (%q, %#v), want (%q, %#v)", where, args, wantWhere, wantArgs)
+	}
+
+	where, args = gscPageQueryFilter("project-1", "https://example.com/page/", "linux", "2026-05-07", "2026-06-03")
+	wantWhere = "project_id = ? AND page = ? AND positionCaseInsensitive(query, ?) > 0 AND date >= ? AND date <= ?"
+	wantArgs = []any{"project-1", "https://example.com/page/", "linux", "2026-05-07", "2026-06-03"}
+	if where != wantWhere || !reflect.DeepEqual(args, wantArgs) {
+		t.Fatalf("gscPageQueryFilter with dates = (%q, %#v), want (%q, %#v)", where, args, wantWhere, wantArgs)
 	}
 }
