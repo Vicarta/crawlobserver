@@ -177,6 +177,28 @@ func TestLoad_EnvVarOverride(t *testing.T) {
 	}
 }
 
+func TestLoad_GSCShortEnvVars(t *testing.T) {
+	viper.Reset()
+	t.Setenv("GSC_CLIENT_ID", "client-id.apps.googleusercontent.com")
+	t.Setenv("GSC_CLIENT_SECRET", "client-secret")
+	t.Setenv("GSC_REDIRECT_URI", "https://crawlobserver.example.com/api/gsc/callback")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.GSC.ClientID != "client-id.apps.googleusercontent.com" {
+		t.Errorf("ClientID = %q", cfg.GSC.ClientID)
+	}
+	if cfg.GSC.ClientSecret != "client-secret" {
+		t.Errorf("ClientSecret = %q", cfg.GSC.ClientSecret)
+	}
+	if cfg.GSC.RedirectURI != "https://crawlobserver.example.com/api/gsc/callback" {
+		t.Errorf("RedirectURI = %q", cfg.GSC.RedirectURI)
+	}
+}
+
 func TestLoad_GeneratesPasswordWhenEmpty(t *testing.T) {
 	viper.Reset()
 	// By default, server.password is empty and server.username is "admin"

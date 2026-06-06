@@ -15,6 +15,9 @@ services:
     user: "${APP_UID:-1005}:${APP_GID:-1005}"
     environment:
       HOME: /var/lib/crawlobserver
+      GSC_CLIENT_ID: ${GSC_CLIENT_ID:-}
+      GSC_CLIENT_SECRET: ${GSC_CLIENT_SECRET:-}
+      GSC_REDIRECT_URI: ${GSC_REDIRECT_URI:-}
     ports:
       - "127.0.0.1:${CRAWLOBSERVER_HOST_PORT:-8899}:8899"
     volumes:

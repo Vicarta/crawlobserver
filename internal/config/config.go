@@ -273,6 +273,18 @@ func SetDefaults() {
 	viper.SetDefault("announcements.poll_interval", "10m")
 
 	viper.SetDefault("setup_complete", false)
+
+	bindEnvironment()
+}
+
+func bindEnvironment() {
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	// Keep the deployed Docker path simple: these short names can live in
+	// deploy/.env and be passed into the app container by Compose.
+	_ = viper.BindEnv("gsc.client_id", "GSC_CLIENT_ID", "CRAWLOBSERVER_GSC_CLIENT_ID")
+	_ = viper.BindEnv("gsc.client_secret", "GSC_CLIENT_SECRET", "CRAWLOBSERVER_GSC_CLIENT_SECRET")
+	_ = viper.BindEnv("gsc.redirect_uri", "GSC_REDIRECT_URI", "CRAWLOBSERVER_GSC_REDIRECT_URI")
 }
 
 func Load() (*Config, error) {

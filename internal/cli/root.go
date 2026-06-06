@@ -71,6 +71,7 @@ func initConfig() {
 	}
 
 	viper.SetEnvPrefix("CRAWLOBSERVER")
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
 
 	if err := viper.ReadInConfig(); err != nil {

@@ -23,6 +23,7 @@ Edit both files:
 
 - Set the same ClickHouse password in `deploy/.env` and `deploy/config.yaml`.
 - Set a strong `server.password` in `deploy/config.yaml`.
+- Optional: set `GSC_CLIENT_ID`, `GSC_CLIENT_SECRET`, and `GSC_REDIRECT_URI` in `deploy/.env` to enable Google Search Console OAuth.
 - Set `APP_UID` and `APP_GID` in `deploy/.env` to the numeric server user/group that owns the deployment directory.
 - Keep `server.host: 0.0.0.0` inside the container. Compose binds it to host loopback only.
 
@@ -79,5 +80,21 @@ sudo docker compose down
 
 The app image includes Alpine Chromium and sets `CRAWLOBSERVER_CHROME_BIN=/usr/bin/chromium-browser`.
 This avoids Rod downloading an incompatible glibc Chromium snapshot at runtime.
+
+## Google Search Console
+
+Create a Google OAuth client of type `Web application` and add this redirect URI:
+
+```text
+https://crawlobserver.example.com/api/gsc/callback
+```
+
+For production, replace the example host with the real CrawlObserver host and set the same exact URI in `deploy/.env`:
+
+```dotenv
+GSC_CLIENT_ID=...
+GSC_CLIENT_SECRET=...
+GSC_REDIRECT_URI=https://crawlobserver.example.com/api/gsc/callback
+```
 
 Do not commit `deploy/.env` or `deploy/config.yaml`.

@@ -51,6 +51,11 @@ server:
     burst: 20
     auth_requests_per_minute: 20
 
+gsc:
+  client_id: ""
+  client_secret: ""
+  redirect_uri: "https://crawlobserver.example.com/api/gsc/callback"
+
 backup:
   enabled: true
   interval: 6h
