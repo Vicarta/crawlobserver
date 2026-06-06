@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -3979,6 +3980,38 @@ func TestGSCInspection_Success(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestGSCEffectiveDateRangeValidatesAndDefaults(t *testing.T) {
+	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	start, end, err := gscEffectiveDateRange("", "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start != "2025-02-06" || end != "2026-06-03" {
+		t.Fatalf("default range = %s..%s", start, end)
+	}
+	if _, _, err := gscEffectiveDateRange("2026-01-02", "2026-01-01", now); err == nil {
+		t.Fatal("expected invalid reversed range")
+	}
+}
+
+func TestGSCDateChunksWeeklyInclusive(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	chunks := gscDateChunks(start, end, 7)
+	if len(chunks) != 3 {
+		t.Fatalf("len=%d", len(chunks))
+	}
+	got := []string{
+		chunks[0].Start.Format("2006-01-02") + ".." + chunks[0].End.Format("2006-01-02"),
+		chunks[1].Start.Format("2006-01-02") + ".." + chunks[1].End.Format("2006-01-02"),
+		chunks[2].Start.Format("2006-01-02") + ".." + chunks[2].End.Format("2006-01-02"),
+	}
+	want := []string{"2026-01-01..2026-01-07", "2026-01-08..2026-01-14", "2026-01-15..2026-01-15"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("chunks=%v, want %v", got, want)
 	}
 }
 

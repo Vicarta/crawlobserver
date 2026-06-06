@@ -20,6 +20,7 @@ var sqliteUserDataTables = []string{
 	"projects",
 	"api_keys",
 	"gsc_connections",
+	"gsc_fetch_checkpoints",
 	"rulesets",
 	"rules",
 	"provider_connections",

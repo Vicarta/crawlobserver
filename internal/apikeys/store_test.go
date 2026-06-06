@@ -372,6 +372,57 @@ func TestSaveGSCConnectionUpsert(t *testing.T) {
 	}
 }
 
+func TestSaveGSCFetchCheckpointUpsert(t *testing.T) {
+	s := newTestStore(t)
+	p, _ := s.CreateProject("proj")
+	cp := &GSCFetchCheckpoint{
+		ProjectID:     p.ID,
+		PropertyURL:   "https://example.com/",
+		StartDate:     "2025-01-01",
+		EndDate:       "2025-01-31",
+		NextStartDate: "2025-01-08",
+		RowsFetched:   100,
+	}
+	if err := s.SaveGSCFetchCheckpoint(cp); err != nil {
+		t.Fatal(err)
+	}
+
+	cp.NextStartDate = "2025-02-01"
+	cp.RowsFetched = 250
+	cp.Completed = true
+	if err := s.SaveGSCFetchCheckpoint(cp); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.GetGSCFetchCheckpoint(p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NextStartDate != "2025-02-01" || got.RowsFetched != 250 || !got.Completed {
+		t.Fatalf("unexpected checkpoint: %+v", got)
+	}
+}
+
+func TestDeleteGSCFetchCheckpoint(t *testing.T) {
+	s := newTestStore(t)
+	p, _ := s.CreateProject("proj")
+	if err := s.SaveGSCFetchCheckpoint(&GSCFetchCheckpoint{
+		ProjectID:     p.ID,
+		PropertyURL:   "https://example.com/",
+		StartDate:     "2025-01-01",
+		EndDate:       "2025-01-31",
+		NextStartDate: "2025-01-08",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteGSCFetchCheckpoint(p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetGSCFetchCheckpoint(p.ID); err == nil {
+		t.Fatal("expected missing checkpoint after delete")
+	}
+}
+
 func TestGetGSCConnectionNotFound(t *testing.T) {
 	s := newTestStore(t)
 	_, err := s.GetGSCConnection("nonexistent")

@@ -147,7 +147,7 @@ func (c *Client) FetchSearchAnalytics(ctx context.Context, propertyURL, startDat
 	total := 0
 
 	for {
-		applog.Infof("gsc", "querying analytics startRow=%d ...", startRow)
+		applog.Infof("gsc", "querying analytics range=%s..%s startRow=%d ...", startDate, endDate, startRow)
 		req := &searchconsole.SearchAnalyticsQueryRequest{
 			StartDate:  startDate,
 			EndDate:    endDate,
