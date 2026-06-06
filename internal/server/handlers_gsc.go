@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,6 +17,13 @@ import (
 	"github.com/SEObserver/crawlobserver/internal/gsc"
 	"github.com/SEObserver/crawlobserver/internal/storage"
 )
+
+const gscFetchChunkDays = 7
+
+type gscDateChunk struct {
+	Start time.Time
+	End   time.Time
+}
 
 func (s *Server) handleGSCAuthorize(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project_id")
@@ -203,6 +211,8 @@ func (s *Server) handleGSCFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	propertyChanged := body.PropertyURL != "" && body.PropertyURL != conn.PropertyURL
+
 	// Update property URL if provided.
 	if body.PropertyURL != "" {
 		conn.PropertyURL = body.PropertyURL
@@ -217,34 +227,56 @@ func (s *Server) handleGSCFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client, newToken, err := gsc.NewClientFromTokens(r.Context(), &s.cfg.GSC, conn.AccessToken, conn.RefreshToken, conn.TokenExpiry)
+	startDate, endDate, err := gscEffectiveDateRange(body.StartDate, body.EndDate, time.Now())
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "GSC authentication failed, please reconnect")
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Update token if refreshed
-	if newToken.AccessToken != conn.AccessToken {
-		conn.AccessToken = newToken.AccessToken
-		conn.TokenExpiry = newToken.Expiry
-		s.keyStore.SaveGSCConnection(conn)
-	}
 
-	// Treat every manual fetch as a replacement for this project's GSC dataset.
-	// Otherwise repeated refreshes append duplicate rows and inflate totals.
-	if err := s.store.DeleteGSCData(r.Context(), projectID); err != nil {
+	checkpoint, err := s.keyStore.GetGSCFetchCheckpoint(projectID)
+	if err != nil && err != sql.ErrNoRows {
 		internalError(w, r, err)
 		return
 	}
+	resuming := err == nil &&
+		checkpoint.PropertyURL == conn.PropertyURL &&
+		checkpoint.StartDate == startDate &&
+		checkpoint.EndDate == endDate &&
+		!checkpoint.Completed
+	bootstrapExisting := false
+	rangeExplicit := strings.TrimSpace(body.StartDate) != "" || strings.TrimSpace(body.EndDate) != ""
+	if err == sql.ErrNoRows && !propertyChanged && !rangeExplicit {
+		bootstrapExisting = s.hasExistingGSCData(r.Context(), projectID)
+	}
 
-	// Default date range: last 16 months (GSC maximum)
-	endDate := body.EndDate
-	startDate := body.StartDate
-	if endDate == "" {
-		endDate = time.Now().AddDate(0, 0, -3).Format("2006-01-02")
+	if !resuming {
+		// A new property/range is a replacement import. A resume of the same
+		// property/range must not clear already fetched chunks.
+		if !bootstrapExisting {
+			if err := s.store.DeleteGSCData(r.Context(), projectID); err != nil {
+				internalError(w, r, err)
+				return
+			}
+		} else {
+			applog.Infof("gsc", "bootstrapping chunked fetch from existing project data without clearing project %s", projectID)
+		}
+		checkpoint = &apikeys.GSCFetchCheckpoint{
+			ProjectID:     projectID,
+			PropertyURL:   conn.PropertyURL,
+			StartDate:     startDate,
+			EndDate:       endDate,
+			NextStartDate: startDate,
+			RowsFetched:   0,
+			Completed:     false,
+		}
+		if err := s.keyStore.SaveGSCFetchCheckpoint(checkpoint); err != nil {
+			internalError(w, r, err)
+			return
+		}
+	} else if checkpoint.NextStartDate == "" {
+		checkpoint.NextStartDate = startDate
 	}
-	if startDate == "" {
-		startDate = time.Now().AddDate(-1, -4, 0).Format("2006-01-02")
-	}
+	statusResuming := resuming || bootstrapExisting
 
 	// Cancel any existing fetch for this project
 	s.gscFetchMu.Lock()
@@ -255,7 +287,16 @@ func (s *Server) handleGSCFetch(w http.ResponseWriter, r *http.Request) {
 		existing.cancel()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s.gscFetchStatus[projectID] = &gscFetchStatus{Fetching: true, cancel: cancel}
+	s.gscFetchStatus[projectID] = &gscFetchStatus{
+		Fetching:      true,
+		RowsSoFar:     checkpoint.RowsFetched,
+		PropertyURL:   conn.PropertyURL,
+		StartDate:     startDate,
+		EndDate:       endDate,
+		NextStartDate: checkpoint.NextStartDate,
+		Resuming:      statusResuming,
+		cancel:        cancel,
+	}
 	s.gscFetchMu.Unlock()
 
 	// Fetch in background with incremental batch insertion
@@ -265,14 +306,93 @@ func (s *Server) handleGSCFetch(w http.ResponseWriter, r *http.Request) {
 			if r := recover(); r != nil {
 				applog.Errorf("gsc", "fetch PANIC: %v", r)
 				s.gscFetchMu.Lock()
-				s.gscFetchStatus[projectID] = &gscFetchStatus{Fetching: false, Error: fmt.Sprintf("panic: %v", r)}
+				if s.gscFetchStatus[projectID] != nil {
+					s.gscFetchStatus[projectID] = &gscFetchStatus{Fetching: false, Error: fmt.Sprintf("panic: %v", r)}
+				}
 				s.gscFetchMu.Unlock()
 			}
 		}()
-		applog.Infof("gsc", "fetch started for project %s, property %s, range %s to %s", projectID, conn.PropertyURL, startDate, endDate)
+		applog.Infof("gsc", "fetch started for project %s, property %s, range %s to %s, next=%s, resume=%t", projectID, conn.PropertyURL, startDate, endDate, checkpoint.NextStartDate, statusResuming)
 
-		total, err := client.FetchSearchAnalytics(ctx, conn.PropertyURL, startDate, endDate,
-			func(rows []gsc.AnalyticsRow, totalSoFar int) error {
+		client, newToken, err := gsc.NewClientFromTokens(ctx, &s.cfg.GSC, conn.AccessToken, conn.RefreshToken, conn.TokenExpiry)
+		if err != nil {
+			s.setGSCFetchError(projectID, checkpoint.RowsFetched, fmt.Errorf("GSC authentication failed, please reconnect: %w", err))
+			return
+		}
+		if newToken.AccessToken != conn.AccessToken {
+			conn.AccessToken = newToken.AccessToken
+			conn.TokenExpiry = newToken.Expiry
+			_ = s.keyStore.SaveGSCConnection(conn)
+		}
+
+		total, err := s.fetchGSCAnalyticsChunks(ctx, client, conn.PropertyURL, checkpoint)
+		s.gscFetchMu.Lock()
+		if s.gscFetchStatus[projectID] != nil {
+			if err != nil {
+				applog.Errorf("gsc", "fetch error: %v", err)
+				s.gscFetchStatus[projectID] = &gscFetchStatus{Fetching: false, RowsSoFar: total, Error: err.Error()}
+			} else {
+				applog.Infof("gsc", "fetch completed for project %s: %d total rows", projectID, total)
+				delete(s.gscFetchStatus, projectID)
+			}
+		}
+		s.gscFetchMu.Unlock()
+	}()
+
+	writeJSON(w, map[string]string{"status": "fetching"})
+}
+
+func (s *Server) hasExistingGSCData(ctx context.Context, projectID string) bool {
+	stats, err := s.store.GSCOverview(ctx, projectID)
+	if err != nil || stats == nil {
+		return false
+	}
+	return stats.TotalClicks > 0 ||
+		stats.TotalImpressions > 0 ||
+		stats.TotalQueries > 0 ||
+		stats.TotalPages > 0
+}
+
+func (s *Server) fetchGSCAnalyticsChunks(ctx context.Context, client *gsc.Client, propertyURL string, checkpoint *apikeys.GSCFetchCheckpoint) (int, error) {
+	start, err := time.Parse("2006-01-02", checkpoint.NextStartDate)
+	if err != nil {
+		return checkpoint.RowsFetched, fmt.Errorf("invalid gsc checkpoint next_start_date %q: %w", checkpoint.NextStartDate, err)
+	}
+	rangeEnd, err := time.Parse("2006-01-02", checkpoint.EndDate)
+	if err != nil {
+		return checkpoint.RowsFetched, fmt.Errorf("invalid gsc checkpoint end_date %q: %w", checkpoint.EndDate, err)
+	}
+
+	total := checkpoint.RowsFetched
+	chunks := gscDateChunks(start, rangeEnd, gscFetchChunkDays)
+	if len(chunks) == 0 {
+		checkpoint.Completed = true
+		checkpoint.NextStartDate = rangeEnd.AddDate(0, 0, 1).Format("2006-01-02")
+		checkpoint.RowsFetched = total
+		if err := s.keyStore.SaveGSCFetchCheckpoint(checkpoint); err != nil {
+			return total, fmt.Errorf("saving completed gsc checkpoint: %w", err)
+		}
+		return total, nil
+	}
+
+	for _, chunk := range chunks {
+		chunkStart := chunk.Start.Format("2006-01-02")
+		chunkEnd := chunk.End.Format("2006-01-02")
+		s.setGSCFetchProgress(checkpoint.ProjectID, gscFetchStatus{
+			Fetching:          true,
+			RowsSoFar:         total,
+			PropertyURL:       propertyURL,
+			StartDate:         checkpoint.StartDate,
+			EndDate:           checkpoint.EndDate,
+			CurrentChunkStart: chunkStart,
+			CurrentChunkEnd:   chunkEnd,
+			NextStartDate:     checkpoint.NextStartDate,
+		})
+		applog.Infof("gsc", "fetching chunk project=%s property=%s range=%s..%s", checkpoint.ProjectID, propertyURL, chunkStart, chunkEnd)
+
+		baseTotal := total
+		chunkTotal, err := client.FetchSearchAnalytics(ctx, propertyURL, chunkStart, chunkEnd,
+			func(rows []gsc.AnalyticsRow, chunkRowsSoFar int) error {
 				insertRows := make([]storage.GSCAnalyticsInsertRow, len(rows))
 				for i, r := range rows {
 					d, _ := time.Parse("2006-01-02", r.Date)
@@ -288,27 +408,96 @@ func (s *Server) handleGSCFetch(w http.ResponseWriter, r *http.Request) {
 						Position:    float32(r.Position),
 					}
 				}
-				if err := s.store.InsertGSCAnalytics(ctx, projectID, insertRows); err != nil {
+				if err := s.store.InsertGSCAnalytics(ctx, checkpoint.ProjectID, insertRows); err != nil {
 					return fmt.Errorf("inserting batch: %w", err)
 				}
-				s.gscFetchMu.Lock()
-				s.gscFetchStatus[projectID] = &gscFetchStatus{Fetching: true, RowsSoFar: totalSoFar}
-				s.gscFetchMu.Unlock()
-				applog.Infof("gsc", "inserted %d rows (total: %d)", len(rows), totalSoFar)
+				s.setGSCFetchProgress(checkpoint.ProjectID, gscFetchStatus{
+					Fetching:          true,
+					RowsSoFar:         baseTotal + chunkRowsSoFar,
+					PropertyURL:       propertyURL,
+					StartDate:         checkpoint.StartDate,
+					EndDate:           checkpoint.EndDate,
+					CurrentChunkStart: chunkStart,
+					CurrentChunkEnd:   chunkEnd,
+					NextStartDate:     checkpoint.NextStartDate,
+				})
+				applog.Infof("gsc", "inserted %d rows (chunk: %d, total: %d)", len(rows), chunkRowsSoFar, baseTotal+chunkRowsSoFar)
 				return nil
 			})
-		s.gscFetchMu.Lock()
 		if err != nil {
-			applog.Errorf("gsc", "fetch error: %v", err)
-			s.gscFetchStatus[projectID] = &gscFetchStatus{Fetching: false, RowsSoFar: total, Error: err.Error()}
-		} else {
-			applog.Infof("gsc", "fetch completed for project %s: %d total rows", projectID, total)
-			delete(s.gscFetchStatus, projectID)
+			return baseTotal + chunkTotal, err
 		}
-		s.gscFetchMu.Unlock()
-	}()
 
-	writeJSON(w, map[string]string{"status": "fetching"})
+		total += chunkTotal
+		checkpoint.RowsFetched = total
+		checkpoint.NextStartDate = chunk.End.AddDate(0, 0, 1).Format("2006-01-02")
+		checkpoint.Completed = chunk.End.Equal(rangeEnd)
+		if err := s.keyStore.SaveGSCFetchCheckpoint(checkpoint); err != nil {
+			return total, fmt.Errorf("saving gsc checkpoint: %w", err)
+		}
+	}
+
+	return total, nil
+}
+
+func (s *Server) setGSCFetchProgress(projectID string, next gscFetchStatus) {
+	s.gscFetchMu.Lock()
+	current := s.gscFetchStatus[projectID]
+	if current == nil {
+		s.gscFetchMu.Unlock()
+		return
+	}
+	next.cancel = current.cancel
+	s.gscFetchStatus[projectID] = &next
+	s.gscFetchMu.Unlock()
+}
+
+func (s *Server) setGSCFetchError(projectID string, rows int, err error) {
+	applog.Errorf("gsc", "fetch error: %v", err)
+	s.gscFetchMu.Lock()
+	if s.gscFetchStatus[projectID] != nil {
+		s.gscFetchStatus[projectID] = &gscFetchStatus{Fetching: false, RowsSoFar: rows, Error: err.Error()}
+	}
+	s.gscFetchMu.Unlock()
+}
+
+func gscEffectiveDateRange(startDate, endDate string, now time.Time) (string, string, error) {
+	startDate = strings.TrimSpace(startDate)
+	endDate = strings.TrimSpace(endDate)
+	if endDate == "" {
+		endDate = now.AddDate(0, 0, -3).Format("2006-01-02")
+	}
+	if startDate == "" {
+		startDate = now.AddDate(-1, -4, 0).Format("2006-01-02")
+	}
+	start, err := time.Parse("2006-01-02", startDate)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid start_date")
+	}
+	end, err := time.Parse("2006-01-02", endDate)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid end_date")
+	}
+	if start.After(end) {
+		return "", "", fmt.Errorf("start_date must be on or before end_date")
+	}
+	return start.Format("2006-01-02"), end.Format("2006-01-02"), nil
+}
+
+func gscDateChunks(start, end time.Time, days int) []gscDateChunk {
+	if days <= 0 || start.After(end) {
+		return []gscDateChunk{}
+	}
+	var chunks []gscDateChunk
+	for cur := start; !cur.After(end); {
+		chunkEnd := cur.AddDate(0, 0, days-1)
+		if chunkEnd.After(end) {
+			chunkEnd = end
+		}
+		chunks = append(chunks, gscDateChunk{Start: cur, End: chunkEnd})
+		cur = chunkEnd.AddDate(0, 0, 1)
+	}
+	return chunks
 }
 
 func (s *Server) handleGSCStopFetch(w http.ResponseWriter, r *http.Request) {
@@ -326,6 +515,7 @@ func (s *Server) handleGSCStopFetch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGSCDisconnect(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
 	s.keyStore.DeleteGSCConnection(projectID)
+	s.keyStore.DeleteGSCFetchCheckpoint(projectID)
 	s.store.DeleteGSCData(r.Context(), projectID)
 	writeJSON(w, map[string]string{"status": "disconnected"})
 }

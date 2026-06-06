@@ -35,10 +35,17 @@ var frontendFS embed.FS
 
 // gscFetchStatus tracks the progress of a background GSC fetch.
 type gscFetchStatus struct {
-	Fetching  bool   `json:"fetching"`
-	RowsSoFar int    `json:"rows_so_far"`
-	Error     string `json:"error,omitempty"`
-	cancel    context.CancelFunc
+	Fetching          bool   `json:"fetching"`
+	RowsSoFar         int    `json:"rows_so_far"`
+	Error             string `json:"error,omitempty"`
+	PropertyURL       string `json:"property_url,omitempty"`
+	StartDate         string `json:"start_date,omitempty"`
+	EndDate           string `json:"end_date,omitempty"`
+	CurrentChunkStart string `json:"current_chunk_start,omitempty"`
+	CurrentChunkEnd   string `json:"current_chunk_end,omitempty"`
+	NextStartDate     string `json:"next_start_date,omitempty"`
+	Resuming          bool   `json:"resuming,omitempty"`
+	cancel            context.CancelFunc
 }
 
 // phaseResult tracks the outcome of a single fetch phase.

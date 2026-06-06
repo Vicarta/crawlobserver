@@ -112,6 +112,23 @@ func NewStore(dbPath string) (*Store, error) {
 	}
 
 	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS gsc_fetch_checkpoints (
+			project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+			property_url TEXT NOT NULL,
+			start_date TEXT NOT NULL,
+			end_date TEXT NOT NULL,
+			next_start_date TEXT NOT NULL,
+			rows_fetched INTEGER NOT NULL DEFAULT 0,
+			completed INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating gsc_fetch_checkpoints table: %w", err)
+	}
+
+	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS rulesets (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
@@ -409,6 +426,18 @@ type GSCConnection struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+type GSCFetchCheckpoint struct {
+	ProjectID     string    `json:"project_id"`
+	PropertyURL   string    `json:"property_url"`
+	StartDate     string    `json:"start_date"`
+	EndDate       string    `json:"end_date"`
+	NextStartDate string    `json:"next_start_date"`
+	RowsFetched   int       `json:"rows_fetched"`
+	Completed     bool      `json:"completed"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
 func (s *Store) SaveGSCConnection(conn *GSCConnection) error {
 	if conn.ID == "" {
 		conn.ID = uuid.New().String()
@@ -435,6 +464,52 @@ func (s *Store) GetGSCConnection(projectID string) (*GSCConnection, error) {
 		return nil, err
 	}
 	return &c, nil
+}
+
+func (s *Store) SaveGSCFetchCheckpoint(cp *GSCFetchCheckpoint) error {
+	now := time.Now().UTC()
+	completed := 0
+	if cp.Completed {
+		completed = 1
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO gsc_fetch_checkpoints (
+			project_id, property_url, start_date, end_date, next_start_date,
+			rows_fetched, completed, created_at, updated_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(project_id) DO UPDATE SET
+			property_url = excluded.property_url,
+			start_date = excluded.start_date,
+			end_date = excluded.end_date,
+			next_start_date = excluded.next_start_date,
+			rows_fetched = excluded.rows_fetched,
+			completed = excluded.completed,
+			updated_at = excluded.updated_at`,
+		cp.ProjectID, cp.PropertyURL, cp.StartDate, cp.EndDate, cp.NextStartDate,
+		cp.RowsFetched, completed, now, now)
+	return err
+}
+
+func (s *Store) GetGSCFetchCheckpoint(projectID string) (*GSCFetchCheckpoint, error) {
+	var cp GSCFetchCheckpoint
+	var completed int
+	err := s.db.QueryRow(`
+		SELECT project_id, property_url, start_date, end_date, next_start_date,
+			rows_fetched, completed, created_at, updated_at
+		FROM gsc_fetch_checkpoints WHERE project_id = ?`, projectID).
+		Scan(&cp.ProjectID, &cp.PropertyURL, &cp.StartDate, &cp.EndDate, &cp.NextStartDate,
+			&cp.RowsFetched, &completed, &cp.CreatedAt, &cp.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	cp.Completed = completed != 0
+	return &cp, nil
+}
+
+func (s *Store) DeleteGSCFetchCheckpoint(projectID string) error {
+	_, err := s.db.Exec(`DELETE FROM gsc_fetch_checkpoints WHERE project_id = ?`, projectID)
+	return err
 }
 
 func (s *Store) DeleteGSCConnection(projectID string) error {
