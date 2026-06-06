@@ -634,12 +634,22 @@ func (s *Server) handleGSCPageQueries(w http.ResponseWriter, r *http.Request) {
 	if dir == "" {
 		dir = "desc"
 	}
+	startDate := r.URL.Query().Get("start_date")
+	endDate := r.URL.Query().Get("end_date")
+	if r.URL.Query().Get("period") == "28d" && startDate == "" && endDate == "" {
+		end := time.Now().AddDate(0, 0, -3)
+		start := end.AddDate(0, 0, -27)
+		startDate = start.Format("2006-01-02")
+		endDate = end.Format("2006-01-02")
+	}
 	rows, total, err := s.store.GSCQueriesForPage(r.Context(), projectID, page, storage.GSCListOptions{
 		Limit:     limit,
 		Offset:    offset,
 		Search:    r.URL.Query().Get("q"),
 		Sort:      sort,
 		Direction: dir,
+		StartDate: startDate,
+		EndDate:   endDate,
 	})
 	if err != nil {
 		internalError(w, r, err)

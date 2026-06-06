@@ -923,6 +923,9 @@ export async function getGSCPageQueries(
   if (options.q) params.set('q', options.q);
   if (options.sort) params.set('sort', options.sort);
   if (options.dir) params.set('dir', options.dir);
+  if (options.period) params.set('period', options.period);
+  if (options.start_date) params.set('start_date', options.start_date);
+  if (options.end_date) params.set('end_date', options.end_date);
   return fetchJSON(`/projects/${projectId}/gsc/page-queries?${params.toString()}`);
 }
 

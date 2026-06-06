@@ -31,6 +31,8 @@ type GSCListOptions struct {
 	Search    string
 	Sort      string
 	Direction string
+	StartDate string
+	EndDate   string
 }
 
 type GSCCountryRow struct {
@@ -265,7 +267,7 @@ func (s *Store) GSCTopPages(ctx context.Context, projectID string, opts GSCListO
 
 func (s *Store) GSCQueriesForPage(ctx context.Context, projectID, page string, opts GSCListOptions) ([]GSCQueryRow, int, error) {
 	sortExpr, sortDir := gscSortClause(opts.Sort, opts.Direction, "query")
-	where, args := gscPageQueryFilter(projectID, page, opts.Search)
+	where, args := gscPageQueryFilter(projectID, page, opts.Search, opts.StartDate, opts.EndDate)
 
 	var total uint64
 	countQuery := `SELECT uniqExact(query) FROM crawlobserver.gsc_analytics FINAL WHERE ` + where
@@ -316,13 +318,23 @@ func gscDimensionFilter(dimension, projectID, search string) (string, []any) {
 	return where, args
 }
 
-func gscPageQueryFilter(projectID, page, search string) (string, []any) {
+func gscPageQueryFilter(projectID, page, search, startDate, endDate string) (string, []any) {
 	where := "project_id = ? AND page = ?"
 	args := []any{projectID, page}
 	search = strings.TrimSpace(search)
 	if search != "" {
 		where += " AND positionCaseInsensitive(query, ?) > 0"
 		args = append(args, search)
+	}
+	startDate = strings.TrimSpace(startDate)
+	endDate = strings.TrimSpace(endDate)
+	if startDate != "" {
+		where += " AND date >= ?"
+		args = append(args, startDate)
+	}
+	if endDate != "" {
+		where += " AND date <= ?"
+		args = append(args, endDate)
 	}
 	return where, args
 }
