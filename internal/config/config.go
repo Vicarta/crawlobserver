@@ -63,6 +63,15 @@ type CrawlerConfig struct {
 	MaxFrontierSize       int              `mapstructure:"max_frontier_size"`       // 0 = 5_000_000
 	MaxWorkers            int              `mapstructure:"max_workers"`             // 0 = 100
 	ExcludePatterns       []string         `mapstructure:"exclude_patterns"`        // URL substrings to exclude from crawl (links still recorded)
+	CheckExternalLinks    *bool            `mapstructure:"check_external_links"`
+	ExternalLinkWorkers   int              `mapstructure:"external_link_workers"`
+	CrawlSitemapOnly      bool             `mapstructure:"crawl_sitemap_only"`
+	FetchSitemaps         *bool            `mapstructure:"fetch_sitemaps"`
+	CheckPageResources    *bool            `mapstructure:"check_page_resources"`
+	ResourceWorkers       int              `mapstructure:"resource_workers"`
+	FollowJSLinks         bool             `mapstructure:"follow_js_links"`
+	MeasureCWV            bool             `mapstructure:"measure_cwv"`
+	ExtractorSetID        string           `mapstructure:"extractor_set_id"`
 	Retry                 RetryConfig      `mapstructure:"retry"`
 	JSRender              JSRenderConfig   `mapstructure:"js_render"`
 	Cloudflare            CloudflareConfig `mapstructure:"cloudflare"`

@@ -31,11 +31,24 @@ func applySavedCrawlerConfig(cfg *config.Config, saved config.CrawlerConfig) {
 	cfg.Crawler.Cloudflare.APIKey = cloudflareAPIKey
 }
 
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+func boolValue(v *bool, fallback bool) bool {
+	if v == nil {
+		return fallback
+	}
+	return *v
+}
+
 // queuedCrawl holds a crawl waiting for a semaphore slot.
 type queuedCrawl struct {
-	sessionID string
-	engine    *Engine
-	seeds     []string
+	sessionID         string
+	engine            *Engine
+	seeds             []string
+	clearBeforeRun    bool
+	clearBeforeReason string
 }
 
 // ExtractorSetLoader loads an extractor set by ID.
@@ -114,6 +127,7 @@ type CrawlRequest struct {
 	IgnoreRobots        bool     `json:"ignore_robots"`
 	ExcludePatterns     []string `json:"exclude_patterns"`
 	MeasureCWV          bool     `json:"measure_cwv"`
+	FullRecrawl         bool     `json:"full_recrawl"`
 }
 
 // StartCrawl launches a new crawl session in background. Returns the session ID.
@@ -185,6 +199,21 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 	if len(req.ExcludePatterns) > 0 {
 		cfg.Crawler.ExcludePatterns = req.ExcludePatterns
 	}
+	cfg.Crawler.CheckExternalLinks = boolPtr(req.CheckExternalLinks == nil || *req.CheckExternalLinks)
+	cfg.Crawler.ExternalLinkWorkers = req.ExternalLinkWorkers
+	if cfg.Crawler.ExternalLinkWorkers <= 0 {
+		cfg.Crawler.ExternalLinkWorkers = defaultExternalWorkers
+	}
+	cfg.Crawler.CrawlSitemapOnly = req.CrawlSitemapOnly
+	cfg.Crawler.FetchSitemaps = boolPtr(req.FetchSitemaps == nil || *req.FetchSitemaps || req.CrawlSitemapOnly)
+	cfg.Crawler.CheckPageResources = boolPtr(req.CheckPageResources == nil || *req.CheckPageResources)
+	cfg.Crawler.ResourceWorkers = req.ResourceWorkers
+	if cfg.Crawler.ResourceWorkers <= 0 {
+		cfg.Crawler.ResourceWorkers = defaultResourceWorkers
+	}
+	cfg.Crawler.FollowJSLinks = req.FollowJSLinks
+	cfg.Crawler.MeasureCWV = req.MeasureCWV
+	cfg.Crawler.ExtractorSetID = req.ExtractorSetID
 
 	// JS rendering overrides
 	if req.JSRenderMode != "" {
@@ -202,20 +231,20 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 	engine := NewEngine(&cfg, m.store)
 	sessionID := engine.SessionID(req.Seeds)
 	engine.session.ProjectID = req.ProjectID
-	engine.sitemapOnly = req.CrawlSitemapOnly
+	engine.sitemapOnly = cfg.Crawler.CrawlSitemapOnly
 	// Fetch sitemaps: default true; forced true when sitemapOnly
-	engine.fetchSitemaps = req.FetchSitemaps == nil || *req.FetchSitemaps || req.CrawlSitemapOnly
+	engine.fetchSitemaps = boolValue(cfg.Crawler.FetchSitemaps, true) || engine.sitemapOnly
 
 	// External link checking: default true
-	engine.checkExternal = req.CheckExternalLinks == nil || *req.CheckExternalLinks
-	engine.externalWorkers = req.ExternalLinkWorkers
+	engine.checkExternal = boolValue(cfg.Crawler.CheckExternalLinks, true)
+	engine.externalWorkers = cfg.Crawler.ExternalLinkWorkers
 	if engine.externalWorkers <= 0 {
 		engine.externalWorkers = defaultExternalWorkers
 	}
 
 	// Page resource checking: default true
-	engine.checkResources = req.CheckPageResources == nil || *req.CheckPageResources
-	engine.resourceWorkers = req.ResourceWorkers
+	engine.checkResources = boolValue(cfg.Crawler.CheckPageResources, true)
+	engine.resourceWorkers = cfg.Crawler.ResourceWorkers
 	if engine.resourceWorkers <= 0 {
 		engine.resourceWorkers = defaultResourceWorkers
 	}
@@ -224,12 +253,12 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 	engine.excludePatterns = req.ExcludePatterns
 
 	// JS rendering
-	engine.followJSLinks = req.FollowJSLinks
-	engine.measureCWV = req.MeasureCWV
+	engine.followJSLinks = cfg.Crawler.FollowJSLinks
+	engine.measureCWV = cfg.Crawler.MeasureCWV
 
 	// Load extractors if requested
-	if req.ExtractorSetID != "" && m.extractorLoader != nil {
-		es, err := m.extractorLoader.GetExtractorSet(req.ExtractorSetID)
+	if cfg.Crawler.ExtractorSetID != "" && m.extractorLoader != nil {
+		es, err := m.extractorLoader.GetExtractorSet(cfg.Crawler.ExtractorSetID)
 		if err != nil {
 			return "", fmt.Errorf("loading extractor set: %w", err)
 		}
@@ -244,10 +273,10 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 		m.mu.Lock()
 		m.engines[sessionID] = engine
 		m.mu.Unlock()
-		go m.runEngine(sessionID, engine, req.Seeds)
+		go m.runEngine(sessionID, engine, req.Seeds, false, "")
 	default:
 		// All slots taken — enqueue
-		m.enqueue(sessionID, engine, req.Seeds)
+		m.enqueue(sessionID, engine, req.Seeds, false, "")
 	}
 
 	return sessionID, nil
@@ -343,7 +372,8 @@ func (m *Manager) ActiveSessions() []string {
 }
 
 // ResumeCrawl resumes a stopped/completed session by re-crawling undiscovered links.
-// If overrides is non-nil, its non-zero fields override the default config.
+// If overrides.FullRecrawl is true, it clears the existing session data and re-crawls
+// the original seed URLs with the provided overrides.
 func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string, error) {
 	m.mu.RLock()
 	_, running := m.engines[sessionID]
@@ -351,20 +381,36 @@ func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string
 	if running {
 		return "", fmt.Errorf("session %s is already running", sessionID)
 	}
-
-	// Get uncrawled URLs from storage
-	uncrawled, err := m.store.UncrawledURLs(context.Background(), sessionID)
-	if err != nil {
-		return "", fmt.Errorf("fetching uncrawled URLs: %w", err)
-	}
-	if len(uncrawled) == 0 {
-		return "", fmt.Errorf("no uncrawled URLs found for session %s", sessionID)
+	if m.IsQueued(sessionID) {
+		return "", fmt.Errorf("session %s is queued", sessionID)
 	}
 
 	// Get original session info to preserve seed URLs
 	originalSession, err := m.store.GetSession(context.Background(), sessionID)
 	if err != nil {
 		return "", fmt.Errorf("fetching original session: %w", err)
+	}
+	if len(originalSession.SeedURLs) == 0 {
+		return "", fmt.Errorf("session %s has no seed URLs", sessionID)
+	}
+
+	fullRecrawl := overrides != nil && overrides.FullRecrawl
+	seeds := originalSession.SeedURLs
+	clearBeforeRun := false
+	clearBeforeReason := ""
+	if !fullRecrawl {
+		// Get uncrawled URLs from storage
+		uncrawled, err := m.store.UncrawledURLs(context.Background(), sessionID)
+		if err != nil {
+			return "", fmt.Errorf("fetching uncrawled URLs: %w", err)
+		}
+		if len(uncrawled) == 0 {
+			return "", fmt.Errorf("no uncrawled URLs found for session %s", sessionID)
+		}
+		seeds = uncrawled
+	} else {
+		clearBeforeRun = true
+		clearBeforeReason = "full recrawl requested"
 	}
 
 	// Restore config from original session so UA, TLS profile, etc. are preserved
@@ -419,11 +465,32 @@ func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string
 		if len(overrides.ExcludePatterns) > 0 {
 			crawlerCfg.ExcludePatterns = overrides.ExcludePatterns
 		}
+		if overrides.CheckExternalLinks != nil {
+			crawlerCfg.CheckExternalLinks = boolPtr(*overrides.CheckExternalLinks)
+		}
+		if overrides.ExternalLinkWorkers > 0 {
+			crawlerCfg.ExternalLinkWorkers = overrides.ExternalLinkWorkers
+		}
+		crawlerCfg.CrawlSitemapOnly = overrides.CrawlSitemapOnly
+		if overrides.FetchSitemaps != nil {
+			crawlerCfg.FetchSitemaps = boolPtr(*overrides.FetchSitemaps || overrides.CrawlSitemapOnly)
+		}
+		if overrides.CheckPageResources != nil {
+			crawlerCfg.CheckPageResources = boolPtr(*overrides.CheckPageResources)
+		}
+		if overrides.ResourceWorkers > 0 {
+			crawlerCfg.ResourceWorkers = overrides.ResourceWorkers
+		}
+		crawlerCfg.FollowJSLinks = overrides.FollowJSLinks
+		crawlerCfg.MeasureCWV = overrides.MeasureCWV
+		if overrides.ExtractorSetID != "" {
+			crawlerCfg.ExtractorSetID = overrides.ExtractorSetID
+		}
 		cfg.Crawler = crawlerCfg
 	}
 	engine := NewEngine(&cfg, m.store)
 	engine.excludePatterns = cfg.Crawler.ExcludePatterns
-	engine.sitemapOnly = overrides != nil && overrides.CrawlSitemapOnly
+	engine.sitemapOnly = cfg.Crawler.CrawlSitemapOnly
 	// On resume, don't re-fetch sitemaps (already in DB) unless explicitly requested
 	if overrides != nil && overrides.FetchSitemaps != nil {
 		engine.fetchSitemaps = *overrides.FetchSitemaps || engine.sitemapOnly
@@ -436,31 +503,40 @@ func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string
 	engine.session.ProjectID = originalSession.ProjectID
 
 	// Apply non-config overrides (external links, extractors, JS links)
-	if overrides != nil {
-		if overrides.CheckExternalLinks != nil {
-			engine.checkExternal = *overrides.CheckExternalLinks
-		}
-		engine.externalWorkers = overrides.ExternalLinkWorkers
-		if engine.externalWorkers <= 0 {
-			engine.externalWorkers = defaultExternalWorkers
-		}
-		engine.followJSLinks = overrides.FollowJSLinks
-		engine.measureCWV = overrides.MeasureCWV
-		if overrides.ExtractorSetID != "" && m.extractorLoader != nil {
-			if es, err := m.extractorLoader.GetExtractorSet(overrides.ExtractorSetID); err == nil {
-				engine.extractors = es.Extractors
-			}
+	engine.checkExternal = boolValue(cfg.Crawler.CheckExternalLinks, true)
+	engine.externalWorkers = cfg.Crawler.ExternalLinkWorkers
+	if engine.externalWorkers <= 0 {
+		engine.externalWorkers = defaultExternalWorkers
+	}
+	engine.checkResources = boolValue(cfg.Crawler.CheckPageResources, true)
+	engine.resourceWorkers = cfg.Crawler.ResourceWorkers
+	if engine.resourceWorkers <= 0 {
+		engine.resourceWorkers = defaultResourceWorkers
+	}
+	engine.followJSLinks = cfg.Crawler.FollowJSLinks
+	engine.measureCWV = cfg.Crawler.MeasureCWV
+	if cfg.Crawler.ExtractorSetID != "" && m.extractorLoader != nil {
+		if es, err := m.extractorLoader.GetExtractorSet(cfg.Crawler.ExtractorSetID); err == nil {
+			engine.extractors = es.Extractors
 		}
 	}
 
-	// Stream crawled URLs from ClickHouse to pre-seed dedup (no []string allocation).
-	// Only the FNV hash map is kept in memory (~8 bytes/URL, scalable to millions).
-	crawledCount, err := m.store.StreamCrawledURLs(context.Background(), sessionID, engine.MarkSeen)
-	if err != nil {
-		return "", fmt.Errorf("streaming crawled URLs for dedup: %w", err)
+	crawledCount := 0
+	if !fullRecrawl {
+		// Stream crawled URLs from ClickHouse to pre-seed dedup (no []string allocation).
+		// Only the FNV hash map is kept in memory (~8 bytes/URL, scalable to millions).
+		crawledCount, err = m.store.StreamCrawledURLs(context.Background(), sessionID, engine.MarkSeen)
+		if err != nil {
+			return "", fmt.Errorf("streaming crawled URLs for dedup: %w", err)
+		}
 	}
-	applog.Infof("crawler", "Resuming session %s with %d uncrawled URLs (%d already crawled)",
-		sessionID, len(uncrawled), crawledCount)
+	if fullRecrawl {
+		applog.Infof("crawler", "Full recrawl requested for session %s with %d original seed URL(s) (%d existing pages will be replaced)",
+			sessionID, len(seeds), crawledCount)
+	} else {
+		applog.Infof("crawler", "Resuming session %s with %d uncrawled URLs (%d already crawled)",
+			sessionID, len(seeds), crawledCount)
+	}
 
 	// Try to acquire a semaphore slot (non-blocking)
 	select {
@@ -468,9 +544,9 @@ func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string
 		m.mu.Lock()
 		m.engines[sessionID] = engine
 		m.mu.Unlock()
-		go m.runEngine(sessionID, engine, uncrawled)
+		go m.runEngine(sessionID, engine, seeds, clearBeforeRun, clearBeforeReason)
 	default:
-		m.enqueue(sessionID, engine, uncrawled)
+		m.enqueue(sessionID, engine, seeds, clearBeforeRun, clearBeforeReason)
 	}
 
 	return sessionID, nil
@@ -609,9 +685,9 @@ func (m *Manager) RetryFailed(sessionID string, overrides *CrawlRequest) (int, e
 		m.mu.Lock()
 		m.engines[sessionID] = engine
 		m.mu.Unlock()
-		go m.runEngine(sessionID, engine, failedURLs)
+		go m.runEngine(sessionID, engine, failedURLs, false, "")
 	default:
-		m.enqueue(sessionID, engine, failedURLs)
+		m.enqueue(sessionID, engine, failedURLs, false, "")
 	}
 
 	return deleted, nil
@@ -732,9 +808,15 @@ func (m *Manager) RecoverOrphanedSessions(ctx context.Context) {
 }
 
 // enqueue adds a crawl to the FIFO queue and persists a "queued" session in ClickHouse.
-func (m *Manager) enqueue(sessionID string, engine *Engine, seeds []string) {
+func (m *Manager) enqueue(sessionID string, engine *Engine, seeds []string, clearBeforeRun bool, clearBeforeReason string) {
 	m.queueMu.Lock()
-	m.queue = append(m.queue, queuedCrawl{sessionID: sessionID, engine: engine, seeds: seeds})
+	m.queue = append(m.queue, queuedCrawl{
+		sessionID:         sessionID,
+		engine:            engine,
+		seeds:             seeds,
+		clearBeforeRun:    clearBeforeRun,
+		clearBeforeReason: clearBeforeReason,
+	})
 	m.queuedSet[sessionID] = true
 	m.queueMu.Unlock()
 
@@ -785,7 +867,7 @@ func (m *Manager) promoteNext() {
 	m.mu.Unlock()
 
 	applog.Infof("crawler", "Promoting queued session %s", next.sessionID)
-	go m.runEngine(next.sessionID, next.engine, next.seeds)
+	go m.runEngine(next.sessionID, next.engine, next.seeds, next.clearBeforeRun, next.clearBeforeReason)
 }
 
 // IsQueued returns true if the session is waiting in the queue.
@@ -807,7 +889,7 @@ func (m *Manager) QueuedSessions() []string {
 }
 
 // runEngine runs the crawl engine and records the outcome.
-func (m *Manager) runEngine(sessionID string, engine *Engine, seeds []string) {
+func (m *Manager) runEngine(sessionID string, engine *Engine, seeds []string, clearBeforeRun bool, clearBeforeReason string) {
 	defer func() {
 		// Release semaphore slot and promote next queued crawl
 		<-m.sem
@@ -827,6 +909,18 @@ func (m *Manager) runEngine(sessionID string, engine *Engine, seeds []string) {
 		Set("seed_count", len(seeds)).
 		Set("workers", engine.cfg.Crawler.Workers).
 		Set("source", "ui"))
+
+	if clearBeforeRun {
+		applog.Infof("crawler", "Clearing existing data for session %s before crawl (%s)", sessionID, clearBeforeReason)
+		if err := m.store.DeleteSession(context.Background(), sessionID); err != nil {
+			m.mu.Lock()
+			delete(m.engines, sessionID)
+			m.lastErrors[sessionID] = fmt.Sprintf("clearing session before crawl: %v", err)
+			m.mu.Unlock()
+			applog.Errorf("crawler", "Crawl %s failed before start: %v", sessionID, err)
+			return
+		}
+	}
 
 	// Remove engine from map as soon as workers are drained (before finalization).
 	// This makes the SSE report is_running=false immediately when Stop is called.

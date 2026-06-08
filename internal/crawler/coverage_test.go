@@ -3421,7 +3421,7 @@ func TestManagerEnqueueFields(t *testing.T) {
 	// but we can recover and verify the queue was populated
 	func() {
 		defer func() { recover() }()
-		m.enqueue("sess-1", engine, []string{"http://example.com"})
+		m.enqueue("sess-1", engine, []string{"http://example.com"}, false, "")
 	}()
 
 	if len(m.queue) != 1 {

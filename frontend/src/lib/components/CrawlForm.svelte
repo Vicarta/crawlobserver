@@ -71,26 +71,28 @@
   let storeHtml = $state(isNew ? false : crawlerCfg.StoreHTML || false);
   let crawlScope = $state(isNew ? 'host' : crawlerCfg.CrawlScope || 'host');
   let crawlProjectId = $state(isNew ? initialProjectId : session?.ProjectID || '');
-  let checkExternalLinks = $state(true);
-  let externalLinkWorkers = $state(3);
+  let checkExternalLinks = $state(isNew ? true : (crawlerCfg.CheckExternalLinks ?? true));
+  let externalLinkWorkers = $state(isNew ? 3 : crawlerCfg.ExternalLinkWorkers || 3);
   let userAgentPreset = $state(detectedUA.preset);
   let userAgentCustom = $state(detectedUA.custom);
-  let crawlSitemapOnly = $state(false);
-  let fetchSitemaps = $state(isNew ? true : false);
+  let crawlSitemapOnly = $state(isNew ? false : crawlerCfg.CrawlSitemapOnly || false);
+  let fetchSitemaps = $state(isNew ? true : (crawlerCfg.FetchSitemaps ?? !isRetry));
   let tlsProfile = $state(isNew ? '' : crawlerCfg.TLSProfile || '');
   let jsRenderMode = $state(isNew ? 'off' : crawlerCfg.JSRender?.Mode || 'off');
   let jsRenderMaxPages = $state(isNew ? 4 : crawlerCfg.JSRender?.MaxPages || 4);
-  let followJSLinks = $state(false);
-  let measureCWV = $state(false);
+  let followJSLinks = $state(isNew ? false : crawlerCfg.FollowJSLinks || false);
+  let measureCWV = $state(isNew ? false : crawlerCfg.MeasureCWV || false);
   let sourceIP = $state(isNew ? '' : crawlerCfg.SourceIP || '');
   let forceIPv4 = $state(isNew ? false : crawlerCfg.ForceIPv4 || false);
   let ignoreRobots = $state(isNew ? false : false);
   let excludePatternsInput = $state(isNew ? '' : (crawlerCfg.ExcludePatterns || []).join('\n'));
-  let extractorSetId = $state('');
+  let extractorSetId = $state(isNew ? '' : crawlerCfg.ExtractorSetID || '');
   let extractorSets = $state([]);
   let checkingIP = $state(false);
   let checkedIP = $state('');
   let submitting = $state(false);
+  let showFullRecrawlConfirm = $state(false);
+  let pendingRecrawlSignature = $state('');
 
   // Load extractor sets on mount
   getExtractorSets()
@@ -178,9 +180,74 @@
     };
   }
 
+  function comparableResumeOptions() {
+    const options = buildOptions();
+    return {
+      max_pages: Number(options.max_pages) || 0,
+      max_depth: Number(options.max_depth) || 0,
+      workers: Number(options.workers) || 0,
+      delay: options.delay || '',
+      store_html: !!options.store_html,
+      crawl_scope: options.crawl_scope || 'host',
+      check_external_links: !!options.check_external_links,
+      external_link_workers: Number(options.external_link_workers) || 0,
+      user_agent: options.user_agent || '',
+      crawl_sitemap_only: !!options.crawl_sitemap_only,
+      fetch_sitemaps: !!options.fetch_sitemaps,
+      tls_profile: options.tls_profile || '',
+      source_ip: options.source_ip || '',
+      force_ipv4: !!options.force_ipv4,
+      js_render_mode: options.js_render_mode || 'off',
+      js_render_max_pages: Number(options.js_render_max_pages) || 0,
+      follow_js_links: !!options.follow_js_links,
+      measure_cwv: !!options.measure_cwv,
+      ignore_robots: !!options.ignore_robots,
+      exclude_patterns: (options.exclude_patterns || []).join('\n'),
+    };
+  }
+
+  const initialResumeOptions = !isNew && !isRetry ? comparableResumeOptions() : null;
+
+  function resumeOptionLabel(key) {
+    const labels = {
+      max_pages: t('newCrawl.maxPages'),
+      max_depth: t('newCrawl.maxDepth'),
+      workers: t('newCrawl.workers'),
+      delay: t('newCrawl.delay'),
+      store_html: t('newCrawl.storeHtml'),
+      crawl_scope: t('newCrawl.crawlScope'),
+      check_external_links: t('newCrawl.checkExternal'),
+      external_link_workers: t('newCrawl.extWorkers'),
+      user_agent: t('newCrawl.userAgent'),
+      crawl_sitemap_only: t('newCrawl.sitemapOnly'),
+      fetch_sitemaps: t('newCrawl.fetchSitemaps'),
+      tls_profile: t('newCrawl.tlsFingerprint'),
+      source_ip: t('newCrawl.sourceIP'),
+      force_ipv4: t('newCrawl.forceIPv4'),
+      js_render_mode: t('newCrawl.jsRender'),
+      js_render_max_pages: t('newCrawl.jsRenderWorkers'),
+      follow_js_links: t('newCrawl.followJSLinks'),
+      measure_cwv: t('newCrawl.measureCWV'),
+      ignore_robots: t('newCrawl.ignoreRobots'),
+      exclude_patterns: t('newCrawl.excludePatterns'),
+    };
+    return labels[key] || key;
+  }
+
+  function changedResumeOptions() {
+    if (!initialResumeOptions) return [];
+    const current = comparableResumeOptions();
+    return Object.keys(initialResumeOptions)
+      .filter((key) => initialResumeOptions[key] !== current[key])
+      .map((key) => resumeOptionLabel(key));
+  }
+
+  let resumeChangedFields = $derived(changedResumeOptions());
+
   async function handleSubmit() {
     submitting = true;
     try {
+      const options = buildOptions();
       if (isNew) {
         const seeds = seedInput
           .split('\n')
@@ -191,11 +258,25 @@
           submitting = false;
           return;
         }
-        await startCrawl(seeds, buildOptions());
+        await startCrawl(seeds, options);
       } else if (isRetry) {
-        await retryFailed(session.ID, retryStatusCode, buildOptions());
+        await retryFailed(session.ID, retryStatusCode, options);
       } else {
-        await resumeCrawl(session.ID, buildOptions());
+        const changed = changedResumeOptions();
+        const signature = JSON.stringify(comparableResumeOptions());
+        if (changed.length > 0) {
+          if (!showFullRecrawlConfirm || pendingRecrawlSignature !== signature) {
+            showFullRecrawlConfirm = true;
+            pendingRecrawlSignature = signature;
+            submitting = false;
+            return;
+          }
+          options.full_recrawl = true;
+        } else {
+          // Normal Resume should continue the existing frontier without re-fetching sitemaps.
+          options.fetch_sitemaps = false;
+        }
+        await resumeCrawl(session.ID, options);
       }
       onsubmit?.();
     } catch (e) {
@@ -217,7 +298,9 @@
           : t('resumeModal.retryBtn')
         : submitting
           ? t('resumeModal.resuming')
-          : t('resumeModal.resume'),
+          : showFullRecrawlConfirm && resumeChangedFields.length > 0
+            ? t('resumeModal.confirmFullRecrawl')
+            : t('resumeModal.resume'),
   );
 
   let submitDisabled = $derived(submitting || (isNew && !seedInput.trim()));
@@ -232,6 +315,22 @@
   {#if isRetry && retryCount > 0}
     <div class="retry-info">
       {t('resumeModal.retryInfo', { count: retryCount, status: retryStatusCode || '0' })}
+    </div>
+  {/if}
+  {#if !isNew && !isRetry}
+    <div class="resume-info">
+      {t('resumeModal.currentParamsInfo')}
+    </div>
+  {/if}
+  {#if showFullRecrawlConfirm && resumeChangedFields.length > 0}
+    <div class="resume-warning">
+      <strong>{t('resumeModal.fullRecrawlTitle')}</strong>
+      <p>{t('resumeModal.fullRecrawlConfirm')}</p>
+      <div class="changed-fields">
+        {#each resumeChangedFields as field}
+          <span class="changed-field">{field}</span>
+        {/each}
+      </div>
     </div>
   {/if}
 
@@ -562,6 +661,44 @@
     font-size: 13px;
     color: var(--text-secondary);
     margin-bottom: 16px;
+  }
+  .resume-info,
+  .resume-warning {
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+  .resume-info {
+    background: var(--info-bg);
+    border: 1px solid color-mix(in srgb, var(--info) 22%, var(--border));
+    color: var(--text-secondary);
+  }
+  .resume-warning {
+    background: var(--warning-bg);
+    border: 1px solid color-mix(in srgb, var(--warning) 28%, var(--border));
+    color: var(--text-secondary);
+  }
+  .resume-warning strong {
+    display: block;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .resume-warning p {
+    margin: 0 0 8px;
+  }
+  .changed-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .changed-field {
+    border-radius: 999px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 12px;
+    padding: 2px 8px;
   }
   .form-actions {
     display: flex;
