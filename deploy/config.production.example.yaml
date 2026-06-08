@@ -42,6 +42,7 @@ resources:
 server:
   host: 0.0.0.0
   port: 8899
+  public_url: "https://crawlobserver.example.com"
   username: admin
   password: "CHANGE_ME_STRONG_ADMIN_PASSWORD"
   sqlite_path: /var/lib/crawlobserver/crawlobserver.db

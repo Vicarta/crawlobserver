@@ -47,6 +47,8 @@ resources:
 server:
   host: 127.0.0.1
   port: 8899
+  # Public URL shown in API docs when deployed behind HTTPS/reverse proxy
+  public_url: ""
   # Basic auth credentials (CHANGE THESE before exposing to the internet)
   username: admin
   password: crawlobserver
