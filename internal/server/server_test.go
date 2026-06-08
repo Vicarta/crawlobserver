@@ -2684,6 +2684,38 @@ func TestResume_WithOverrides(t *testing.T) {
 	}
 }
 
+func TestResume_WithFullRecrawlFlag(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+
+	mm := srv.manager.(*mockManager)
+
+	body := jsonBody(t, map[string]interface{}{
+		"max_pages":    200,
+		"full_recrawl": true,
+	})
+	req := authRequest(httptest.NewRequest("POST", "/api/sessions/old-sess/resume", body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if len(mm.resumeCalls) != 1 {
+		t.Fatalf("expected 1 resume call, got %d", len(mm.resumeCalls))
+	}
+	rc := mm.resumeCalls[0]
+	if rc.Overrides == nil {
+		t.Fatal("expected overrides to be non-nil")
+	}
+	if !rc.Overrides.FullRecrawl {
+		t.Fatal("expected full_recrawl to be passed to manager")
+	}
+	if rc.Overrides.MaxPages != 200 {
+		t.Errorf("expected max_pages 200, got %d", rc.Overrides.MaxPages)
+	}
+}
+
 func TestResume_WithoutBody(t *testing.T) {
 	srv, handler, _ := newTestServer(t)
 
