@@ -325,6 +325,45 @@ curl -X POST \
 
 Use this after site fixes when only selected URLs need fresh status, title, metadata, resources, or rendered content.
 
+## Daily Delta Crawl
+
+Daily Delta Crawl is project-level. It checks configured candidate sources, starts a new bounded delta crawl session, and preserves previous sessions.
+Candidate limits are split between known changed/problem/stale URLs and new URLs. The crawler also follows internal links discovered from launched candidates within the configured scope, discovery depth, and discovered-page budget. Manual queue URLs are marked consumed only when they are actually launched.
+
+Read settings:
+
+```bash
+curl -H "X-API-Key: $ADMIN_API_KEY" \
+  https://crawlobserver.aibizmate.com/api/projects/{project_id}/delta/settings
+```
+
+Preview candidates:
+
+```bash
+curl -H "X-API-Key: $ADMIN_API_KEY" \
+  https://crawlobserver.aibizmate.com/api/projects/{project_id}/delta/preview
+```
+
+Queue manual URLs:
+
+```bash
+curl -X POST \
+  -H "X-API-Key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"urls":["https://example.com/new-page/"]}' \
+  https://crawlobserver.aibizmate.com/api/projects/{project_id}/delta/manual-queue
+```
+
+Start a delta run:
+
+```bash
+curl -X POST \
+  -H "X-API-Key: $ADMIN_API_KEY" \
+  https://crawlobserver.aibizmate.com/api/projects/{project_id}/delta/run
+```
+
+Only admin/general credentials should update settings or start runs. A delta run returns a new `session_id`; monitor it like any other crawl session.
+
 ## API Key Management
 
 Only admins/general keys can manage API keys.
@@ -460,6 +499,11 @@ https://crawlobserver.aibizmate.com/api
 | `GET` | `/projects/{id}/gsc/queries` | GSC queries. |
 | `GET` | `/projects/{id}/gsc/pages` | GSC page performance. |
 | `GET` | `/projects/{id}/gsc/timeline` | GSC timeline. |
+| `GET` | `/projects/{id}/delta/settings` | Daily Delta Crawl settings. |
+| `PUT` | `/projects/{id}/delta/settings` | Update Daily Delta settings. Admin/general key only. |
+| `GET` | `/projects/{id}/delta/preview` | Preview Daily Delta candidates. |
+| `POST` | `/projects/{id}/delta/manual-queue` | Queue manual Delta URLs. Admin/general key only. |
+| `POST` | `/projects/{id}/delta/run` | Start Daily Delta run. Admin/general key only. |
 | `POST` | `/crawl` | Start crawl. Admin/general key only. |
 | `POST` | `/sessions/{id}/resume` | Resume or full-recrawl. Admin/general key only. |
 | `POST` | `/sessions/{id}/rescan-pages` | Rescan selected URLs. Admin/general key only. |
@@ -468,4 +512,3 @@ https://crawlobserver.aibizmate.com/api
 | `GET` | `/api-keys` | List API keys. Admin/general key only. |
 | `POST` | `/api-keys` | Create API key. Admin/general key only. |
 | `DELETE` | `/api-keys/{id}` | Revoke API key. Admin/general key only. |
-

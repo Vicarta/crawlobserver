@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -106,6 +107,17 @@ func (m *mockStore) ListSessionsPaginated(_ context.Context, limit, offset int, 
 		return nil, 0, m.err
 	}
 	return m.sessions, len(m.sessions), nil
+}
+
+func (m *mockStore) LatestProjectSession(ctx context.Context, projectID string) (*storage.CrawlSession, error) {
+	sessions, err := m.ListSessions(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if len(sessions) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return &sessions[0], nil
 }
 
 func (m *mockStore) GetSession(_ context.Context, sessionID string) (*storage.CrawlSession, error) {
@@ -337,6 +349,26 @@ func (m *mockStore) GSCInspectionResults(_ context.Context, _ string, _, _ int) 
 }
 func (m *mockStore) DeleteGSCData(_ context.Context, _ string) error {
 	return m.err
+}
+
+func (m *mockStore) DeltaGSCCandidateURLs(_ context.Context, _ string, _ int) ([]string, error) {
+	return []string{}, m.err
+}
+
+func (m *mockStore) DeltaSitemapCandidateURLs(_ context.Context, _ string, _ int) ([]string, error) {
+	return []string{}, m.err
+}
+
+func (m *mockStore) DeltaProblemPageURLs(_ context.Context, _ string, _ int) ([]string, error) {
+	return []string{}, m.err
+}
+
+func (m *mockStore) DeltaStalePageURLs(_ context.Context, _ string, _ time.Time, _ int) ([]string, error) {
+	return []string{}, m.err
+}
+
+func (m *mockStore) DeltaKnownPageURLs(_ context.Context, _ string, _ int) ([]string, error) {
+	return []string{}, m.err
 }
 
 // Custom Tests mock methods

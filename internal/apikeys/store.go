@@ -4,10 +4,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/SEObserver/crawlobserver/internal/applog"
@@ -22,6 +25,88 @@ type Project struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type ProjectDeltaSettings struct {
+	ProjectID                                string      `json:"project_id"`
+	Enabled                                  bool        `json:"enabled"`
+	ScheduleTime                             string      `json:"schedule_time"`
+	Timezone                                 string      `json:"timezone"`
+	SourceSitemap                            bool        `json:"source_sitemap"`
+	SourceGSC                                bool        `json:"source_gsc"`
+	SourceProblemPages                       bool        `json:"source_problem_pages"`
+	SourceStalePages                         bool        `json:"source_stale_pages"`
+	SourceManualQueue                        bool        `json:"source_manual_queue"`
+	StaleAfterDays                           int         `json:"stale_after_days"`
+	MaxCandidatesPerRun                      int         `json:"max_candidates_per_run"`
+	MaxChangedPagesPerRun                    int         `json:"max_changed_pages_per_run"`
+	MaxNewPagesPerRun                        int         `json:"max_new_pages_per_run"`
+	MaxDiscoveredPagesPerRun                 int         `json:"max_discovered_pages_per_run"`
+	MaxDiscoveryDepth                        int         `json:"max_discovery_depth"`
+	RespectRobotsTxt                         bool        `json:"respect_robots_txt"`
+	UseConditionalRequests                   bool        `json:"use_conditional_requests"`
+	FallbackToGetWhenHeadFails               bool        `json:"fallback_to_get_when_head_fails"`
+	EnableJSRenderingForDelta                string      `json:"enable_js_rendering_for_delta"`
+	RateLimitRequestsPerSecond               float64     `json:"rate_limit_requests_per_second"`
+	RetryCount                               int         `json:"retry_count"`
+	RetryBackoffSeconds                      int         `json:"retry_backoff_seconds"`
+	RecomputePageRankWhenGraphChanged        bool        `json:"recompute_pagerank_when_graph_changed"`
+	KeepDeltaHistoryDays                     int         `json:"keep_delta_history_days"`
+	CanonicalHostPolicy                      string      `json:"canonical_host_policy"`
+	NormalizeTrailingSlash                   bool        `json:"normalize_trailing_slash"`
+	StripFragments                           bool        `json:"strip_fragments"`
+	StripTrackingParams                      bool        `json:"strip_tracking_params"`
+	AllowedQueryParams                       StringSlice `json:"allowed_query_params"`
+	BlockedURLPatterns                       StringSlice `json:"blocked_url_patterns"`
+	AllowedURLPatterns                       StringSlice `json:"allowed_url_patterns"`
+	RequireConfirmationOnScopeChange         bool        `json:"require_confirmation_on_scope_change"`
+	RequireConfirmationOnFullRecrawl         bool        `json:"require_confirmation_on_full_recrawl"`
+	NeverDeletePreviousSnapshotBeforeSuccess bool        `json:"never_delete_previous_snapshot_before_success"`
+	PauseDeltaWhenFullCrawlRunning           bool        `json:"pause_delta_when_full_crawl_running"`
+	MaxRuntimeMinutes                        int         `json:"max_runtime_minutes"`
+	OnLimitReached                           string      `json:"on_limit_reached"`
+	LastRunAt                                *time.Time  `json:"last_run_at"`
+	LastSessionID                            string      `json:"last_session_id"`
+	UpdatedAt                                time.Time   `json:"updated_at"`
+}
+
+type StringSlice []string
+
+func (s StringSlice) Value() (driver.Value, error) {
+	if s == nil {
+		return "[]", nil
+	}
+	b, err := json.Marshal([]string(s))
+	if err != nil {
+		return nil, err
+	}
+	return string(b), nil
+}
+
+func (s *StringSlice) Scan(value interface{}) error {
+	if value == nil {
+		*s = []string{}
+		return nil
+	}
+	var raw string
+	switch v := value.(type) {
+	case string:
+		raw = v
+	case []byte:
+		raw = string(v)
+	default:
+		return fmt.Errorf("unsupported StringSlice scan type %T", value)
+	}
+	if raw == "" {
+		*s = []string{}
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return err
+	}
+	*s = out
+	return nil
 }
 
 type APIKey struct {
@@ -54,6 +139,9 @@ func NewStore(dbPath string) (*Store, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite: %w", err)
+	}
+	if dbPath == ":memory:" {
+		db.SetMaxOpenConns(1)
 	}
 
 	// Enable WAL mode and foreign keys
@@ -165,6 +253,68 @@ func NewStore(dbPath string) (*Store, error) {
 	`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("creating gsc_fetch_checkpoints table: %w", err)
+	}
+
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS project_delta_settings (
+			project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+			enabled INTEGER NOT NULL DEFAULT 0,
+			schedule_time TEXT NOT NULL DEFAULT '03:00',
+			timezone TEXT NOT NULL DEFAULT 'UTC',
+			source_sitemap INTEGER NOT NULL DEFAULT 1,
+			source_gsc INTEGER NOT NULL DEFAULT 1,
+			source_problem_pages INTEGER NOT NULL DEFAULT 1,
+			source_stale_pages INTEGER NOT NULL DEFAULT 1,
+			source_manual_queue INTEGER NOT NULL DEFAULT 1,
+			stale_after_days INTEGER NOT NULL DEFAULT 30,
+			max_candidates_per_run INTEGER NOT NULL DEFAULT 5000,
+			max_changed_pages_per_run INTEGER NOT NULL DEFAULT 1000,
+			max_new_pages_per_run INTEGER NOT NULL DEFAULT 1000,
+			max_discovered_pages_per_run INTEGER NOT NULL DEFAULT 500,
+			max_discovery_depth INTEGER NOT NULL DEFAULT 1,
+			respect_robots_txt INTEGER NOT NULL DEFAULT 1,
+			use_conditional_requests INTEGER NOT NULL DEFAULT 1,
+			fallback_to_get_when_head_fails INTEGER NOT NULL DEFAULT 1,
+			enable_js_rendering_for_delta TEXT NOT NULL DEFAULT 'inherit',
+			rate_limit_requests_per_second REAL NOT NULL DEFAULT 1.0,
+			retry_count INTEGER NOT NULL DEFAULT 2,
+			retry_backoff_seconds INTEGER NOT NULL DEFAULT 10,
+			recompute_pagerank_when_graph_changed INTEGER NOT NULL DEFAULT 1,
+			keep_delta_history_days INTEGER NOT NULL DEFAULT 90,
+			canonical_host_policy TEXT NOT NULL DEFAULT 'project',
+			normalize_trailing_slash INTEGER NOT NULL DEFAULT 1,
+			strip_fragments INTEGER NOT NULL DEFAULT 1,
+			strip_tracking_params INTEGER NOT NULL DEFAULT 1,
+			allowed_query_params TEXT NOT NULL DEFAULT '[]',
+			blocked_url_patterns TEXT NOT NULL DEFAULT '[]',
+			allowed_url_patterns TEXT NOT NULL DEFAULT '[]',
+			require_confirmation_on_scope_change INTEGER NOT NULL DEFAULT 1,
+			require_confirmation_on_full_recrawl INTEGER NOT NULL DEFAULT 1,
+			never_delete_previous_snapshot_before_success INTEGER NOT NULL DEFAULT 1,
+			pause_delta_when_full_crawl_running INTEGER NOT NULL DEFAULT 1,
+			max_runtime_minutes INTEGER NOT NULL DEFAULT 120,
+			on_limit_reached TEXT NOT NULL DEFAULT 'defer',
+			last_run_at DATETIME,
+			last_session_id TEXT NOT NULL DEFAULT '',
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating project_delta_settings table: %w", err)
+	}
+
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS project_delta_manual_queue (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			url TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			consumed_at DATETIME,
+			UNIQUE(project_id, url, consumed_at)
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating project_delta_manual_queue table: %w", err)
 	}
 
 	if _, err := db.Exec(`
@@ -367,6 +517,367 @@ func (s *Store) DeleteProject(id string) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("project not found")
+	}
+	return nil
+}
+
+// --- Project Delta Crawl Settings ---
+
+func DefaultProjectDeltaSettings(projectID string) ProjectDeltaSettings {
+	return ProjectDeltaSettings{
+		ProjectID:                                projectID,
+		Enabled:                                  false,
+		ScheduleTime:                             "03:00",
+		Timezone:                                 "UTC",
+		SourceSitemap:                            true,
+		SourceGSC:                                true,
+		SourceProblemPages:                       true,
+		SourceStalePages:                         true,
+		SourceManualQueue:                        true,
+		StaleAfterDays:                           30,
+		MaxCandidatesPerRun:                      5000,
+		MaxChangedPagesPerRun:                    1000,
+		MaxNewPagesPerRun:                        1000,
+		MaxDiscoveredPagesPerRun:                 500,
+		MaxDiscoveryDepth:                        1,
+		RespectRobotsTxt:                         true,
+		UseConditionalRequests:                   true,
+		FallbackToGetWhenHeadFails:               true,
+		EnableJSRenderingForDelta:                "inherit",
+		RateLimitRequestsPerSecond:               1,
+		RetryCount:                               2,
+		RetryBackoffSeconds:                      10,
+		RecomputePageRankWhenGraphChanged:        true,
+		KeepDeltaHistoryDays:                     90,
+		CanonicalHostPolicy:                      "project",
+		NormalizeTrailingSlash:                   true,
+		StripFragments:                           true,
+		StripTrackingParams:                      true,
+		AllowedQueryParams:                       []string{},
+		BlockedURLPatterns:                       []string{},
+		AllowedURLPatterns:                       []string{},
+		RequireConfirmationOnScopeChange:         true,
+		RequireConfirmationOnFullRecrawl:         true,
+		NeverDeletePreviousSnapshotBeforeSuccess: true,
+		PauseDeltaWhenFullCrawlRunning:           true,
+		MaxRuntimeMinutes:                        120,
+		OnLimitReached:                           "defer",
+		UpdatedAt:                                time.Now().UTC(),
+	}
+}
+
+func sanitizeDeltaSettings(in ProjectDeltaSettings) ProjectDeltaSettings {
+	out := in
+	if out.ScheduleTime == "" {
+		out.ScheduleTime = "03:00"
+	}
+	if out.Timezone == "" {
+		out.Timezone = "UTC"
+	}
+	if out.StaleAfterDays <= 0 {
+		out.StaleAfterDays = 30
+	}
+	if out.MaxCandidatesPerRun <= 0 {
+		out.MaxCandidatesPerRun = 5000
+	}
+	if out.MaxChangedPagesPerRun <= 0 {
+		out.MaxChangedPagesPerRun = 1000
+	}
+	if out.MaxNewPagesPerRun <= 0 {
+		out.MaxNewPagesPerRun = 1000
+	}
+	if out.MaxDiscoveredPagesPerRun < 0 {
+		out.MaxDiscoveredPagesPerRun = 0
+	}
+	if out.MaxDiscoveryDepth < 0 {
+		out.MaxDiscoveryDepth = 0
+	}
+	if out.EnableJSRenderingForDelta == "" {
+		out.EnableJSRenderingForDelta = "inherit"
+	}
+	if out.RateLimitRequestsPerSecond <= 0 {
+		out.RateLimitRequestsPerSecond = 1
+	}
+	if out.RetryCount < 0 {
+		out.RetryCount = 0
+	}
+	if out.RetryBackoffSeconds <= 0 {
+		out.RetryBackoffSeconds = 10
+	}
+	if out.KeepDeltaHistoryDays <= 0 {
+		out.KeepDeltaHistoryDays = 90
+	}
+	if out.CanonicalHostPolicy == "" {
+		out.CanonicalHostPolicy = "project"
+	}
+	if out.MaxRuntimeMinutes <= 0 {
+		out.MaxRuntimeMinutes = 120
+	}
+	if out.OnLimitReached == "" {
+		out.OnLimitReached = "defer"
+	}
+	if out.AllowedQueryParams == nil {
+		out.AllowedQueryParams = []string{}
+	}
+	if out.BlockedURLPatterns == nil {
+		out.BlockedURLPatterns = []string{}
+	}
+	if out.AllowedURLPatterns == nil {
+		out.AllowedURLPatterns = []string{}
+	}
+	return out
+}
+
+func (s *Store) GetProjectDeltaSettings(projectID string) (*ProjectDeltaSettings, error) {
+	defaults := DefaultProjectDeltaSettings(projectID)
+	row := s.db.QueryRow(`
+		SELECT project_id, enabled, schedule_time, timezone,
+			source_sitemap, source_gsc, source_problem_pages, source_stale_pages, source_manual_queue,
+			stale_after_days, max_candidates_per_run, max_changed_pages_per_run, max_new_pages_per_run,
+			max_discovered_pages_per_run, max_discovery_depth, respect_robots_txt, use_conditional_requests,
+			fallback_to_get_when_head_fails, enable_js_rendering_for_delta, rate_limit_requests_per_second,
+			retry_count, retry_backoff_seconds, recompute_pagerank_when_graph_changed, keep_delta_history_days,
+			canonical_host_policy, normalize_trailing_slash, strip_fragments, strip_tracking_params,
+			allowed_query_params, blocked_url_patterns, allowed_url_patterns,
+			require_confirmation_on_scope_change, require_confirmation_on_full_recrawl,
+			never_delete_previous_snapshot_before_success, pause_delta_when_full_crawl_running,
+			max_runtime_minutes, on_limit_reached, last_run_at, last_session_id, updated_at
+		FROM project_delta_settings WHERE project_id = ?`, projectID)
+
+	var st ProjectDeltaSettings
+	var enabled, sourceSitemap, sourceGSC, sourceProblemPages, sourceStalePages, sourceManualQueue int
+	var respectRobots, useConditional, fallbackGet, recomputePR int
+	var normalizeSlash, stripFragments, stripTracking int
+	var requireScopeConfirm, requireRecrawlConfirm, neverDelete, pauseWhenFull int
+	if err := row.Scan(
+		&st.ProjectID, &enabled, &st.ScheduleTime, &st.Timezone,
+		&sourceSitemap, &sourceGSC, &sourceProblemPages, &sourceStalePages, &sourceManualQueue,
+		&st.StaleAfterDays, &st.MaxCandidatesPerRun, &st.MaxChangedPagesPerRun, &st.MaxNewPagesPerRun,
+		&st.MaxDiscoveredPagesPerRun, &st.MaxDiscoveryDepth, &respectRobots, &useConditional,
+		&fallbackGet, &st.EnableJSRenderingForDelta, &st.RateLimitRequestsPerSecond,
+		&st.RetryCount, &st.RetryBackoffSeconds, &recomputePR, &st.KeepDeltaHistoryDays,
+		&st.CanonicalHostPolicy, &normalizeSlash, &stripFragments, &stripTracking,
+		&st.AllowedQueryParams, &st.BlockedURLPatterns, &st.AllowedURLPatterns,
+		&requireScopeConfirm, &requireRecrawlConfirm, &neverDelete, &pauseWhenFull,
+		&st.MaxRuntimeMinutes, &st.OnLimitReached, &st.LastRunAt, &st.LastSessionID, &st.UpdatedAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return &defaults, nil
+		}
+		return nil, err
+	}
+	st.Enabled = enabled != 0
+	st.SourceSitemap = sourceSitemap != 0
+	st.SourceGSC = sourceGSC != 0
+	st.SourceProblemPages = sourceProblemPages != 0
+	st.SourceStalePages = sourceStalePages != 0
+	st.SourceManualQueue = sourceManualQueue != 0
+	st.RespectRobotsTxt = respectRobots != 0
+	st.UseConditionalRequests = useConditional != 0
+	st.FallbackToGetWhenHeadFails = fallbackGet != 0
+	st.RecomputePageRankWhenGraphChanged = recomputePR != 0
+	st.NormalizeTrailingSlash = normalizeSlash != 0
+	st.StripFragments = stripFragments != 0
+	st.StripTrackingParams = stripTracking != 0
+	st.RequireConfirmationOnScopeChange = requireScopeConfirm != 0
+	st.RequireConfirmationOnFullRecrawl = requireRecrawlConfirm != 0
+	st.NeverDeletePreviousSnapshotBeforeSuccess = neverDelete != 0
+	st.PauseDeltaWhenFullCrawlRunning = pauseWhenFull != 0
+	return &st, nil
+}
+
+func (s *Store) SaveProjectDeltaSettings(settings ProjectDeltaSettings) (*ProjectDeltaSettings, error) {
+	if settings.ProjectID == "" {
+		return nil, fmt.Errorf("project_id is required")
+	}
+	settings = sanitizeDeltaSettings(settings)
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`
+		INSERT INTO project_delta_settings (
+			project_id, enabled, schedule_time, timezone,
+			source_sitemap, source_gsc, source_problem_pages, source_stale_pages, source_manual_queue,
+			stale_after_days, max_candidates_per_run, max_changed_pages_per_run, max_new_pages_per_run,
+			max_discovered_pages_per_run, max_discovery_depth, respect_robots_txt, use_conditional_requests,
+			fallback_to_get_when_head_fails, enable_js_rendering_for_delta, rate_limit_requests_per_second,
+			retry_count, retry_backoff_seconds, recompute_pagerank_when_graph_changed, keep_delta_history_days,
+			canonical_host_policy, normalize_trailing_slash, strip_fragments, strip_tracking_params,
+			allowed_query_params, blocked_url_patterns, allowed_url_patterns,
+			require_confirmation_on_scope_change, require_confirmation_on_full_recrawl,
+			never_delete_previous_snapshot_before_success, pause_delta_when_full_crawl_running,
+			max_runtime_minutes, on_limit_reached, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(project_id) DO UPDATE SET
+			enabled = excluded.enabled,
+			schedule_time = excluded.schedule_time,
+			timezone = excluded.timezone,
+			source_sitemap = excluded.source_sitemap,
+			source_gsc = excluded.source_gsc,
+			source_problem_pages = excluded.source_problem_pages,
+			source_stale_pages = excluded.source_stale_pages,
+			source_manual_queue = excluded.source_manual_queue,
+			stale_after_days = excluded.stale_after_days,
+			max_candidates_per_run = excluded.max_candidates_per_run,
+			max_changed_pages_per_run = excluded.max_changed_pages_per_run,
+			max_new_pages_per_run = excluded.max_new_pages_per_run,
+			max_discovered_pages_per_run = excluded.max_discovered_pages_per_run,
+			max_discovery_depth = excluded.max_discovery_depth,
+			respect_robots_txt = excluded.respect_robots_txt,
+			use_conditional_requests = excluded.use_conditional_requests,
+			fallback_to_get_when_head_fails = excluded.fallback_to_get_when_head_fails,
+			enable_js_rendering_for_delta = excluded.enable_js_rendering_for_delta,
+			rate_limit_requests_per_second = excluded.rate_limit_requests_per_second,
+			retry_count = excluded.retry_count,
+			retry_backoff_seconds = excluded.retry_backoff_seconds,
+			recompute_pagerank_when_graph_changed = excluded.recompute_pagerank_when_graph_changed,
+			keep_delta_history_days = excluded.keep_delta_history_days,
+			canonical_host_policy = excluded.canonical_host_policy,
+			normalize_trailing_slash = excluded.normalize_trailing_slash,
+			strip_fragments = excluded.strip_fragments,
+			strip_tracking_params = excluded.strip_tracking_params,
+			allowed_query_params = excluded.allowed_query_params,
+			blocked_url_patterns = excluded.blocked_url_patterns,
+			allowed_url_patterns = excluded.allowed_url_patterns,
+			require_confirmation_on_scope_change = excluded.require_confirmation_on_scope_change,
+			require_confirmation_on_full_recrawl = excluded.require_confirmation_on_full_recrawl,
+			never_delete_previous_snapshot_before_success = excluded.never_delete_previous_snapshot_before_success,
+			pause_delta_when_full_crawl_running = excluded.pause_delta_when_full_crawl_running,
+			max_runtime_minutes = excluded.max_runtime_minutes,
+			on_limit_reached = excluded.on_limit_reached,
+			updated_at = excluded.updated_at`,
+		settings.ProjectID, deltaBoolInt(settings.Enabled), settings.ScheduleTime, settings.Timezone,
+		deltaBoolInt(settings.SourceSitemap), deltaBoolInt(settings.SourceGSC), deltaBoolInt(settings.SourceProblemPages), deltaBoolInt(settings.SourceStalePages), deltaBoolInt(settings.SourceManualQueue),
+		settings.StaleAfterDays, settings.MaxCandidatesPerRun, settings.MaxChangedPagesPerRun, settings.MaxNewPagesPerRun,
+		settings.MaxDiscoveredPagesPerRun, settings.MaxDiscoveryDepth, deltaBoolInt(settings.RespectRobotsTxt), deltaBoolInt(settings.UseConditionalRequests),
+		deltaBoolInt(settings.FallbackToGetWhenHeadFails), settings.EnableJSRenderingForDelta, settings.RateLimitRequestsPerSecond,
+		settings.RetryCount, settings.RetryBackoffSeconds, deltaBoolInt(settings.RecomputePageRankWhenGraphChanged), settings.KeepDeltaHistoryDays,
+		settings.CanonicalHostPolicy, deltaBoolInt(settings.NormalizeTrailingSlash), deltaBoolInt(settings.StripFragments), deltaBoolInt(settings.StripTrackingParams),
+		settings.AllowedQueryParams, settings.BlockedURLPatterns, settings.AllowedURLPatterns,
+		deltaBoolInt(settings.RequireConfirmationOnScopeChange), deltaBoolInt(settings.RequireConfirmationOnFullRecrawl),
+		deltaBoolInt(settings.NeverDeletePreviousSnapshotBeforeSuccess), deltaBoolInt(settings.PauseDeltaWhenFullCrawlRunning),
+		settings.MaxRuntimeMinutes, settings.OnLimitReached, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return s.GetProjectDeltaSettings(settings.ProjectID)
+}
+
+func deltaBoolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func (s *Store) ListEnabledProjectDeltaSettings() ([]ProjectDeltaSettings, error) {
+	rows, err := s.db.Query(`SELECT project_id FROM project_delta_settings WHERE enabled = 1 ORDER BY project_id`)
+	if err != nil {
+		return nil, err
+	}
+	var projectIDs []string
+	for rows.Next() {
+		var projectID string
+		if err := rows.Scan(&projectID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		projectIDs = append(projectIDs, projectID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	var result []ProjectDeltaSettings
+	for _, projectID := range projectIDs {
+		st, err := s.GetProjectDeltaSettings(projectID)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *st)
+	}
+	if result == nil {
+		result = []ProjectDeltaSettings{}
+	}
+	return result, nil
+}
+
+func (s *Store) MarkProjectDeltaRun(projectID, sessionID string, when time.Time) error {
+	_, err := s.db.Exec(`
+		INSERT INTO project_delta_settings (project_id, last_run_at, last_session_id, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(project_id) DO UPDATE SET
+			last_run_at = excluded.last_run_at,
+			last_session_id = excluded.last_session_id,
+			updated_at = excluded.updated_at`,
+		projectID, when.UTC(), sessionID, when.UTC())
+	return err
+}
+
+func (s *Store) AddProjectDeltaManualURLs(projectID string, urls []string) (int, error) {
+	count := 0
+	for _, raw := range urls {
+		u := strings.TrimSpace(raw)
+		if u == "" {
+			continue
+		}
+		res, err := s.db.Exec(`
+			INSERT OR IGNORE INTO project_delta_manual_queue (id, project_id, url, created_at)
+			VALUES (?, ?, ?, ?)`,
+			uuid.New().String(), projectID, u, time.Now().UTC())
+		if err != nil {
+			return count, err
+		}
+		inserted, err := res.RowsAffected()
+		if err != nil {
+			return count, err
+		}
+		count += int(inserted)
+	}
+	return count, nil
+}
+
+func (s *Store) ListProjectDeltaManualURLs(projectID string, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := s.db.Query(`
+		SELECT url FROM project_delta_manual_queue
+		WHERE project_id = ? AND consumed_at IS NULL
+		ORDER BY created_at ASC
+		LIMIT ?`, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var urls []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		urls = append(urls, u)
+	}
+	if urls == nil {
+		urls = []string{}
+	}
+	return urls, rows.Err()
+}
+
+func (s *Store) MarkProjectDeltaManualURLsConsumed(projectID string, urls []string, when time.Time) error {
+	for _, raw := range urls {
+		u := strings.TrimSpace(raw)
+		if u == "" {
+			continue
+		}
+		if _, err := s.db.Exec(`
+			UPDATE project_delta_manual_queue
+			SET consumed_at = ?
+			WHERE project_id = ? AND url = ? AND consumed_at IS NULL`,
+			when.UTC(), projectID, u); err != nil {
+			return err
+		}
 	}
 	return nil
 }

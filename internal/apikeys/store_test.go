@@ -189,6 +189,66 @@ func TestDeleteProjectNotFound(t *testing.T) {
 	}
 }
 
+func TestProjectDeltaSettingsSaveAndManualQueue(t *testing.T) {
+	s := newTestStore(t)
+	p, err := s.CreateProject("delta")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defaults, err := s.GetProjectDeltaSettings(p.ID)
+	if err != nil {
+		t.Fatalf("GetProjectDeltaSettings default: %v", err)
+	}
+	if defaults.ProjectID != p.ID || defaults.Enabled {
+		t.Fatalf("unexpected defaults: %+v", defaults)
+	}
+
+	defaults.Enabled = true
+	defaults.ScheduleTime = "04:15"
+	defaults.BlockedURLPatterns = []string{"/search", "utm_"}
+	saved, err := s.SaveProjectDeltaSettings(*defaults)
+	if err != nil {
+		t.Fatalf("SaveProjectDeltaSettings: %v", err)
+	}
+	if !saved.Enabled || saved.ScheduleTime != "04:15" || len(saved.BlockedURLPatterns) != 2 {
+		t.Fatalf("unexpected saved settings: %+v", saved)
+	}
+
+	enabled, err := s.ListEnabledProjectDeltaSettings()
+	if err != nil {
+		t.Fatalf("ListEnabledProjectDeltaSettings: %v", err)
+	}
+	if len(enabled) != 1 || enabled[0].ProjectID != p.ID {
+		t.Fatalf("unexpected enabled settings: %+v", enabled)
+	}
+
+	added, err := s.AddProjectDeltaManualURLs(p.ID, []string{"https://example.com/a", " ", "https://example.com/b"})
+	if err != nil {
+		t.Fatalf("AddProjectDeltaManualURLs: %v", err)
+	}
+	if added != 2 {
+		t.Fatalf("expected 2 queued URLs, got %d", added)
+	}
+	urls, err := s.ListProjectDeltaManualURLs(p.ID, 10)
+	if err != nil {
+		t.Fatalf("ListProjectDeltaManualURLs: %v", err)
+	}
+	if len(urls) != 2 {
+		t.Fatalf("expected 2 URLs, got %d", len(urls))
+	}
+	if err := s.MarkProjectDeltaManualURLsConsumed(p.ID, urls[:1], time.Now()); err != nil {
+		t.Fatalf("MarkProjectDeltaManualURLsConsumed: %v", err)
+	}
+	remaining, err := s.ListProjectDeltaManualURLs(p.ID, 10)
+	if err != nil {
+		t.Fatalf("ListProjectDeltaManualURLs after consume: %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("expected 1 remaining URL, got %d", len(remaining))
+	}
+}
+
 // --- API Keys ---
 
 func TestCreateAPIKeyGeneral(t *testing.T) {

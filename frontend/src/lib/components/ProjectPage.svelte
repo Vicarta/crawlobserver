@@ -13,6 +13,7 @@
   import { t } from '../i18n/index.svelte.js';
   import GSCTab from './GSCTab.svelte';
   import ProvidersTab from './ProvidersTab.svelte';
+  import DeltaCrawlTab from './DeltaCrawlTab.svelte';
   import ConfirmModal from './ConfirmModal.svelte';
 
   const PROJ_SESSIONS_LIMIT = 30;
@@ -235,6 +236,11 @@
     class:tab-active={projectTab === 'gsc'}
     onclick={() => switchProjectTab('gsc')}>{t('project.searchConsole')}</button
   >
+  <button
+    class="tab"
+    class:tab-active={projectTab === 'delta'}
+    onclick={() => switchProjectTab('delta')}>Daily Delta</button
+  >
   {#each providerConnections as conn}
     {@const meta = providerMeta[conn.provider]}
     <button
@@ -379,6 +385,13 @@
       initialSubView={gscSubView}
       onerror={(msg) => onerror?.(msg)}
       onpushurl={(u) => onpushurl?.(u)}
+      {isAdmin}
+    />
+  {:else if projectTab === 'delta'}
+    <DeltaCrawlTab
+      projectId={project.id}
+      onerror={(msg) => onerror?.(msg)}
+      onselectsession={(s) => onselectsession?.(s)}
       {isAdmin}
     />
   {:else if projectTab.startsWith('provider:')}

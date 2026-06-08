@@ -129,6 +129,9 @@ type CrawlRequest struct {
 	ExcludePatterns     []string `json:"exclude_patterns"`
 	MeasureCWV          bool     `json:"measure_cwv"`
 	FullRecrawl         bool     `json:"full_recrawl"`
+	Label               string   `json:"label"`
+	RetryMaxRetries     *int     `json:"retry_max_retries"`
+	RetryBackoffSeconds int      `json:"retry_backoff_seconds"`
 }
 
 // StartCrawl launches a new crawl session in background. Returns the session ID.
@@ -197,6 +200,12 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 	if req.IgnoreRobots {
 		cfg.Crawler.RespectRobots = false
 	}
+	if req.RetryMaxRetries != nil && *req.RetryMaxRetries >= 0 {
+		cfg.Crawler.Retry.MaxRetries = *req.RetryMaxRetries
+	}
+	if req.RetryBackoffSeconds > 0 {
+		cfg.Crawler.Retry.BaseDelay = time.Duration(req.RetryBackoffSeconds) * time.Second
+	}
 	if len(req.ExcludePatterns) > 0 {
 		cfg.Crawler.ExcludePatterns = req.ExcludePatterns
 	}
@@ -232,6 +241,7 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 	engine := NewEngine(&cfg, m.store)
 	sessionID := engine.SessionID(req.Seeds)
 	engine.session.ProjectID = req.ProjectID
+	engine.session.Label = req.Label
 	engine.sitemapOnly = cfg.Crawler.CrawlSitemapOnly
 	// Fetch sitemaps: default true; forced true when sitemapOnly
 	engine.fetchSitemaps = boolValue(cfg.Crawler.FetchSitemaps, true) || engine.sitemapOnly

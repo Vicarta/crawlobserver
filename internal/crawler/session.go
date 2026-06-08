@@ -17,6 +17,7 @@ type Session struct {
 	Status    string
 	Pages     uint64
 	ProjectID *string
+	Label     string
 }
 
 // NewSession creates a new crawl session.
@@ -42,5 +43,6 @@ func (s *Session) ToStorageRow() *storage.CrawlSession {
 		PagesCrawled: s.Pages,
 		UserAgent:    s.Config.Crawler.UserAgent,
 		ProjectID:    s.ProjectID,
+		Label:        s.Label,
 	}
 }

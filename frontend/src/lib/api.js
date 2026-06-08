@@ -660,6 +660,34 @@ export async function disassociateSession(projectId, sessionId) {
   return fetchJSON(`/projects/${projectId}/sessions/${sessionId}`, { method: 'DELETE' });
 }
 
+export async function getProjectDeltaSettings(projectId) {
+  return fetchJSON(`/projects/${projectId}/delta/settings`);
+}
+
+export async function updateProjectDeltaSettings(projectId, settings) {
+  return fetchJSON(`/projects/${projectId}/delta/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  });
+}
+
+export async function getProjectDeltaPreview(projectId) {
+  return fetchJSON(`/projects/${projectId}/delta/preview`);
+}
+
+export async function runProjectDelta(projectId) {
+  return fetchJSON(`/projects/${projectId}/delta/run`, { method: 'POST' });
+}
+
+export async function addProjectDeltaManualURLs(projectId, urls) {
+  return fetchJSON(`/projects/${projectId}/delta/manual-queue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ urls }),
+  });
+}
+
 /**
  * @param {string} sessionId
  * @param {string} label

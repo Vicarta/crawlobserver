@@ -17,6 +17,7 @@ import (
 type SessionStore interface {
 	ListSessions(ctx context.Context, projectID ...string) ([]storage.CrawlSession, error)
 	ListSessionsPaginated(ctx context.Context, limit, offset int, projectID, search string) ([]storage.CrawlSession, int, error)
+	LatestProjectSession(ctx context.Context, projectID string) (*storage.CrawlSession, error)
 	GetSession(ctx context.Context, sessionID string) (*storage.CrawlSession, error)
 	DeleteSession(ctx context.Context, sessionID string) error
 	UpdateSessionProject(ctx context.Context, sessionID string, projectID *string) error
@@ -163,6 +164,7 @@ type GSCStore interface {
 	GSCTimeline(ctx context.Context, projectID string) ([]storage.GSCTimelineRow, error)
 	GSCInspectionResults(ctx context.Context, projectID string, limit, offset int) ([]storage.GSCInspectionRow, int, error)
 	DeleteGSCData(ctx context.Context, projectID string) error
+	DeltaGSCCandidateURLs(ctx context.Context, projectID string, limit int) ([]string, error)
 }
 
 // ProviderStore handles third-party provider data (SEObserver, etc.).
@@ -201,6 +203,10 @@ type StorageService interface {
 	GSCStore
 	ProviderStore
 	LogStore
+	DeltaSitemapCandidateURLs(ctx context.Context, sessionID string, limit int) ([]string, error)
+	DeltaProblemPageURLs(ctx context.Context, sessionID string, limit int) ([]string, error)
+	DeltaStalePageURLs(ctx context.Context, sessionID string, staleBefore time.Time, limit int) ([]string, error)
+	DeltaKnownPageURLs(ctx context.Context, sessionID string, limit int) ([]string, error)
 }
 
 // CrawlService is the subset of crawler.Manager used by the HTTP server.
