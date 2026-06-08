@@ -2843,14 +2843,14 @@ func TestParseWorkerImagesNoAlt(t *testing.T) {
 
 	inserter := &e2eInserter{}
 	e := &Engine{
-		cfg:         cfg,
-		ctx:         ctx,
-		cancel:      cancel,
-		front:       frontier.New(0, 10000),
-		retryQueue:  NewRetryQueue(),
-		hostHealth:  NewHostHealth(),
-		retryPolicy: &RetryPolicy{MaxRetries: 0},
-		session:     &Session{ID: "test-images"},
+		cfg:          cfg,
+		ctx:          ctx,
+		cancel:       cancel,
+		front:        frontier.New(0, 10000),
+		retryQueue:   NewRetryQueue(),
+		hostHealth:   NewHostHealth(),
+		retryPolicy:  &RetryPolicy{MaxRetries: 0},
+		session:      &Session{ID: "test-images"},
 		allowedHosts: map[string]bool{},
 	}
 	e.buffer = storage.NewBuffer(inserter, cfg.Storage.BatchSize, cfg.Storage.FlushInterval, e.session.ID)
@@ -2911,14 +2911,14 @@ func TestParseWorkerHreflang(t *testing.T) {
 
 	inserter := &e2eInserter{}
 	e := &Engine{
-		cfg:         cfg,
-		ctx:         ctx,
-		cancel:      cancel,
-		front:       frontier.New(0, 10000),
-		retryQueue:  NewRetryQueue(),
-		hostHealth:  NewHostHealth(),
-		retryPolicy: &RetryPolicy{MaxRetries: 0},
-		session:     &Session{ID: "test-hreflang"},
+		cfg:          cfg,
+		ctx:          ctx,
+		cancel:       cancel,
+		front:        frontier.New(0, 10000),
+		retryQueue:   NewRetryQueue(),
+		hostHealth:   NewHostHealth(),
+		retryPolicy:  &RetryPolicy{MaxRetries: 0},
+		session:      &Session{ID: "test-hreflang"},
 		allowedHosts: map[string]bool{},
 	}
 	e.buffer = storage.NewBuffer(inserter, cfg.Storage.BatchSize, cfg.Storage.FlushInterval, e.session.ID)
@@ -2978,14 +2978,14 @@ func TestParseWorkerOGMetadata(t *testing.T) {
 
 	inserter := &e2eInserter{}
 	e := &Engine{
-		cfg:         cfg,
-		ctx:         ctx,
-		cancel:      cancel,
-		front:       frontier.New(0, 10000),
-		retryQueue:  NewRetryQueue(),
-		hostHealth:  NewHostHealth(),
-		retryPolicy: &RetryPolicy{MaxRetries: 0},
-		session:     &Session{ID: "test-og"},
+		cfg:          cfg,
+		ctx:          ctx,
+		cancel:       cancel,
+		front:        frontier.New(0, 10000),
+		retryQueue:   NewRetryQueue(),
+		hostHealth:   NewHostHealth(),
+		retryPolicy:  &RetryPolicy{MaxRetries: 0},
+		session:      &Session{ID: "test-og"},
 		allowedHosts: map[string]bool{},
 	}
 	e.buffer = storage.NewBuffer(inserter, cfg.Storage.BatchSize, cfg.Storage.FlushInterval, e.session.ID)
@@ -3421,7 +3421,7 @@ func TestManagerEnqueueFields(t *testing.T) {
 	// but we can recover and verify the queue was populated
 	func() {
 		defer func() { recover() }()
-		m.enqueue("sess-1", engine, []string{"http://example.com"}, false, "")
+		m.enqueue("sess-1", engine, []string{"http://example.com"})
 	}()
 
 	if len(m.queue) != 1 {

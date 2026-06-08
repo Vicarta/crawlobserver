@@ -276,7 +276,9 @@
           // Normal Resume should continue the existing frontier without re-fetching sitemaps.
           options.fetch_sitemaps = false;
         }
-        await resumeCrawl(session.ID, options);
+        const result = await resumeCrawl(session.ID, options);
+        onsubmit?.(result);
+        return;
       }
       onsubmit?.();
     } catch (e) {

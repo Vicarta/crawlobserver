@@ -44,11 +44,9 @@ func boolValue(v *bool, fallback bool) bool {
 
 // queuedCrawl holds a crawl waiting for a semaphore slot.
 type queuedCrawl struct {
-	sessionID         string
-	engine            *Engine
-	seeds             []string
-	clearBeforeRun    bool
-	clearBeforeReason string
+	sessionID string
+	engine    *Engine
+	seeds     []string
 }
 
 // ExtractorSetLoader loads an extractor set by ID.
@@ -273,10 +271,10 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 		m.mu.Lock()
 		m.engines[sessionID] = engine
 		m.mu.Unlock()
-		go m.runEngine(sessionID, engine, req.Seeds, false, "")
+		go m.runEngine(sessionID, engine, req.Seeds)
 	default:
 		// All slots taken — enqueue
-		m.enqueue(sessionID, engine, req.Seeds, false, "")
+		m.enqueue(sessionID, engine, req.Seeds)
 	}
 
 	return sessionID, nil
@@ -372,8 +370,8 @@ func (m *Manager) ActiveSessions() []string {
 }
 
 // ResumeCrawl resumes a stopped/completed session by re-crawling undiscovered links.
-// If overrides.FullRecrawl is true, it clears the existing session data and re-crawls
-// the original seed URLs with the provided overrides.
+// If overrides.FullRecrawl is true, it starts a new session with the original
+// seed URLs and provided overrides, leaving the previous session intact.
 func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string, error) {
 	m.mu.RLock()
 	_, running := m.engines[sessionID]
@@ -396,8 +394,6 @@ func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string
 
 	fullRecrawl := overrides != nil && overrides.FullRecrawl
 	seeds := originalSession.SeedURLs
-	clearBeforeRun := false
-	clearBeforeReason := ""
 	if !fullRecrawl {
 		// Get uncrawled URLs from storage
 		uncrawled, err := m.store.UncrawledURLs(context.Background(), sessionID)
@@ -408,9 +404,6 @@ func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string
 			return "", fmt.Errorf("no uncrawled URLs found for session %s", sessionID)
 		}
 		seeds = uncrawled
-	} else {
-		clearBeforeRun = true
-		clearBeforeReason = "full recrawl requested"
 	}
 
 	// Restore config from original session so UA, TLS profile, etc. are preserved
@@ -498,8 +491,13 @@ func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string
 		engine.fetchSitemaps = false
 	}
 
-	// Restore the original session with its seed URLs, not the uncrawled URLs
-	engine.ResumeSession(sessionID, originalSession.SeedURLs)
+	runSessionID := sessionID
+	if fullRecrawl {
+		runSessionID = engine.SessionID(originalSession.SeedURLs)
+	} else {
+		// Restore the original session with its seed URLs, not the uncrawled URLs.
+		engine.ResumeSession(sessionID, originalSession.SeedURLs)
+	}
 	engine.session.ProjectID = originalSession.ProjectID
 
 	// Apply non-config overrides (external links, extractors, JS links)
@@ -531,8 +529,8 @@ func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string
 		}
 	}
 	if fullRecrawl {
-		applog.Infof("crawler", "Full recrawl requested for session %s with %d original seed URL(s) (%d existing pages will be replaced)",
-			sessionID, len(seeds), crawledCount)
+		applog.Infof("crawler", "Full recrawl requested for session %s; starting new session %s with %d original seed URL(s)",
+			sessionID, runSessionID, len(seeds))
 	} else {
 		applog.Infof("crawler", "Resuming session %s with %d uncrawled URLs (%d already crawled)",
 			sessionID, len(seeds), crawledCount)
@@ -542,14 +540,14 @@ func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string
 	select {
 	case m.sem <- struct{}{}:
 		m.mu.Lock()
-		m.engines[sessionID] = engine
+		m.engines[runSessionID] = engine
 		m.mu.Unlock()
-		go m.runEngine(sessionID, engine, seeds, clearBeforeRun, clearBeforeReason)
+		go m.runEngine(runSessionID, engine, seeds)
 	default:
-		m.enqueue(sessionID, engine, seeds, clearBeforeRun, clearBeforeReason)
+		m.enqueue(runSessionID, engine, seeds)
 	}
 
-	return sessionID, nil
+	return runSessionID, nil
 }
 
 // RetryFailed retries pages with status_code = 0 (fetch errors) or a specific status code.
@@ -685,9 +683,9 @@ func (m *Manager) RetryFailed(sessionID string, overrides *CrawlRequest) (int, e
 		m.mu.Lock()
 		m.engines[sessionID] = engine
 		m.mu.Unlock()
-		go m.runEngine(sessionID, engine, failedURLs, false, "")
+		go m.runEngine(sessionID, engine, failedURLs)
 	default:
-		m.enqueue(sessionID, engine, failedURLs, false, "")
+		m.enqueue(sessionID, engine, failedURLs)
 	}
 
 	return deleted, nil
@@ -808,14 +806,12 @@ func (m *Manager) RecoverOrphanedSessions(ctx context.Context) {
 }
 
 // enqueue adds a crawl to the FIFO queue and persists a "queued" session in ClickHouse.
-func (m *Manager) enqueue(sessionID string, engine *Engine, seeds []string, clearBeforeRun bool, clearBeforeReason string) {
+func (m *Manager) enqueue(sessionID string, engine *Engine, seeds []string) {
 	m.queueMu.Lock()
 	m.queue = append(m.queue, queuedCrawl{
-		sessionID:         sessionID,
-		engine:            engine,
-		seeds:             seeds,
-		clearBeforeRun:    clearBeforeRun,
-		clearBeforeReason: clearBeforeReason,
+		sessionID: sessionID,
+		engine:    engine,
+		seeds:     seeds,
 	})
 	m.queuedSet[sessionID] = true
 	m.queueMu.Unlock()
@@ -867,7 +863,7 @@ func (m *Manager) promoteNext() {
 	m.mu.Unlock()
 
 	applog.Infof("crawler", "Promoting queued session %s", next.sessionID)
-	go m.runEngine(next.sessionID, next.engine, next.seeds, next.clearBeforeRun, next.clearBeforeReason)
+	go m.runEngine(next.sessionID, next.engine, next.seeds)
 }
 
 // IsQueued returns true if the session is waiting in the queue.
@@ -889,7 +885,7 @@ func (m *Manager) QueuedSessions() []string {
 }
 
 // runEngine runs the crawl engine and records the outcome.
-func (m *Manager) runEngine(sessionID string, engine *Engine, seeds []string, clearBeforeRun bool, clearBeforeReason string) {
+func (m *Manager) runEngine(sessionID string, engine *Engine, seeds []string) {
 	defer func() {
 		// Release semaphore slot and promote next queued crawl
 		<-m.sem
@@ -909,18 +905,6 @@ func (m *Manager) runEngine(sessionID string, engine *Engine, seeds []string, cl
 		Set("seed_count", len(seeds)).
 		Set("workers", engine.cfg.Crawler.Workers).
 		Set("source", "ui"))
-
-	if clearBeforeRun {
-		applog.Infof("crawler", "Clearing existing data for session %s before crawl (%s)", sessionID, clearBeforeReason)
-		if err := m.store.DeleteSession(context.Background(), sessionID); err != nil {
-			m.mu.Lock()
-			delete(m.engines, sessionID)
-			m.lastErrors[sessionID] = fmt.Sprintf("clearing session before crawl: %v", err)
-			m.mu.Unlock()
-			applog.Errorf("crawler", "Crawl %s failed before start: %v", sessionID, err)
-			return
-		}
-	}
 
 	// Remove engine from map as soon as workers are drained (before finalization).
 	// This makes the SSE report is_running=false immediately when Stop is called.

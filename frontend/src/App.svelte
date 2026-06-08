@@ -510,10 +510,13 @@
     resumeSessionId = null;
   }
 
-  async function onResumeComplete() {
+  async function onResumeComplete(result = null) {
     trackEvent(resumeModalMode === 'retry' ? 'crawl_retried_ui' : 'crawl_resumed_ui');
-    const sid = resumeSessionId;
-    updateSessionState(sid, { Status: 'running', is_running: true });
+    const originalSid = resumeSessionId;
+    const sid = result?.session_id || originalSid;
+    if (sid === originalSid) {
+      updateSessionState(sid, { Status: 'running', is_running: true });
+    }
     closeResumeModal();
     await loadSessions();
     const sess = sessions.find((s) => s.ID === sid);
