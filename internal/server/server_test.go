@@ -568,26 +568,27 @@ func (m *mockStore) ExportCriticalTables(_ context.Context, _ string, _ int) err
 // ---------------------------------------------------------------------------
 
 type mockManager struct {
-	running     map[string]bool
-	startResult string
-	startErr    error
-	stopErr     error
-	resumeErr   error
-	retryCount  int
-	retryErr    error
-	rescanCount int
-	rescanErr   error
-	progress    map[string][2]int64 // sessionID -> [pages, queue]
-	resumeCalls []resumeCall
-	rescanCalls []rescanCall
-	startCalls  []crawler.CrawlRequest
-	stopCalls   []string
-	queued      map[string]bool
-	queueOrder  []string
-	shouldQueue bool
-	phases      map[string]string
-	bufStates   map[string]storage.BufferErrorState
-	lastErrors  map[string]string
+	running      map[string]bool
+	startResult  string
+	resumeResult string
+	startErr     error
+	stopErr      error
+	resumeErr    error
+	retryCount   int
+	retryErr     error
+	rescanCount  int
+	rescanErr    error
+	progress     map[string][2]int64 // sessionID -> [pages, queue]
+	resumeCalls  []resumeCall
+	rescanCalls  []rescanCall
+	startCalls   []crawler.CrawlRequest
+	stopCalls    []string
+	queued       map[string]bool
+	queueOrder   []string
+	shouldQueue  bool
+	phases       map[string]string
+	bufStates    map[string]storage.BufferErrorState
+	lastErrors   map[string]string
 }
 
 type resumeCall struct {
@@ -647,6 +648,9 @@ func (m *mockManager) StopCrawl(sessionID string) error {
 
 func (m *mockManager) ResumeCrawl(sessionID string, overrides *crawler.CrawlRequest) (string, error) {
 	m.resumeCalls = append(m.resumeCalls, resumeCall{SessionID: sessionID, Overrides: overrides})
+	if m.resumeResult != "" {
+		return m.resumeResult, m.resumeErr
+	}
 	return sessionID, m.resumeErr
 }
 
@@ -2688,6 +2692,7 @@ func TestResume_WithFullRecrawlFlag(t *testing.T) {
 	srv, handler, _ := newTestServer(t)
 
 	mm := srv.manager.(*mockManager)
+	mm.resumeResult = "new-sess"
 
 	body := jsonBody(t, map[string]interface{}{
 		"max_pages":    200,
@@ -2700,6 +2705,11 @@ func TestResume_WithFullRecrawlFlag(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	decodeJSON(t, rec, &resp)
+	if resp["session_id"] != "new-sess" {
+		t.Errorf("expected new session_id, got %q", resp["session_id"])
 	}
 	if len(mm.resumeCalls) != 1 {
 		t.Fatalf("expected 1 resume call, got %d", len(mm.resumeCalls))

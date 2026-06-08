@@ -444,12 +444,12 @@ func (s *Server) handleResumeCrawl(w http.ResponseWriter, r *http.Request) {
 		overrides = &req
 	}
 
-	_, err := s.manager.ResumeCrawl(sessionID, overrides)
+	runSessionID, err := s.manager.ResumeCrawl(sessionID, overrides)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, map[string]string{"status": "resumed"})
+	writeJSON(w, map[string]string{"status": "resumed", "session_id": runSessionID})
 }
 
 func (s *Server) handlePageHTML(w http.ResponseWriter, r *http.Request) {
