@@ -137,6 +137,7 @@ type ResourcesConfig struct {
 type ServerConfig struct {
 	Host              string          `mapstructure:"host"`
 	Port              int             `mapstructure:"port"`
+	PublicURL         string          `mapstructure:"public_url"`
 	Username          string          `mapstructure:"username"`
 	Password          string          `mapstructure:"password"`
 	SQLitePath        string          `mapstructure:"sqlite_path"`
@@ -234,6 +235,7 @@ func SetDefaults() {
 
 	viper.SetDefault("server.host", "127.0.0.1")
 	viper.SetDefault("server.port", 8899)
+	viper.SetDefault("server.public_url", "")
 	viper.SetDefault("server.username", "admin")
 	viper.SetDefault("server.password", "")
 	viper.SetDefault("server.sqlite_path", "crawlobserver.db")

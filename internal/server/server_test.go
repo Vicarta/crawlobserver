@@ -4524,6 +4524,46 @@ func TestHandleServerInfo_Success(t *testing.T) {
 	}
 }
 
+func TestHandleServerInfo_UsesPublicURL(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	srv.cfg.Server.PublicURL = "https://crawlobserver.example.com/"
+
+	req := authRequest(httptest.NewRequest("GET", "/api/server-info", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	decodeJSON(t, rec, &resp)
+	if resp["api_url"] != "https://crawlobserver.example.com/api" {
+		t.Errorf("expected public api_url, got %v", resp["api_url"])
+	}
+}
+
+func TestHandleServerInfo_UsesForwardedHeaders(t *testing.T) {
+	_, handler, _ := newTestServer(t)
+
+	req := authRequest(httptest.NewRequest("GET", "/api/server-info", nil))
+	req.Host = "127.0.0.1:8899"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "crawlobserver.example.com")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	decodeJSON(t, rec, &resp)
+	if resp["api_url"] != "https://crawlobserver.example.com/api" {
+		t.Errorf("expected forwarded api_url, got %v", resp["api_url"])
+	}
+}
+
 // --- handleUpdateTheme ---
 
 func TestHandleUpdateTheme_BadBody(t *testing.T) {

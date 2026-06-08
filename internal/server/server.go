@@ -555,7 +555,7 @@ func apiDiscoveryFilePath() string {
 }
 
 func (s *Server) writeAPIDiscoveryFile() {
-	data, err := json.MarshalIndent(s.serverInfoPayload(), "", "  ")
+	data, err := json.MarshalIndent(s.serverInfoPayload(nil), "", "  ")
 	if err != nil {
 		applog.Warnf("server", "Could not marshal API discovery file: %v", err)
 		return
@@ -597,11 +597,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleServerInfo(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.serverInfoPayload())
+	writeJSON(w, s.serverInfoPayload(r))
 }
 
-func (s *Server) serverInfoPayload() map[string]interface{} {
-	addr := fmt.Sprintf("http://%s:%d", s.cfg.Server.Host, s.cfg.Server.Port)
+func (s *Server) serverInfoPayload(r *http.Request) map[string]interface{} {
+	addr := s.publicBaseURL(r)
 	info := map[string]interface{}{
 		"api_url":  addr + "/api",
 		"host":     s.cfg.Server.Host,
@@ -609,6 +609,36 @@ func (s *Server) serverInfoPayload() map[string]interface{} {
 		"has_auth": s.cfg.Server.Username != "" && s.cfg.Server.Password != "",
 	}
 	return info
+}
+
+func (s *Server) publicBaseURL(r *http.Request) string {
+	if publicURL := strings.TrimRight(strings.TrimSpace(s.cfg.Server.PublicURL), "/"); publicURL != "" {
+		return publicURL
+	}
+	if r != nil {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		if forwardedProto := firstForwardedValue(r.Header.Get("X-Forwarded-Proto")); forwardedProto != "" {
+			scheme = forwardedProto
+		}
+		host := r.Host
+		if forwardedHost := firstForwardedValue(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
+			host = forwardedHost
+		}
+		if host != "" && host != "0.0.0.0" {
+			return scheme + "://" + host
+		}
+	}
+	return fmt.Sprintf("http://%s:%d", s.cfg.Server.Host, s.cfg.Server.Port)
+}
+
+func firstForwardedValue(value string) string {
+	if value == "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.Split(value, ",")[0])
 }
 
 func (s *Server) handleTheme(w http.ResponseWriter, r *http.Request) {
