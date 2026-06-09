@@ -459,6 +459,7 @@
     </DataTable>
   {:else if subView === 'titles'}
     <DataTable
+      tableId="pages-titles"
       columns={[
         { label: t('session.url'), sortKey: 'url' },
         { label: t('session.title'), sortKey: 'title' },
@@ -499,6 +500,7 @@
     </DataTable>
   {:else if subView === 'meta'}
     <DataTable
+      tableId="pages-meta"
       columns={[
         { label: t('session.url'), sortKey: 'url' },
         { label: t('session.metaDescription'), sortKey: 'meta_description' },
@@ -543,6 +545,7 @@
     </DataTable>
   {:else if subView === 'headings'}
     <DataTable
+      tableId="pages-headings"
       columns={[
         { label: t('session.url'), sortKey: 'url' },
         { label: t('session.h1') },
@@ -585,6 +588,7 @@
     </DataTable>
   {:else if subView === 'images'}
     <DataTable
+      tableId="pages-images"
       columns={[
         { label: t('session.url'), sortKey: 'url' },
         { label: t('session.images'), sortKey: 'images_count' },
@@ -625,6 +629,7 @@
     </DataTable>
   {:else if subView === 'indexability'}
     <DataTable
+      tableId="pages-indexability"
       columns={[
         { label: t('session.url'), sortKey: 'url' },
         { label: t('session.indexable'), sortKey: 'is_indexable' },
@@ -674,6 +679,7 @@
     </DataTable>
   {:else if subView === 'response'}
     <DataTable
+      tableId="pages-response"
       columns={[
         { label: t('session.url'), sortKey: 'url' },
         { label: t('session.status'), sortKey: 'status_code' },
@@ -718,6 +724,7 @@
     </DataTable>
   {:else if subView === 'redirects'}
     <DataTable
+      tableId="pages-redirects"
       columns={[
         { label: t('session.url'), sortKey: 'url' },
         { label: t('session.status'), sortKey: 'status_code' },

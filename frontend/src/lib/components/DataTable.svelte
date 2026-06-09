@@ -1,5 +1,4 @@
 <script>
-  import { onMount } from 'svelte';
   import { t } from '../i18n/index.svelte.js';
 
   let {
@@ -27,6 +26,7 @@
   const FALLBACK_COLUMN_WIDTH = 140;
 
   let columnWidths = $state([]);
+  let loadedColumnsKey = '';
 
   let tableWidth = $derived.by(() =>
     columns.reduce((sum, col, idx) => sum + resolvedWidth(col, columnWidths[idx]), 0),
@@ -34,6 +34,10 @@
 
   function storageKey() {
     return tableId ? `crawlobserver:table-widths:${tableId}` : '';
+  }
+
+  function columnsKey() {
+    return `${storageKey()}|${columns.map((col) => col.sortKey || col.label || '').join('|')}`;
   }
 
   function defaultWidth(col) {
@@ -123,7 +127,12 @@
     }
   }
 
-  onMount(loadColumnWidths);
+  $effect(() => {
+    const key = columnsKey();
+    if (key === loadedColumnsKey) return;
+    loadedColumnsKey = key;
+    loadColumnWidths();
+  });
 </script>
 
 <div class="data-table-wrap">
