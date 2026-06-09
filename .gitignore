@@ -29,6 +29,8 @@ config.yaml
 
 # Environment files
 .env*
+!.env.example
+!deploy/.env.example
 
 # Vendor (optional)
 /vendor/

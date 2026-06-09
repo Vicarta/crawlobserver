@@ -2,3 +2,5 @@
 config.yaml
 state/
 backups/
+.previous-app-image
+.rollback-from-app-image

@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
       args:
         VERSION: ${CRAWLOBSERVER_VERSION:-docker}
-    image: crawlobserver:${CRAWLOBSERVER_VERSION:-local}
+    image: ${CRAWLOBSERVER_IMAGE:-crawlobserver:${CRAWLOBSERVER_VERSION:-local}}
     container_name: crawlobserver-app
     restart: unless-stopped
     depends_on:
@@ -28,7 +28,7 @@ services:
       - internal
 
   migrate:
-    image: crawlobserver:${CRAWLOBSERVER_VERSION:-local}
+    image: ${CRAWLOBSERVER_IMAGE:-crawlobserver:${CRAWLOBSERVER_VERSION:-local}}
     profiles: ["tools"]
     depends_on:
       clickhouse:
