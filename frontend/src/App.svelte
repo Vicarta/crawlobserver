@@ -29,6 +29,8 @@
     createBackup,
     getSetupStatus,
     getTelemetry,
+    getCurrentUser,
+    logout,
   } from './lib/api.js';
   import { initTelemetry, trackPageView, trackEvent, disableTelemetry } from './lib/telemetry.js';
   import { fmtSize } from './lib/utils.js';
@@ -49,6 +51,7 @@
   import SessionDetailPage from './lib/components/SessionDetailPage.svelte';
   import ProjectPage from './lib/components/ProjectPage.svelte';
   import AnnouncementBanner from './lib/components/AnnouncementBanner.svelte';
+  import LoginPage from './lib/components/LoginPage.svelte';
 
   // --- Named constants ---
   // STATS_REFRESH_MS removed — stats refresh is now SSE signal-driven
@@ -65,6 +68,9 @@
   let showOnboarding = $state(false);
   let onboardingStartStep = $state(1); // 1 = full wizard, 3 = telemetry only (existing users)
   let setupChecked = $state(false);
+  let authChecked = $state(false);
+  let currentUser = $state(null);
+  let isAdmin = $derived(currentUser?.role === 'admin');
 
   // --- Crawl state ---
   let sessions = $state([]);
@@ -155,6 +161,7 @@
 
   // --- Global Stats ---
   function openGlobalStats() {
+    if (!isAdmin) return;
     currentView = 'stats';
     selectedSession = null;
     selectedProject = null;
@@ -163,6 +170,7 @@
 
   // --- API page ---
   function openAPI() {
+    if (!isAdmin) return;
     currentView = 'api';
     selectedSession = null;
     selectedProject = null;
@@ -170,6 +178,7 @@
   }
 
   function openLogs() {
+    if (!isAdmin) return;
     currentView = 'logs';
     selectedSession = null;
     selectedProject = null;
@@ -202,6 +211,7 @@
 
   // --- Settings ---
   function openSettings() {
+    if (!isAdmin) return;
     currentView = 'settings';
     selectedSession = null;
     selectedProject = null;
@@ -229,6 +239,10 @@
   }
 
   async function navigateTo(path, queryFilters = {}) {
+    if (!isAdmin && ['/settings', '/stats', '/api', '/logs', '/new-crawl'].includes(path)) {
+      path = '/';
+      queryFilters = {};
+    }
     pushURL(path, queryFilters);
     routeVersion++;
     await applyRoute();
@@ -249,6 +263,10 @@
           : route.page === 'new-crawl'
             ? 'new-crawl'
             : route.page;
+      if (!isAdmin && ['settings', 'stats', 'api', 'logs', 'new-crawl'].includes(currentView)) {
+        goHome();
+        return;
+      }
 
       if (route.page === 'project') {
         currentView = 'project';
@@ -408,6 +426,7 @@
 
   // --- Update check polling ---
   function startUpdatePoll() {
+    if (updatePollTimer) return;
     let attempts = 0;
     updatePollTimer = setInterval(async () => {
       attempts++;
@@ -429,7 +448,48 @@
       }
     }, UPDATE_POLL_MS);
   }
-  startUpdatePoll();
+
+  async function checkAuth() {
+    try {
+      currentUser = await getCurrentUser();
+    } catch {
+      currentUser = null;
+    } finally {
+      authChecked = true;
+    }
+  }
+
+  async function handleLogin(user) {
+    currentUser = user;
+    authChecked = true;
+    error = null;
+    await bootApp();
+  }
+
+  async function handleLogout() {
+    try {
+      await logout();
+    } catch {
+      // Continue locally if the server session was already gone.
+    }
+    currentUser = null;
+    sessions = [];
+    projects = [];
+    selectedSession = null;
+    selectedProject = null;
+    globalStats = null;
+    systemStats = null;
+    if (systemStatsInterval) {
+      clearInterval(systemStatsInterval);
+      systemStatsInterval = null;
+    }
+    if (updatePollTimer) {
+      clearInterval(updatePollTimer);
+      updatePollTimer = null;
+    }
+    sse.disconnectAll();
+    pushURL('/');
+  }
 
   async function doBackupAndUpdate() {
     updatingApp = true;
@@ -557,6 +617,7 @@
   }
 
   async function loadStorageStats() {
+    if (!isAdmin) return;
     try {
       storageStats = await getStorageStats();
     } catch (e) {
@@ -565,6 +626,7 @@
   }
 
   async function loadSystemStats() {
+    if (!isAdmin) return;
     try {
       systemStats = await getSystemStats();
     } catch (e) {
@@ -602,15 +664,23 @@
       // If setup endpoint fails (e.g. CLI mode), proceed normally
     }
     setupChecked = true;
+    await checkAuth();
+    if (!currentUser) {
+      loading = false;
+      return;
+    }
     await bootApp();
   }
 
   async function bootApp() {
-    startSystemStatsPolling();
+    if (isAdmin) {
+      startSystemStatsPolling();
+      startUpdatePoll();
+    }
     getProjects()
       .then((p) => (projects = p))
       .catch(() => {});
-    if (!globalStats)
+    if (isAdmin && !globalStats)
       getGlobalStats()
         .then((gs) => (globalStats = gs))
         .catch(() => {});
@@ -646,7 +716,14 @@
 
 {#if showOnboarding}
   <OnboardingWizard startStep={onboardingStartStep} oncomplete={onOnboardingComplete} />
-{:else if setupChecked}
+{:else if !setupChecked || !authChecked}
+  <main class="app-loading-shell" aria-live="polite" aria-busy="true">
+    <div class="app-loading-mark" aria-hidden="true"></div>
+    <span>Loading {theme.app_name || 'CrawlObserver'}...</span>
+  </main>
+{:else if !currentUser}
+  <LoginPage appName={theme.app_name} onlogin={handleLogin} />
+{:else}
   <a class="skip-link" href="#main-content">{t('app.skipToContent')}</a>
   <div class="layout">
     <div class="drag-bar"><span class="drag-bar-title">{theme.app_name}</span></div>
@@ -672,6 +749,8 @@
       ongohome={goHome}
       oncreateproject={handleCreateProject}
       onviewallprojects={openAllProjects}
+      {currentUser}
+      onlogout={handleLogout}
       {appVersion}
     />
 
@@ -687,7 +766,7 @@
           </div>
         {/if}
 
-        {#if updateInfo && !updateDismissed}
+        {#if isAdmin && updateInfo && !updateDismissed}
           <div class="alert alert-info">
             <span>{t('app.updateAvailable', { version: updateInfo.latest_version })}</span>
             <div class="flex-center-gap">
@@ -712,7 +791,7 @@
 
         <AnnouncementBanner />
 
-        {#if sessionRecordingActive}
+        {#if isAdmin && sessionRecordingActive}
           <div class="alert alert-session-recording">
             <span>{t('settings.sessionRecordingBanner')}</span>
           </div>
@@ -725,6 +804,7 @@
             onsave={handleSettingsSave}
             oncancel={handleSettingsCancel}
             onsessionrecording={(v) => (sessionRecordingActive = v)}
+            onprojectschanged={(p) => (projects = p)}
           />
         {:else if currentView === 'stats'}
           <GlobalStatsPage onerror={(msg) => (error = msg)} />
@@ -742,7 +822,7 @@
           <AllProjectsPage
             onerror={(msg) => (error = msg)}
             onselectproject={selectProject}
-            oncreateproject={() => navigateTo('/new-crawl')}
+            oncreateproject={isAdmin ? () => navigateTo('/new-crawl') : undefined}
           />
         {:else if currentView === 'api'}
           <APIManagementPage
@@ -771,7 +851,9 @@
               onerror={(msg) => (error = msg)}
               onselectsession={selectSession}
               ongohome={goHome}
-              onnewcrawl={() => navigateTo('/new-crawl', { project: selectedProject?.id })}
+              onnewcrawl={isAdmin
+                ? () => navigateTo('/new-crawl', { project: selectedProject?.id })
+                : undefined}
               onprojectrenamed={async (id) => {
                 projects = await getProjects();
                 selectedProject = projects.find((p) => p.id === id) || selectedProject;
@@ -781,6 +863,7 @@
                 goHome();
               }}
               onpushurl={(u) => pushURL(u)}
+              {currentUser}
             />
           {/key}
         {:else if currentView === 'home'}
@@ -794,8 +877,9 @@
             onstop={handleStop}
             onresume={openResumeModal}
             ondelete={handleDelete}
-            onnewcrawl={() => navigateTo('/new-crawl')}
+            onnewcrawl={isAdmin ? () => navigateTo('/new-crawl') : undefined}
             onrefresh={loadSessions}
+            {isAdmin}
           />
         {:else if currentView === 'session' && selectedSession}
           {#key selectedSession.ID + '-' + routeVersion}
@@ -811,10 +895,10 @@
               initialDetailUrl={routeDetailUrl}
               initialSubView={routeSubView}
               onerror={(msg) => (error = msg)}
-              onstop={handleStop}
-              onresume={openResumeModal}
-              onretry={openRetryModal}
-              ondelete={handleDelete}
+              onstop={isAdmin ? handleStop : undefined}
+              onresume={isAdmin ? openResumeModal : undefined}
+              onretry={isAdmin ? openRetryModal : undefined}
+              ondelete={isAdmin ? handleDelete : undefined}
               onrefresh={() => selectSession(selectedSession)}
               oncompare={(id) => navigateTo(`/compare?a=${id}`)}
               onnavigate={navigateTo}
@@ -894,3 +978,32 @@
     />
   {/if}
 {/if}
+
+<style>
+  .app-loading-shell {
+    min-height: 100vh;
+    width: 100%;
+    display: grid;
+    place-items: center;
+    align-content: center;
+    gap: 14px;
+    background: var(--bg);
+    color: var(--text-muted);
+    font-size: 14px;
+  }
+
+  .app-loading-mark {
+    width: 36px;
+    height: 36px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: app-loading-spin 0.8s linear infinite;
+  }
+
+  @keyframes app-loading-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+</style>

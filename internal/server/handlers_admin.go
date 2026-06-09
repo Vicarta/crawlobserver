@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
+	"github.com/SEObserver/crawlobserver/internal/apikeys"
 	"github.com/SEObserver/crawlobserver/internal/applog"
 	"github.com/SEObserver/crawlobserver/internal/backup"
 	"github.com/SEObserver/crawlobserver/internal/updater"
@@ -221,6 +223,33 @@ func (s *Server) handleGlobalStats(w http.ResponseWriter, r *http.Request) {
 // --- Project handlers ---
 
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	auth := apikeys.FromContext(r.Context())
+	if auth != nil && !auth.IsAdmin() {
+		projects, err := s.visibleProjects(auth, r.URL.Query().Get("search"))
+		if err != nil {
+			internalError(w, r, err)
+			return
+		}
+		if r.URL.Query().Get("limit") != "" {
+			limit, offset := clampPagination(queryInt(r, "limit", 30), queryInt(r, "offset", 0))
+			total := len(projects)
+			end := offset + limit
+			if offset > total {
+				offset = total
+			}
+			if end > total {
+				end = total
+			}
+			writeJSON(w, map[string]any{
+				"projects": projects[offset:end],
+				"total":    total,
+			})
+			return
+		}
+		writeJSON(w, projects)
+		return
+	}
+
 	// Paginated mode if ?limit= is present
 	if r.URL.Query().Get("limit") != "" {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -249,6 +278,29 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, projects)
+}
+
+func (s *Server) visibleProjects(auth *apikeys.AuthInfo, search string) ([]apikeys.Project, error) {
+	allowed := map[string]struct{}{}
+	for _, id := range auth.AllowedProjectIDs() {
+		allowed[id] = struct{}{}
+	}
+	search = strings.ToLower(strings.TrimSpace(search))
+	all, err := s.keyStore.ListProjects()
+	if err != nil {
+		return nil, err
+	}
+	projects := make([]apikeys.Project, 0, len(allowed))
+	for _, project := range all {
+		if _, ok := allowed[project.ID]; !ok {
+			continue
+		}
+		if search != "" && !strings.Contains(strings.ToLower(project.Name), search) {
+			continue
+		}
+		projects = append(projects, project)
+	}
+	return projects, nil
 }
 
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
