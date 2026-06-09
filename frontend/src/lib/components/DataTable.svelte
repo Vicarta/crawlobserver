@@ -24,14 +24,26 @@
     onsort,
   } = $props();
 
+  const FALLBACK_COLUMN_WIDTH = 140;
+
   let columnWidths = $state([]);
+
+  let tableWidth = $derived.by(() =>
+    columns.reduce((sum, col, idx) => sum + resolvedWidth(col, columnWidths[idx]), 0),
+  );
 
   function storageKey() {
     return tableId ? `crawlobserver:table-widths:${tableId}` : '';
   }
 
   function defaultWidth(col) {
-    return col.defaultWidth || col.width || null;
+    return col.defaultWidth || col.width || col.minWidth || FALLBACK_COLUMN_WIDTH;
+  }
+
+  function resolvedWidth(col, width) {
+    const minWidth = col.minWidth || 56;
+    const nextWidth = Number(width) || defaultWidth(col);
+    return Math.max(minWidth, nextWidth);
   }
 
   function loadColumnWidths() {
@@ -54,8 +66,8 @@
   }
 
   function columnStyle(idx) {
-    const width = columnWidths[idx] || defaultWidth(columns[idx]);
-    return width ? `width:${width}px;min-width:${columns[idx].minWidth || 56}px;` : '';
+    const width = resolvedWidth(columns[idx], columnWidths[idx]);
+    return `width:${width}px;min-width:${columns[idx].minWidth || 56}px;`;
   }
 
   function headerStyle(col, idx) {
@@ -115,7 +127,7 @@
 </script>
 
 <div class="data-table-wrap">
-<table class="data-table-resizable">
+<table class="data-table-resizable" style={`width:${tableWidth}px;min-width:${tableWidth}px;`}>
   <colgroup>
     {#each columns as col, idx}
       <col style={columnStyle(idx)} />
@@ -254,7 +266,7 @@
 
   .data-table-resizable {
     table-layout: fixed;
-    min-width: 100%;
+    max-width: none;
   }
 
   th {
