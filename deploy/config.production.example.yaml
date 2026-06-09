@@ -1,0 +1,70 @@
+crawler:
+  workers: 10
+  delay: 1s
+  max_pages: 0
+  max_depth: 0
+  timeout: 30s
+  user_agent: "CrawlObserver/1.0"
+  max_body_size: 10485760
+  respect_robots: true
+  store_html: false
+  crawl_scope: host
+  allow_private_ips: false
+  max_concurrent_sessions: 5
+  max_frontier_size: 1000000
+  max_workers: 50
+  js_render:
+    mode: "off"
+    max_pages: 2
+    page_timeout: 15s
+    block_resources: true
+  cloudflare:
+    enabled: false
+    resolver: "none"
+
+clickhouse:
+  host: clickhouse
+  port: 9000
+  http_port: 8123
+  database: crawlobserver
+  username: default
+  password: "CHANGE_ME_MATCH_DEPLOY_ENV"
+  mode: external
+
+storage:
+  batch_size: 1000
+  flush_interval: 5s
+
+resources:
+  max_memory_mb: 0
+  max_cpu: 0
+
+server:
+  host: 0.0.0.0
+  port: 8899
+  username: admin
+  password: "CHANGE_ME_STRONG_ADMIN_PASSWORD"
+  sqlite_path: /var/lib/crawlobserver/crawlobserver.db
+  rate_limit:
+    enabled: true
+    requests_per_second: 10
+    burst: 20
+    auth_requests_per_minute: 20
+
+backup:
+  enabled: true
+  interval: 6h
+  dir: /var/backups/crawlobserver
+  retain: 5
+
+telemetry:
+  enabled: false
+  asked_at: "1970-01-01T00:00:00Z"
+  session_recording: false
+
+announcements:
+  enabled: true
+  feed_url: "https://crawlobserver.com/announcements/feed.json"
+  poll_interval: 10m
+
+setup_complete: true
