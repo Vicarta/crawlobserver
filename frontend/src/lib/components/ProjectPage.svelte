@@ -391,7 +391,10 @@
     <DeltaCrawlTab
       projectId={project.id}
       onerror={(msg) => onerror?.(msg)}
-      onselectsession={(s) => onselectsession?.(s)}
+      onopensessions={async () => {
+        await ce();
+        be('sessions');
+      }}
       {isAdmin}
     />
   {:else if projectTab.startsWith('provider:')}

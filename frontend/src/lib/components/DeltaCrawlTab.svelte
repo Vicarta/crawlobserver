@@ -8,7 +8,7 @@
     updateProjectDeltaSettings,
   } from '../api.js';
 
-  let { projectId, isAdmin, onerror, onselectsession } = $props();
+  let { projectId, isAdmin, onerror, onopensessions } = $props();
 
   let settings = $state(null);
   let preview = $state(null);
@@ -19,6 +19,7 @@
   let advancedOpen = $state(false);
   let manualURLs = $state('');
   let message = $state('');
+  let startedSessionId = $state('');
 
   async function load() {
     loading = true;
@@ -48,6 +49,7 @@
     if (!isAdmin || !settings) return;
     saving = true;
     message = '';
+    startedSessionId = '';
     try {
       settings = await updateProjectDeltaSettings(projectId, settings);
       await loadPreview();
@@ -71,6 +73,7 @@
       manualURLs = '';
       await loadPreview();
       message = `Queued ${res.added || 0} URLs`;
+      startedSessionId = '';
     } catch (e) {
       onerror?.(e.message);
     }
@@ -80,18 +83,21 @@
     if (!isAdmin) return;
     running = true;
     message = '';
+    startedSessionId = '';
     try {
       const res = await runProjectDelta(projectId);
       await loadPreview();
-      message = 'Delta crawl started';
-      if (res?.session_id) {
-        onselectsession?.({ ID: res.session_id, ProjectID: projectId });
-      }
+      startedSessionId = res?.session_id || '';
+      message = 'Delta crawl started. It is now visible in Sessions.';
     } catch (e) {
       onerror?.(e.message);
     } finally {
       running = false;
     }
+  }
+
+  function openSessions() {
+    onopensessions?.(startedSessionId);
   }
 
   async function copyPreviewURLs() {
@@ -171,7 +177,12 @@
       </div>
 
       {#if message}
-        <div class="delta-message">{message}</div>
+        <div class="delta-message">
+          <span>{message}</span>
+          {#if startedSessionId}
+            <button class="btn btn-sm btn-ghost" onclick={openSessions}>View in Sessions</button>
+          {/if}
+        </div>
       {/if}
 
       <div class="status-strip {statusTone()}">
@@ -461,6 +472,10 @@
   }
 
   .delta-message {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
     margin-bottom: 14px;
     border: 1px solid rgba(34, 197, 94, 0.28);
     border-radius: 8px;
@@ -468,6 +483,10 @@
     color: var(--success);
     font-size: 13px;
     padding: 9px 12px;
+  }
+
+  .delta-message .btn {
+    flex: 0 0 auto;
   }
 
   .status-strip {
@@ -823,6 +842,11 @@
     .delta-actions {
       justify-content: flex-start;
       min-width: 0;
+    }
+
+    .delta-message {
+      align-items: flex-start;
+      flex-direction: column;
     }
 
     .status-meta,
