@@ -5,7 +5,7 @@ This document describes how an external agent should connect to the CrawlObserve
 Production base URL:
 
 ```text
-https://crawlobserver.aibizmate.com/api
+https://crawlobserver.example.com/api
 ```
 
 Do not use `http://0.0.0.0:8899/api` from an external agent. That is the internal bind address inside the service/container.
@@ -22,7 +22,7 @@ Example:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  https://crawlobserver.aibizmate.com/api/projects
+  https://crawlobserver.example.com/api/projects
 ```
 
 Basic auth also exists for browser/admin access, but external agents should prefer `X-API-Key` so credentials can be scoped and revoked.
@@ -45,14 +45,14 @@ Use this endpoint to confirm the API URL and auth mode:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  https://crawlobserver.aibizmate.com/api/server-info
+  https://crawlobserver.example.com/api/server-info
 ```
 
 Expected shape:
 
 ```json
 {
-  "api_url": "https://crawlobserver.aibizmate.com/api",
+  "api_url": "https://crawlobserver.example.com/api",
   "has_auth": true,
   "host": "0.0.0.0",
   "port": 8899
@@ -74,21 +74,21 @@ The `host` and `port` fields describe the internal server listener. Agents shoul
 Health check:
 
 ```bash
-curl https://crawlobserver.aibizmate.com/api/health
+curl https://crawlobserver.example.com/api/health
 ```
 
 List visible projects:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  https://crawlobserver.aibizmate.com/api/projects
+  https://crawlobserver.example.com/api/projects
 ```
 
 List crawl sessions:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  https://crawlobserver.aibizmate.com/api/sessions
+  https://crawlobserver.example.com/api/sessions
 ```
 
 ## Read Session Data
@@ -99,14 +99,14 @@ Session stats:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/stats"
+  "https://crawlobserver.example.com/api/sessions/{session_id}/stats"
 ```
 
 Pages, paginated:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/pages?limit=100&offset=0"
+  "https://crawlobserver.example.com/api/sessions/{session_id}/pages?limit=100&offset=0"
 ```
 
 Common page filters:
@@ -122,14 +122,14 @@ Example: list 404 pages:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/pages?status_code=404&limit=100"
+  "https://crawlobserver.example.com/api/sessions/{session_id}/pages?status_code=404&limit=100"
 ```
 
 Page detail:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  --get "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/page-detail" \
+  --get "https://crawlobserver.example.com/api/sessions/{session_id}/page-detail" \
   --data-urlencode "url=https://example.com/page/"
 ```
 
@@ -137,28 +137,28 @@ Internal links:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/internal-links?limit=100&offset=0"
+  "https://crawlobserver.example.com/api/sessions/{session_id}/internal-links?limit=100&offset=0"
 ```
 
 All links:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/links?limit=100&offset=0"
+  "https://crawlobserver.example.com/api/sessions/{session_id}/links?limit=100&offset=0"
 ```
 
 External link checks:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/external-checks?limit=100&offset=0"
+  "https://crawlobserver.example.com/api/sessions/{session_id}/external-checks?limit=100&offset=0"
 ```
 
 Resource checks:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/resource-checks?limit=100&offset=0"
+  "https://crawlobserver.example.com/api/sessions/{session_id}/resource-checks?limit=100&offset=0"
 ```
 
 ## PageRank and Crawl Graph
@@ -167,21 +167,21 @@ Top pages by internal PageRank:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/pagerank-top?limit=100&offset=0"
+  "https://crawlobserver.example.com/api/sessions/{session_id}/pagerank-top?limit=100&offset=0"
 ```
 
 PageRank distribution:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/pagerank-distribution"
+  "https://crawlobserver.example.com/api/sessions/{session_id}/pagerank-distribution"
 ```
 
 Treemap data:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/pagerank-treemap"
+  "https://crawlobserver.example.com/api/sessions/{session_id}/pagerank-treemap"
 ```
 
 Agents with project-scoped keys should treat PageRank endpoints as read-only. Do not call recompute endpoints unless using an admin/general key and explicitly instructed.
@@ -194,35 +194,35 @@ GSC connection status:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/projects/{project_id}/gsc/status"
+  "https://crawlobserver.example.com/api/projects/{project_id}/gsc/status"
 ```
 
 Overview:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/projects/{project_id}/gsc/overview"
+  "https://crawlobserver.example.com/api/projects/{project_id}/gsc/overview"
 ```
 
 Queries:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/projects/{project_id}/gsc/queries?limit=100&offset=0"
+  "https://crawlobserver.example.com/api/projects/{project_id}/gsc/queries?limit=100&offset=0"
 ```
 
 Pages:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/projects/{project_id}/gsc/pages?limit=100&offset=0"
+  "https://crawlobserver.example.com/api/projects/{project_id}/gsc/pages?limit=100&offset=0"
 ```
 
 Timeline:
 
 ```bash
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/projects/{project_id}/gsc/timeline"
+  "https://crawlobserver.example.com/api/projects/{project_id}/gsc/timeline"
 ```
 
 Use GSC endpoints to enrich crawl observations with search demand, impressions, clicks, CTR, and average position.
@@ -235,7 +235,7 @@ Only use this with a general/admin API key.
 curl -X POST \
   -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
   -H "Content-Type: application/json" \
-  https://crawlobserver.aibizmate.com/api/crawl \
+  https://crawlobserver.example.com/api/crawl \
   -d '{
     "seeds": ["https://example.com/"],
     "project_id": "PROJECT_ID",
@@ -277,7 +277,7 @@ Normal resume:
 curl -X POST \
   -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
   -H "Content-Type: application/json" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/resume" \
+  "https://crawlobserver.example.com/api/sessions/{session_id}/resume" \
   -d '{}'
 ```
 
@@ -287,7 +287,7 @@ Full recrawl with changed parameters:
 curl -X POST \
   -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
   -H "Content-Type: application/json" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/resume" \
+  "https://crawlobserver.example.com/api/sessions/{session_id}/resume" \
   -d '{
     "full_recrawl": true,
     "max_pages": 1000,
@@ -303,7 +303,7 @@ Stop crawl:
 ```bash
 curl -X POST \
   -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/stop"
+  "https://crawlobserver.example.com/api/sessions/{session_id}/stop"
 ```
 
 ## Rescanning Individual Pages
@@ -314,7 +314,7 @@ Only use with a general/admin API key.
 curl -X POST \
   -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
   -H "Content-Type: application/json" \
-  "https://crawlobserver.aibizmate.com/api/sessions/{session_id}/rescan-pages" \
+  "https://crawlobserver.example.com/api/sessions/{session_id}/rescan-pages" \
   -d '{
     "urls": [
       "https://example.com/fixed-404-page/",
@@ -334,14 +334,14 @@ Read settings:
 
 ```bash
 curl -H "X-API-Key: $ADMIN_API_KEY" \
-  https://crawlobserver.aibizmate.com/api/projects/{project_id}/delta/settings
+  https://crawlobserver.example.com/api/projects/{project_id}/delta/settings
 ```
 
 Preview candidates:
 
 ```bash
 curl -H "X-API-Key: $ADMIN_API_KEY" \
-  https://crawlobserver.aibizmate.com/api/projects/{project_id}/delta/preview
+  https://crawlobserver.example.com/api/projects/{project_id}/delta/preview
 ```
 
 Queue manual URLs:
@@ -351,7 +351,7 @@ curl -X POST \
   -H "X-API-Key: $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"urls":["https://example.com/new-page/"]}' \
-  https://crawlobserver.aibizmate.com/api/projects/{project_id}/delta/manual-queue
+  https://crawlobserver.example.com/api/projects/{project_id}/delta/manual-queue
 ```
 
 Start a delta run:
@@ -359,7 +359,7 @@ Start a delta run:
 ```bash
 curl -X POST \
   -H "X-API-Key: $ADMIN_API_KEY" \
-  https://crawlobserver.aibizmate.com/api/projects/{project_id}/delta/run
+  https://crawlobserver.example.com/api/projects/{project_id}/delta/run
 ```
 
 Only admin/general credentials should update settings or start runs. A delta run returns a new `session_id`; monitor it like any other crawl session.
@@ -374,7 +374,7 @@ Create a project-scoped key:
 curl -X POST \
   -H "X-API-Key: $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
-  https://crawlobserver.aibizmate.com/api/api-keys \
+  https://crawlobserver.example.com/api/api-keys \
   -d '{
     "name": "external-agent-readonly",
     "type": "project",
@@ -388,7 +388,7 @@ List API keys:
 
 ```bash
 curl -H "X-API-Key: $ADMIN_API_KEY" \
-  https://crawlobserver.aibizmate.com/api/api-keys
+  https://crawlobserver.example.com/api/api-keys
 ```
 
 Revoke an API key:
@@ -396,7 +396,7 @@ Revoke an API key:
 ```bash
 curl -X DELETE \
   -H "X-API-Key: $ADMIN_API_KEY" \
-  https://crawlobserver.aibizmate.com/api/api-keys/{key_id}
+  https://crawlobserver.example.com/api/api-keys/{key_id}
 ```
 
 ## Agent Safety Rules
@@ -417,7 +417,7 @@ curl -X DELETE \
 import os
 import requests
 
-BASE_URL = "https://crawlobserver.aibizmate.com/api"
+BASE_URL = "https://crawlobserver.example.com/api"
 API_KEY = os.environ["CRAWLOBSERVER_API_KEY"]
 
 session = requests.Session()
@@ -445,7 +445,7 @@ if completed:
 ## Minimal JavaScript Client
 
 ```js
-const BASE_URL = "https://crawlobserver.aibizmate.com/api";
+const BASE_URL = "https://crawlobserver.example.com/api";
 const API_KEY = process.env.CRAWLOBSERVER_API_KEY;
 
 async function api(path, options = {}) {
@@ -476,7 +476,7 @@ console.log({ projects, sessions });
 All paths below are relative to:
 
 ```text
-https://crawlobserver.aibizmate.com/api
+https://crawlobserver.example.com/api
 ```
 
 | Method | Path | Purpose |

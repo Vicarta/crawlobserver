@@ -4868,7 +4868,7 @@ func TestHandleServerInfo_Success(t *testing.T) {
 
 func TestHandleServerInfo_UsesPublicURL(t *testing.T) {
 	srv, handler, _ := newTestServer(t)
-	srv.cfg.Server.PublicURL = "https://crawlobserver.aibizmate.com/"
+	srv.cfg.Server.PublicURL = "https://crawlobserver.example.com/"
 
 	req := authRequest(httptest.NewRequest("GET", "/api/server-info", nil))
 	rec := httptest.NewRecorder()
@@ -4880,7 +4880,7 @@ func TestHandleServerInfo_UsesPublicURL(t *testing.T) {
 
 	var resp map[string]interface{}
 	decodeJSON(t, rec, &resp)
-	if resp["api_url"] != "https://crawlobserver.aibizmate.com/api" {
+	if resp["api_url"] != "https://crawlobserver.example.com/api" {
 		t.Errorf("expected public api_url, got %v", resp["api_url"])
 	}
 }
@@ -4891,7 +4891,7 @@ func TestHandleServerInfo_UsesForwardedHeaders(t *testing.T) {
 	req := authRequest(httptest.NewRequest("GET", "/api/server-info", nil))
 	req.Host = "127.0.0.1:8899"
 	req.Header.Set("X-Forwarded-Proto", "https")
-	req.Header.Set("X-Forwarded-Host", "crawlobserver.aibizmate.com")
+	req.Header.Set("X-Forwarded-Host", "crawlobserver.example.com")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -4901,7 +4901,7 @@ func TestHandleServerInfo_UsesForwardedHeaders(t *testing.T) {
 
 	var resp map[string]interface{}
 	decodeJSON(t, rec, &resp)
-	if resp["api_url"] != "https://crawlobserver.aibizmate.com/api" {
+	if resp["api_url"] != "https://crawlobserver.example.com/api" {
 		t.Errorf("expected forwarded api_url, got %v", resp["api_url"])
 	}
 }

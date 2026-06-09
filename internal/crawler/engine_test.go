@@ -450,20 +450,20 @@ func TestRegisterFinalURLScope_HostRedirectAlias(t *testing.T) {
 		},
 	}
 	engine := NewEngine(cfg, nil)
-	engine.session = NewSession([]string{"https://diskinternals.com/raid-recovery/"}, cfg)
+	engine.session = NewSession([]string{"https://example.com/raid-recovery/"}, cfg)
 	engine.buildScope()
 
-	if engine.isInScope("https://www.diskinternals.com/raid-recovery/how-to-recover-data-from-raid-drives/") {
+	if engine.isInScope("https://www.example.com/raid-recovery/how-to-recover-data-from-raid-drives/") {
 		t.Fatal("www host should not be in scope before registering the final redirect URL")
 	}
 
 	engine.registerFinalURLScope(&fetcher.FetchResult{
-		URL:           "https://diskinternals.com/raid-recovery/",
-		FinalURL:      "https://www.diskinternals.com/raid-recovery/",
-		RedirectChain: []fetcher.RedirectHop{{URL: "https://diskinternals.com/raid-recovery/", StatusCode: 301}},
+		URL:           "https://example.com/raid-recovery/",
+		FinalURL:      "https://www.example.com/raid-recovery/",
+		RedirectChain: []fetcher.RedirectHop{{URL: "https://example.com/raid-recovery/", StatusCode: 301}},
 	})
 
-	if !engine.isInScope("https://www.diskinternals.com/raid-recovery/how-to-recover-data-from-raid-drives/") {
+	if !engine.isInScope("https://www.example.com/raid-recovery/how-to-recover-data-from-raid-drives/") {
 		t.Fatal("www host should be in scope after registering the final redirect URL")
 	}
 }
@@ -476,19 +476,19 @@ func TestRegisterFinalURLScope_SubdirectoryRedirectAlias(t *testing.T) {
 		},
 	}
 	engine := NewEngine(cfg, nil)
-	engine.session = NewSession([]string{"https://diskinternals.com/raid-recovery/"}, cfg)
+	engine.session = NewSession([]string{"https://example.com/raid-recovery/"}, cfg)
 	engine.buildScope()
 
-	inDirectory := "https://www.diskinternals.com/raid-recovery/how-to-recover-data-from-raid-drives/"
-	outsideDirectory := "https://www.diskinternals.com/vmfs-recovery/"
+	inDirectory := "https://www.example.com/raid-recovery/how-to-recover-data-from-raid-drives/"
+	outsideDirectory := "https://www.example.com/vmfs-recovery/"
 	if engine.isInScope(inDirectory) {
 		t.Fatal("www subdirectory URL should not be in scope before registering the final redirect URL")
 	}
 
 	engine.registerFinalURLScope(&fetcher.FetchResult{
-		URL:           "https://diskinternals.com/raid-recovery/",
-		FinalURL:      "https://www.diskinternals.com/raid-recovery/",
-		RedirectChain: []fetcher.RedirectHop{{URL: "https://diskinternals.com/raid-recovery/", StatusCode: 301}},
+		URL:           "https://example.com/raid-recovery/",
+		FinalURL:      "https://www.example.com/raid-recovery/",
+		RedirectChain: []fetcher.RedirectHop{{URL: "https://example.com/raid-recovery/", StatusCode: 301}},
 	})
 
 	if !engine.isInScope(inDirectory) {
