@@ -371,9 +371,10 @@
 <style>
   .delta-shell {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 320px;
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 320px);
     gap: 24px;
     align-items: start;
+    padding: 24px 28px 32px;
   }
 
   .delta-main {
@@ -392,6 +393,7 @@
   }
 
   .delta-topbar {
+    align-items: flex-start;
     justify-content: space-between;
     gap: 20px;
     margin-bottom: 18px;
@@ -455,6 +457,7 @@
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 8px;
+    min-width: 230px;
   }
 
   .delta-message {
@@ -740,11 +743,11 @@
     gap: 14px;
     min-width: 0;
     position: sticky;
-    top: 16px;
+    top: 24px;
   }
 
   .side-card {
-    padding: 16px;
+    padding: 18px;
   }
 
   .side-heading {
@@ -801,6 +804,7 @@
   @media (max-width: 1180px) {
     .delta-shell {
       grid-template-columns: 1fr;
+      padding: 22px;
     }
 
     .delta-side {
@@ -818,6 +822,7 @@
 
     .delta-actions {
       justify-content: flex-start;
+      min-width: 0;
     }
 
     .status-meta,
@@ -832,6 +837,10 @@
     .source-grid,
     .checks-grid {
       grid-template-columns: 1fr;
+    }
+
+    .delta-shell {
+      padding: 18px 16px 24px;
     }
   }
 </style>
