@@ -81,12 +81,27 @@ func (s *Store) exportCriticalTable(ctx context.Context, dir, table, ts string) 
 
 	enc := json.NewEncoder(gw)
 
+	if table == "gsc_analytics" {
+		if err := s.exportGSCAnalyticsRows(ctx, enc); err != nil {
+			os.Remove(path)
+			return err
+		}
+		return nil
+	}
+
 	// Stream all rows without LIMIT/OFFSET (deterministic, no missed/duplicated rows).
 	// The driver handles streaming natively — rows are fetched in blocks.
-	query := fmt.Sprintf("SELECT * FROM %s", table)
-	rows, err := s.conn.Query(ctx, query)
-	if err != nil {
+	if err := s.exportCriticalTableQueryRows(ctx, enc, fmt.Sprintf("SELECT * FROM %s", table)); err != nil {
 		os.Remove(path)
+		return err
+	}
+
+	return nil
+}
+
+func (s *Store) exportCriticalTableQueryRows(ctx context.Context, enc *json.Encoder, query string, args ...interface{}) error {
+	rows, err := s.conn.Query(ctx, query, args...)
+	if err != nil {
 		return fmt.Errorf("querying: %w", err)
 	}
 	defer rows.Close()
@@ -101,7 +116,6 @@ func (s *Store) exportCriticalTable(ctx context.Context, dir, table, ts string) 
 			values[i] = new(interface{})
 		}
 		if err := rows.Scan(values...); err != nil {
-			os.Remove(path)
 			return fmt.Errorf("scanning row: %w", err)
 		}
 
@@ -111,16 +125,118 @@ func (s *Store) exportCriticalTable(ctx context.Context, dir, table, ts string) 
 			row[name] = *(values[i].(*interface{}))
 		}
 		if err := enc.Encode(row); err != nil {
-			os.Remove(path)
 			return fmt.Errorf("encoding row: %w", err)
 		}
 	}
 
 	if err := rows.Err(); err != nil {
-		os.Remove(path)
 		return fmt.Errorf("iterating rows: %w", err)
 	}
 
+	return nil
+}
+
+func (s *Store) exportGSCAnalyticsRows(ctx context.Context, enc *json.Encoder) error {
+	chunks, err := s.gscAnalyticsExportChunks(ctx)
+	if err != nil {
+		return err
+	}
+	for _, chunk := range chunks {
+		if err := s.exportGSCAnalyticsChunk(ctx, enc, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type gscAnalyticsExportChunk struct {
+	ProjectID string
+	StartDate time.Time
+	EndDate   time.Time
+}
+
+func (s *Store) gscAnalyticsExportChunks(ctx context.Context) ([]gscAnalyticsExportChunk, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT project_id, min(date), max(date)
+		FROM gsc_analytics
+		GROUP BY project_id
+		ORDER BY project_id`)
+	if err != nil {
+		return nil, fmt.Errorf("querying gsc_analytics export ranges: %w", err)
+	}
+	defer rows.Close()
+
+	var chunks []gscAnalyticsExportChunk
+	for rows.Next() {
+		var projectID string
+		var minDate, maxDate time.Time
+		if err := rows.Scan(&projectID, &minDate, &maxDate); err != nil {
+			return nil, fmt.Errorf("scanning gsc_analytics export range: %w", err)
+		}
+		chunks = append(chunks, gscAnalyticsDailyChunks(projectID, minDate, maxDate)...)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return chunks, nil
+}
+
+func gscAnalyticsDailyChunks(projectID string, minDate, maxDate time.Time) []gscAnalyticsExportChunk {
+	start := dateOnly(minDate)
+	last := dateOnly(maxDate)
+	if projectID == "" || start.IsZero() || last.IsZero() || last.Before(start) {
+		return nil
+	}
+	chunks := make([]gscAnalyticsExportChunk, 0, int(last.Sub(start).Hours()/24)+1)
+	for day := start; !day.After(last); day = day.AddDate(0, 0, 1) {
+		chunks = append(chunks, gscAnalyticsExportChunk{
+			ProjectID: projectID,
+			StartDate: day,
+			EndDate:   day.AddDate(0, 0, 1),
+		})
+	}
+	return chunks
+}
+
+func dateOnly(t time.Time) time.Time {
+	if t.IsZero() {
+		return time.Time{}
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func (s *Store) exportGSCAnalyticsChunk(ctx context.Context, enc *json.Encoder, chunk gscAnalyticsExportChunk) error {
+	rows, err := s.conn.Query(ctx, `
+		SELECT project_id, date, query, page, country, device,
+			clicks, impressions, ctr, position, fetched_at
+		FROM gsc_analytics FINAL
+		WHERE project_id = ? AND date >= ? AND date < ?
+		ORDER BY date, query, page, country, device`,
+		chunk.ProjectID, chunk.StartDate, chunk.EndDate)
+	if err != nil {
+		return fmt.Errorf("querying gsc_analytics chunk project=%s date=%s: %w", chunk.ProjectID, chunk.StartDate.Format("2006-01-02"), err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var projectID, query, page, country, device string
+		var date, fetchedAt time.Time
+		var clicks, impressions uint32
+		var ctr, position float32
+		if err := rows.Scan(&projectID, &date, &query, &page, &country, &device, &clicks, &impressions, &ctr, &position, &fetchedAt); err != nil {
+			return fmt.Errorf("scanning gsc_analytics chunk project=%s date=%s: %w", chunk.ProjectID, chunk.StartDate.Format("2006-01-02"), err)
+		}
+		if err := enc.Encode(map[string]interface{}{
+			"project_id": projectID, "date": date, "query": query, "page": page,
+			"country": country, "device": device, "clicks": clicks,
+			"impressions": impressions, "ctr": ctr, "position": position, "fetched_at": fetchedAt,
+		}); err != nil {
+			return fmt.Errorf("encoding gsc_analytics chunk project=%s date=%s: %w", chunk.ProjectID, chunk.StartDate.Format("2006-01-02"), err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading gsc_analytics chunk project=%s date=%s: %w", chunk.ProjectID, chunk.StartDate.Format("2006-01-02"), err)
+	}
 	return nil
 }
 
