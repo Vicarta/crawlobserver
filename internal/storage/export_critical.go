@@ -114,12 +114,84 @@ func (s *Store) exportCriticalTableRows(ctx context.Context, table string, enc *
 }
 
 func (s *Store) exportGSCAnalyticsRows(ctx context.Context, enc *json.Encoder) error {
+	chunks, err := s.gscAnalyticsExportChunks(ctx)
+	if err != nil {
+		return err
+	}
+	for _, chunk := range chunks {
+		if err := s.exportGSCAnalyticsChunk(ctx, enc, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type gscAnalyticsExportChunk struct {
+	ProjectID string
+	StartDate time.Time
+	EndDate   time.Time
+}
+
+func (s *Store) gscAnalyticsExportChunks(ctx context.Context) ([]gscAnalyticsExportChunk, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT project_id, min(date), max(date)
+		FROM crawlobserver.gsc_analytics
+		GROUP BY project_id
+		ORDER BY project_id`)
+	if err != nil {
+		return nil, fmt.Errorf("querying gsc_analytics export ranges: %w", err)
+	}
+	defer rows.Close()
+
+	var chunks []gscAnalyticsExportChunk
+	for rows.Next() {
+		var projectID string
+		var minDate, maxDate time.Time
+		if err := rows.Scan(&projectID, &minDate, &maxDate); err != nil {
+			return nil, fmt.Errorf("scanning gsc_analytics export range: %w", err)
+		}
+		chunks = append(chunks, gscAnalyticsDailyChunks(projectID, minDate, maxDate)...)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return chunks, nil
+}
+
+func gscAnalyticsDailyChunks(projectID string, minDate, maxDate time.Time) []gscAnalyticsExportChunk {
+	start := dateOnly(minDate)
+	last := dateOnly(maxDate)
+	if projectID == "" || start.IsZero() || last.IsZero() || last.Before(start) {
+		return nil
+	}
+	chunks := make([]gscAnalyticsExportChunk, 0, int(last.Sub(start).Hours()/24)+1)
+	for day := start; !day.After(last); day = day.AddDate(0, 0, 1) {
+		chunks = append(chunks, gscAnalyticsExportChunk{
+			ProjectID: projectID,
+			StartDate: day,
+			EndDate:   day.AddDate(0, 0, 1),
+		})
+	}
+	return chunks
+}
+
+func dateOnly(t time.Time) time.Time {
+	if t.IsZero() {
+		return time.Time{}
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func (s *Store) exportGSCAnalyticsChunk(ctx context.Context, enc *json.Encoder, chunk gscAnalyticsExportChunk) error {
 	rows, err := s.conn.Query(ctx, `
 		SELECT project_id, date, query, page, country, device,
 			clicks, impressions, ctr, position, fetched_at
-		FROM crawlobserver.gsc_analytics FINAL`)
+		FROM crawlobserver.gsc_analytics FINAL
+		WHERE project_id = ? AND date >= ? AND date < ?
+		ORDER BY date, query, page, country, device`,
+		chunk.ProjectID, chunk.StartDate, chunk.EndDate)
 	if err != nil {
-		return fmt.Errorf("querying: %w", err)
+		return fmt.Errorf("querying gsc_analytics chunk project=%s date=%s: %w", chunk.ProjectID, chunk.StartDate.Format("2006-01-02"), err)
 	}
 	defer rows.Close()
 
@@ -129,17 +201,20 @@ func (s *Store) exportGSCAnalyticsRows(ctx context.Context, enc *json.Encoder) e
 		var clicks, impressions uint32
 		var ctr, position float32
 		if err := rows.Scan(&projectID, &date, &query, &page, &country, &device, &clicks, &impressions, &ctr, &position, &fetchedAt); err != nil {
-			return fmt.Errorf("scanning row: %w", err)
+			return fmt.Errorf("scanning gsc_analytics chunk project=%s date=%s: %w", chunk.ProjectID, chunk.StartDate.Format("2006-01-02"), err)
 		}
 		if err := enc.Encode(map[string]interface{}{
 			"project_id": projectID, "date": date, "query": query, "page": page,
 			"country": country, "device": device, "clicks": clicks,
 			"impressions": impressions, "ctr": ctr, "position": position, "fetched_at": fetchedAt,
 		}); err != nil {
-			return fmt.Errorf("encoding row: %w", err)
+			return fmt.Errorf("encoding gsc_analytics chunk project=%s date=%s: %w", chunk.ProjectID, chunk.StartDate.Format("2006-01-02"), err)
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading gsc_analytics chunk project=%s date=%s: %w", chunk.ProjectID, chunk.StartDate.Format("2006-01-02"), err)
+	}
+	return nil
 }
 
 func (s *Store) exportGSCInspectionRows(ctx context.Context, enc *json.Encoder) error {
