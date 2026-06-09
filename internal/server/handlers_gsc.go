@@ -97,9 +97,9 @@ func (s *Server) handleGSCStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.gscFetchMu.Unlock()
 
-	// Admins need the property list both before and after selection so they can
+	// Full-access users need the property list both before and after selection so they can
 	// correct a wrong HTTP/HTTPS/domain property without disconnecting.
-	if auth := apikeys.FromContext(r.Context()); auth == nil || auth.IsAdmin() {
+	if hasGSCFullAccess(r) {
 		result["properties"] = s.gscProperties(r.Context(), projectID, conn)
 	}
 
@@ -128,6 +128,20 @@ func (s *Server) gscProperties(ctx context.Context, projectID string, conn *apik
 	}
 	s.sortGSCProperties(ctx, projectID, props)
 	return props
+}
+
+func hasGSCFullAccess(r *http.Request) bool {
+	auth := apikeys.FromContext(r.Context())
+	return auth == nil || auth.ProjectID == nil
+}
+
+func requireGSCProjectAccess(w http.ResponseWriter, r *http.Request, projectID string) bool {
+	auth := apikeys.FromContext(r.Context())
+	if auth == nil || auth.ProjectID == nil || *auth.ProjectID == projectID {
+		return true
+	}
+	writeError(w, http.StatusForbidden, "project not accessible with this API key")
+	return false
 }
 
 func (s *Server) sortGSCProperties(ctx context.Context, projectID string, props []gsc.Property) {
@@ -576,7 +590,7 @@ func (s *Server) handleGSCPages(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGSCPageQueries(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
-	if !requireProjectAccess(w, r, projectID) {
+	if !requireGSCProjectAccess(w, r, projectID) {
 		return
 	}
 	page := strings.TrimSpace(r.URL.Query().Get("page"))

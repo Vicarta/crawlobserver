@@ -13,27 +13,27 @@ func TestSortGSCPropertiesPrefersProjectDomainAndHTTPS(t *testing.T) {
 	store := &mockStore{
 		sessions: []storage.CrawlSession{
 			{
-				ID:        "session-di",
-				SeedURLs:  []string{"https://diskinternals.com/raid-recovery/"},
+				ID:        "session-example",
+				SeedURLs:  []string{"https://example.com/raid-recovery/"},
 				ProjectID: &projectID,
 			},
 		},
 	}
 	server := &Server{store: store}
 	props := []gsc.Property{
-		{SiteURL: "http://www.diskinternals.com/", PermissionLevel: "siteOwner"},
+		{SiteURL: "http://www.example.com/", PermissionLevel: "siteOwner"},
 		{SiteURL: "https://example.com/", PermissionLevel: "siteOwner"},
-		{SiteURL: "https://www.diskinternals.com/", PermissionLevel: "siteOwner"},
-		{SiteURL: "sc-domain:diskinternals.com", PermissionLevel: "siteOwner"},
+		{SiteURL: "https://www.example.com/", PermissionLevel: "siteOwner"},
+		{SiteURL: "sc-domain:example.com", PermissionLevel: "siteOwner"},
 	}
 
 	server.sortGSCProperties(context.Background(), projectID, props)
 
 	got := []string{props[0].SiteURL, props[1].SiteURL, props[2].SiteURL, props[3].SiteURL}
 	want := []string{
-		"sc-domain:diskinternals.com",
-		"https://www.diskinternals.com/",
-		"http://www.diskinternals.com/",
+		"sc-domain:example.com",
+		"https://www.example.com/",
+		"http://www.example.com/",
 		"https://example.com/",
 	}
 	for i := range want {
@@ -44,7 +44,7 @@ func TestSortGSCPropertiesPrefersProjectDomainAndHTTPS(t *testing.T) {
 }
 
 func TestGSCPropertyScoreHandlesInvalidAndUnknownProperties(t *testing.T) {
-	candidates := map[string]bool{"diskinternals.com": true}
+	candidates := map[string]bool{"example.com": true}
 
 	if got := gscPropertyScore("not a url", candidates); got != 0 {
 		t.Fatalf("invalid URL score = %d, want 0", got)
@@ -52,7 +52,7 @@ func TestGSCPropertyScoreHandlesInvalidAndUnknownProperties(t *testing.T) {
 	if got := gscPropertyScore("sc-domain:other.example", candidates); got <= 0 {
 		t.Fatalf("unknown domain property score = %d, want positive baseline", got)
 	}
-	if matching := gscPropertyScore("sc-domain:diskinternals.com", candidates); matching <= gscPropertyScore("sc-domain:other.example", candidates) {
+	if matching := gscPropertyScore("sc-domain:example.com", candidates); matching <= gscPropertyScore("sc-domain:other.example", candidates) {
 		t.Fatalf("matching domain property should outrank unrelated domain property")
 	}
 }
