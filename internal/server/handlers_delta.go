@@ -388,6 +388,7 @@ func (s *Server) deltaCrawlRequest(result *deltaCandidateResult) (crawler.CrawlR
 	retries := result.settings.RetryCount
 	req := crawler.CrawlRequest{
 		Seeds:               result.urls,
+		SessionSeedURLs:     append([]string(nil), result.baseline.SeedURLs...),
 		MaxPages:            maxPages,
 		MaxDepth:            result.settings.MaxDiscoveryDepth,
 		Workers:             cfg.Crawler.Workers,

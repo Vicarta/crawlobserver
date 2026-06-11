@@ -102,6 +102,7 @@ func (m *Manager) LastError(sessionID string) string {
 // CrawlRequest holds parameters for starting a new crawl.
 type CrawlRequest struct {
 	Seeds               []string `json:"seeds"`
+	SessionSeedURLs     []string `json:"session_seed_urls,omitempty"`
 	MaxPages            int      `json:"max_pages"`
 	MaxDepth            int      `json:"max_depth"`
 	Workers             int      `json:"workers"`
@@ -238,8 +239,16 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 		}
 	}
 
+	sessionSeeds := req.Seeds
+	if len(req.SessionSeedURLs) > 0 {
+		sessionSeeds = req.SessionSeedURLs
+	}
+	for i, s := range sessionSeeds {
+		sessionSeeds[i] = normalizer.EnsureScheme(s)
+	}
+
 	engine := NewEngine(&cfg, m.store)
-	sessionID := engine.SessionID(req.Seeds)
+	sessionID := engine.SessionID(sessionSeeds)
 	engine.session.ProjectID = req.ProjectID
 	engine.session.Label = req.Label
 	engine.sitemapOnly = cfg.Crawler.CrawlSitemapOnly
