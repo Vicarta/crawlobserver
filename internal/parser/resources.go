@@ -9,21 +9,22 @@ import (
 	"github.com/SEObserver/crawlobserver/internal/normalizer"
 )
 
-// PageResource represents a CSS, JS, font, or icon resource referenced by a page.
+// PageResource represents a CSS, JS, font, icon, or image resource referenced by a page.
 type PageResource struct {
 	URL          string
-	ResourceType string // "css", "js", "font", "icon"
+	ResourceType string // "css", "js", "font", "icon", "image"
 	IsInternal   bool
 }
 
-// ExtractResources extracts external resource references (CSS, JS, fonts, icons) from the document.
+// ExtractResources extracts external resource references from the document.
 func ExtractResources(doc *goquery.Document, baseURL *url.URL) []PageResource {
 	seen := make(map[string]bool)
 	var resources []PageResource
 
 	add := func(href, resType string) {
 		href = strings.TrimSpace(href)
-		if href == "" || strings.HasPrefix(strings.ToLower(href), "data:") {
+		lower := strings.ToLower(href)
+		if href == "" || strings.HasPrefix(lower, "data:") || strings.HasPrefix(lower, "blob:") || strings.HasPrefix(lower, "javascript:") {
 			return
 		}
 		resolved, err := normalizer.Resolve(baseURL.String(), href)
@@ -40,6 +41,15 @@ func ExtractResources(doc *goquery.Document, baseURL *url.URL) []PageResource {
 			ResourceType: resType,
 			IsInternal:   isInternal(baseURL, resolved),
 		})
+	}
+	addSrcset := func(srcset string, resType string) {
+		for _, candidate := range strings.Split(srcset, ",") {
+			fields := strings.Fields(strings.TrimSpace(candidate))
+			if len(fields) == 0 {
+				continue
+			}
+			add(fields[0], resType)
+		}
 	}
 
 	// <link> tags
@@ -62,6 +72,8 @@ func ExtractResources(doc *goquery.Document, baseURL *url.URL) []PageResource {
 				add(href, "js")
 			case "font":
 				add(href, "font")
+			case "image":
+				add(href, "image")
 			}
 		}
 	})
@@ -70,6 +82,20 @@ func ExtractResources(doc *goquery.Document, baseURL *url.URL) []PageResource {
 	doc.Find("script").Each(func(_ int, s *goquery.Selection) {
 		src, _ := htmlutil.Attr(s, "src")
 		add(src, "js")
+	})
+
+	doc.Find("img").Each(func(_ int, s *goquery.Selection) {
+		for _, attr := range []string{"src", "data-src", "data-original", "data-lazy-src"} {
+			src, _ := htmlutil.Attr(s, attr)
+			add(src, "image")
+		}
+		srcset, _ := htmlutil.Attr(s, "srcset")
+		addSrcset(srcset, "image")
+	})
+
+	doc.Find("source").Each(func(_ int, s *goquery.Selection) {
+		srcset, _ := htmlutil.Attr(s, "srcset")
+		addSrcset(srcset, "image")
 	})
 
 	return resources

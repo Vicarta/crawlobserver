@@ -575,6 +575,7 @@
   "resources.js": "JS",
   "resources.font": "Font",
   "resources.icon": "Ikon",
+  "resources.image": "Gambar",
   "resources.allSources": "Semua sumber",
   "resources.hotlink": "Hotlink",
   "resources.allStatus": "Semua status",

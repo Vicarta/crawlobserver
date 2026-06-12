@@ -575,6 +575,7 @@
   "resources.js": "JS",
   "resources.font": "フォント",
   "resources.icon": "アイコン",
+  "resources.image": "画像",
   "resources.allSources": "全ソース",
   "resources.hotlink": "ホットリンク",
   "resources.allStatus": "全ステータス",

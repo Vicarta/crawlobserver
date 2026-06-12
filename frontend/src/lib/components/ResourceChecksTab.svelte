@@ -96,6 +96,8 @@
         return t('resources.font');
       case 'icon':
         return t('resources.icon');
+      case 'image':
+        return t('resources.image');
       default:
         return type;
     }
@@ -209,6 +211,7 @@
           { value: 'js', label: t('resources.js') },
           { value: 'font', label: t('resources.font') },
           { value: 'icon', label: t('resources.icon') },
+          { value: 'image', label: t('resources.image') },
         ]}
       />
       <SearchSelect

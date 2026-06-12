@@ -575,6 +575,7 @@
   "resources.js": "JS",
   "resources.font": "Yazı Tipi",
   "resources.icon": "Simge",
+  "resources.image": "Görsel",
   "resources.allSources": "Tüm kaynaklar",
   "resources.hotlink": "Hotlink",
   "resources.allStatus": "Tüm durumlar",

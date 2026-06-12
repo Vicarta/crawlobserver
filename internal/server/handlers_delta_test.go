@@ -52,4 +52,7 @@ func TestDeltaCrawlRequestPreservesBaselineSeedURLs(t *testing.T) {
 	if !reflect.DeepEqual(req.SessionSeedURLs, baselineSeeds) {
 		t.Fatalf("req.SessionSeedURLs = %#v, want %#v", req.SessionSeedURLs, baselineSeeds)
 	}
+	if req.CheckPageResources == nil || !*req.CheckPageResources {
+		t.Fatalf("req.CheckPageResources = %#v, want true", req.CheckPageResources)
+	}
 }

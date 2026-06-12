@@ -575,6 +575,7 @@
   "resources.js": "JS",
   "resources.font": "خط",
   "resources.icon": "أيقونة",
+  "resources.image": "صورة",
   "resources.allSources": "جميع المصادر",
   "resources.hotlink": "ربط مباشر",
   "resources.allStatus": "جميع الحالات",

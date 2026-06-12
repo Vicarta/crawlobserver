@@ -628,6 +628,7 @@
   "resources.js": "JS",
   "resources.font": "Police",
   "resources.icon": "Icône",
+  "resources.image": "Image",
   "resources.allSources": "Toutes les sources",
   "resources.hotlink": "Hotlink",
   "resources.allStatus": "Tous les statuts",

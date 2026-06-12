@@ -575,6 +575,7 @@
   "resources.js": "JS",
   "resources.font": "폰트",
   "resources.icon": "아이콘",
+  "resources.image": "이미지",
   "resources.allSources": "모든 소스",
   "resources.hotlink": "핫링크",
   "resources.allStatus": "모든 상태",

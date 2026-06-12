@@ -161,6 +161,22 @@ curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
   "https://crawlobserver.example.com/api/sessions/{session_id}/resource-checks?limit=100&offset=0"
 ```
 
+Resource checks include CSS, JavaScript, fonts, icons, and page images when resource checking was enabled for the crawl. To inspect broken or redirected images only, filter by resource type:
+
+```bash
+curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
+  "https://crawlobserver.example.com/api/sessions/{session_id}/resource-checks?resource_type=image&limit=100&offset=0"
+```
+
+Useful filters:
+
+```text
+resource_type=image
+status_code=404
+url=fragment
+is_internal=true
+```
+
 ## PageRank and Crawl Graph
 
 Top pages by internal PageRank:
@@ -491,7 +507,7 @@ https://crawlobserver.example.com/api
 | `GET` | `/sessions/{id}/links` | All links. |
 | `GET` | `/sessions/{id}/internal-links` | Internal links. |
 | `GET` | `/sessions/{id}/external-checks` | External URL checks. |
-| `GET` | `/sessions/{id}/resource-checks` | Resource checks. |
+| `GET` | `/sessions/{id}/resource-checks` | Resource checks, including `resource_type=image` for image availability. |
 | `GET` | `/sessions/{id}/pagerank-top` | Top internal PageRank pages. |
 | `GET` | `/sessions/{id}/near-duplicates` | Near duplicate page pairs. |
 | `GET` | `/sessions/{id}/structured-data` | Structured data findings. |

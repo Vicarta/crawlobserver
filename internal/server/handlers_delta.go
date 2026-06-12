@@ -384,7 +384,7 @@ func (s *Server) deltaCrawlRequest(result *deltaCandidateResult) (crawler.CrawlR
 	}
 	projectID := result.settings.ProjectID
 	checkExternal := false
-	checkResources := false
+	checkResources := cfg.Crawler.CheckPageResources == nil || *cfg.Crawler.CheckPageResources
 	retries := result.settings.RetryCount
 	req := crawler.CrawlRequest{
 		Seeds:               result.urls,

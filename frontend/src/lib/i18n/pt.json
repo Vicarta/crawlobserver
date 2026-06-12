@@ -575,6 +575,7 @@
   "resources.js": "JS",
   "resources.font": "Fonte",
   "resources.icon": "Ícone",
+  "resources.image": "Imagem",
   "resources.allSources": "Todas as origens",
   "resources.hotlink": "Hotlink",
   "resources.allStatus": "Todos os status",

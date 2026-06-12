@@ -113,10 +113,11 @@ type rescanPageMeta struct {
 
 // renderItem transports data from parseWorker to renderWorker.
 type renderItem struct {
-	result     *fetcher.FetchResult
-	staticData *parser.PageData
-	pageRow    storage.PageRow
-	linkRows   []storage.LinkRow
+	result       *fetcher.FetchResult
+	staticData   *parser.PageData
+	pageRow      storage.PageRow
+	linkRows     []storage.LinkRow
+	resourceRefs map[string]struct{}
 }
 
 // resourceCheckItem wraps a resource URL with its metadata for the check worker.
@@ -1090,40 +1091,18 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 					e.buffer.AddLinks(linkRows)
 				}
 
-				// Process page resources
-				if e.checkResources && e.resourceCh != nil {
-					for _, res := range pageData.Resources {
-						// Always record the ref (page -> resource)
-						e.bufferResourceRef(storage.PageResourceRef{
-							CrawlSessionID: e.session.ID,
-							PageURL:        pageRow.URL,
-							ResourceURL:    res.URL,
-							ResourceType:   res.ResourceType,
-							IsInternal:     res.IsInternal,
-						})
-						// Check each unique resource URL only once
-						if _, loaded := e.resourceChecked.LoadOrStore(res.URL, struct{}{}); !loaded {
-							select {
-							case e.resourceCh <- resourceCheckItem{
-								URL:          res.URL,
-								ResourceType: res.ResourceType,
-								IsInternal:   res.IsInternal,
-							}:
-							default:
-							}
-						}
-					}
-				}
+				resourceRefs := e.processPageResources(pageRow.URL, pageData.Resources, nil)
 
 				// JS rendering: check if this page needs rendering
 				if e.renderPool != nil && renderer.NeedsRendering(e.renderMode, result.Body, pageData) {
 					ensureNonNilArrays(&pageRow)
 					select {
 					case e.renderCh <- &renderItem{
-						result:     result,
-						staticData: pageData,
-						pageRow:    pageRow,
-						linkRows:   linkRows,
+						result:       result,
+						staticData:   pageData,
+						pageRow:      pageRow,
+						linkRows:     linkRows,
+						resourceRefs: resourceRefs,
 					}:
 						continue // renderWorker will handle buffer.AddPage
 					case <-e.ctx.Done():
@@ -1489,6 +1468,43 @@ func (e *Engine) flushExternalChecks() {
 	}
 }
 
+func (e *Engine) processPageResources(pageURL string, resources []parser.PageResource, refs map[string]struct{}) map[string]struct{} {
+	if !e.checkResources || e.resourceCh == nil {
+		return refs
+	}
+	if refs == nil {
+		refs = make(map[string]struct{}, len(resources))
+	}
+	for _, res := range resources {
+		key := res.URL + "|" + res.ResourceType
+		if _, exists := refs[key]; exists {
+			continue
+		}
+		refs[key] = struct{}{}
+
+		e.bufferResourceRef(storage.PageResourceRef{
+			CrawlSessionID: e.session.ID,
+			PageURL:        pageURL,
+			ResourceURL:    res.URL,
+			ResourceType:   res.ResourceType,
+			IsInternal:     res.IsInternal,
+		})
+
+		// Check each unique resource URL only once per crawl session.
+		if _, loaded := e.resourceChecked.LoadOrStore(res.URL, struct{}{}); !loaded {
+			select {
+			case e.resourceCh <- resourceCheckItem{
+				URL:          res.URL,
+				ResourceType: res.ResourceType,
+				IsInternal:   res.IsInternal,
+			}:
+			default:
+			}
+		}
+	}
+	return refs
+}
+
 // resourceCheckWorker checks resource URLs and buffers the results.
 func (e *Engine) resourceCheckWorker() {
 	client := e.newCheckClient()
@@ -1823,6 +1839,7 @@ func (e *Engine) renderWorker(id int, in <-chan *renderItem) {
 				// Count rendered links and images
 				item.pageRow.RenderedLinksCount = uint32(len(renderedData.Links))
 				item.pageRow.RenderedImagesCount = uint16(len(renderedData.Images))
+				item.resourceRefs = e.processPageResources(item.pageRow.URL, renderedData.Resources, item.resourceRefs)
 
 				// Store rendered HTML if store_html is enabled
 				if e.cfg.Crawler.StoreHTML {

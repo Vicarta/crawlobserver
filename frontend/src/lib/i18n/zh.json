@@ -575,6 +575,7 @@
   "resources.js": "JS",
   "resources.font": "字体",
   "resources.icon": "图标",
+  "resources.image": "图片",
   "resources.allSources": "所有来源",
   "resources.hotlink": "外链引用",
   "resources.allStatus": "所有状态",

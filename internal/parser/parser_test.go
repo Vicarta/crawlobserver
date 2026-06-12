@@ -2,6 +2,7 @@ package parser
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/PuerkitoBio/goquery"
@@ -132,8 +133,8 @@ func TestParseCaseInsensitiveSEOAttributes(t *testing.T) {
 	if data.Images[0].Src != "https://example.com/images/lazy.jpg" || data.Images[0].Alt != "Lazy image" {
 		t.Errorf("Images[0] = %+v, want lazy image with resolved src", data.Images[0])
 	}
-	if len(data.Resources) != 2 {
-		t.Fatalf("Resources count = %d, want 2: %+v", len(data.Resources), data.Resources)
+	if len(data.Resources) != 3 {
+		t.Fatalf("Resources count = %d, want 3: %+v", len(data.Resources), data.Resources)
 	}
 }
 
@@ -653,5 +654,56 @@ func TestExtractImages(t *testing.T) {
 	// Second image: data-src fallback
 	if data.Images[1].Src != "https://example.com/img/lazy.jpg" {
 		t.Errorf("image 1 src = %q, want resolved lazy URL", data.Images[1].Src)
+	}
+}
+
+func TestExtractResourcesIncludesImages(t *testing.T) {
+	html := `<html><head>
+		<link rel="preload" as="image" href="/img/preload.webp">
+	</head><body>
+		<img src="/img/photo.jpg" srcset="/img/photo-320.jpg 320w, /img/photo-640.jpg 640w" alt="A photo">
+		<img data-src="/img/lazy.jpg" data-original="/img/original.jpg" data-lazy-src="/img/lazy-alt.jpg">
+		<picture>
+			<source srcset="/img/source-1.webp 1x, /img/source-2.webp 2x">
+			<img src="/img/fallback.jpg" alt="Fallback">
+		</picture>
+		<img src="data:image/png;base64,AAAA">
+		<img src="blob:https://example.com/id">
+		<img src="javascript:alert(1)">
+	</body></html>`
+
+	data, err := Parse([]byte(html), "https://example.com/blog/page")
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	got := map[string]string{}
+	for _, res := range data.Resources {
+		if res.ResourceType == "image" {
+			got[res.URL] = res.ResourceType
+		}
+	}
+
+	want := []string{
+		"https://example.com/img/preload.webp",
+		"https://example.com/img/photo.jpg",
+		"https://example.com/img/photo-320.jpg",
+		"https://example.com/img/photo-640.jpg",
+		"https://example.com/img/lazy.jpg",
+		"https://example.com/img/original.jpg",
+		"https://example.com/img/lazy-alt.jpg",
+		"https://example.com/img/source-1.webp",
+		"https://example.com/img/source-2.webp",
+		"https://example.com/img/fallback.jpg",
+	}
+	for _, u := range want {
+		if got[u] != "image" {
+			t.Fatalf("missing image resource %q in %#v", u, got)
+		}
+	}
+	for u := range got {
+		if strings.HasPrefix(u, "data:") || strings.HasPrefix(u, "blob:") || strings.HasPrefix(u, "javascript:") {
+			t.Fatalf("unexpected non-fetchable image resource %q", u)
+		}
 	}
 }
