@@ -177,6 +177,34 @@ url=fragment
 is_internal=true
 ```
 
+Page issues:
+
+```bash
+curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
+  "https://crawlobserver.example.com/api/sessions/{session_id}/page-issues?limit=100&offset=0"
+```
+
+The page issues endpoint classifies generic SEO/technical findings from crawl signals. It does not rely on site-specific URLs.
+
+Issue types:
+
+```text
+soft_404                 severity=error    HTTP 2xx page renders not-found signals
+generic_rendered_title   severity=warning  rendered title is reused across multiple HTML 2xx pages
+generic_static_metadata  severity=warning  static title/meta are reused across multiple HTML 2xx pages
+```
+
+Useful filters:
+
+```text
+severity=error
+severity=warning
+issue_type=soft_404
+issue_type=generic_rendered_title
+issue_type=generic_static_metadata
+url=fragment
+```
+
 ## PageRank and Crawl Graph
 
 Top pages by internal PageRank:
@@ -508,6 +536,7 @@ https://crawlobserver.example.com/api
 | `GET` | `/sessions/{id}/internal-links` | Internal links. |
 | `GET` | `/sessions/{id}/external-checks` | External URL checks. |
 | `GET` | `/sessions/{id}/resource-checks` | Resource checks, including `resource_type=image` for image availability. |
+| `GET` | `/sessions/{id}/page-issues` | Generic page issues such as soft 404 errors and SPA metadata warnings. |
 | `GET` | `/sessions/{id}/pagerank-top` | Top internal PageRank pages. |
 | `GET` | `/sessions/{id}/near-duplicates` | Near duplicate page pairs. |
 | `GET` | `/sessions/{id}/structured-data` | Structured data findings. |

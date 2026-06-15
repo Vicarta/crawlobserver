@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { getPages, getRedirectPages, buildApiPath, rescanPages } from '../api.js';
+  import { getPages, getPageIssues, getRedirectPages, buildApiPath, rescanPages } from '../api.js';
   import { statusBadge, fmt, fmtSize, fmtN, trunc, fetchAll, downloadCSV } from '../utils.js';
   import { PAGE_SIZE, TAB_FILTERS } from '../tabColumns.js';
   import { t } from '../i18n/index.svelte.js';
@@ -29,6 +29,7 @@
     { id: 'meta', label: () => t('pages.meta') },
     { id: 'headings', label: () => t('pages.headings') },
     { id: 'images', label: () => t('pages.images') },
+    { id: 'issues', label: () => t('pages.issues') },
     { id: 'indexability', label: () => t('pages.indexability') },
     { id: 'response', label: () => t('pages.response') },
     { id: 'redirects', label: () => t('pages.redirects') },
@@ -102,6 +103,10 @@
         );
         redirectPages = result || [];
         hasMoreRedirectPages = redirectPages.length === PAGE_SIZE;
+      } else if (subView === 'issues') {
+        const result = await getPageIssues(sessionId, PAGE_SIZE, pagesOffset, filters);
+        pages = result || [];
+        hasMorePages = pages.length === PAGE_SIZE;
       } else {
         const result = await getPages(
           sessionId,
@@ -237,6 +242,33 @@
       headers: ['URL', 'Images', 'Without Alt', 'Title', 'Words'],
       keys: ['URL', 'ImagesCount', 'ImagesNoAlt', 'Title', 'WordCount'],
     },
+    issues: {
+      headers: [
+        'URL',
+        'Severity',
+        'Issue Type',
+        'Detail',
+        'Status',
+        'Title',
+        'Rendered Title',
+        'Rendered H1',
+        'Rendered Words',
+        'Rendered Images',
+      ],
+      keys: [
+        'url',
+        'severity',
+        'issue_type',
+        'issue_detail',
+        'status_code',
+        'title',
+        'rendered_title',
+        'rendered_h1_text',
+        'rendered_word_count',
+        'rendered_images_count',
+      ],
+      transform: (row) => ({ ...row, rendered_h1_text: row.rendered_h1?.join(' | ') || '' }),
+    },
     indexability: {
       headers: ['URL', 'Indexable', 'Reason', 'Meta Robots', 'Canonical', 'Canonical Is Self'],
       keys: ['URL', 'IsIndexable', 'IndexReason', 'MetaRobots', 'Canonical', 'CanonicalIsSelf'],
@@ -277,6 +309,8 @@
     const fetcher =
       subView === 'redirects'
         ? (limit, offset) => getRedirectPages(sessionId, limit, offset, filters)
+        : subView === 'issues'
+          ? (limit, offset) => getPageIssues(sessionId, limit, offset, filters)
         : (limit, offset) => getPages(sessionId, limit, offset, effectiveFilters());
     const allData = await fetchAll(fetcher);
     const keys = cfg.customKeys || cfg.keys;
@@ -298,6 +332,23 @@
   function goToUrlDetail(e, url) {
     e.preventDefault();
     onnavigate?.(urlDetailHref(url));
+  }
+
+  function issueTypeLabel(type) {
+    switch (type) {
+      case 'soft_404':
+        return t('issues.soft404');
+      case 'generic_rendered_title':
+        return t('issues.genericRenderedTitle');
+      case 'generic_static_metadata':
+        return t('issues.genericStaticMetadata');
+      default:
+        return type || '-';
+    }
+  }
+
+  function issueSeverityLabel(severity) {
+    return severity === 'error' ? t('issues.error') : t('issues.warning');
   }
 
   function toggleSelected(url, checked) {
@@ -331,8 +382,10 @@
     const endpoint =
       subView === 'redirects'
         ? `/sessions/${sessionId}/redirect-pages`
+        : subView === 'issues'
+          ? `/sessions/${sessionId}/page-issues`
         : `/sessions/${sessionId}/pages`;
-    const activeF = subView === 'redirects' ? filters : effectiveFilters();
+    const activeF = subView === 'redirects' || subView === 'issues' ? filters : effectiveFilters();
     return buildApiPath(endpoint, {
       limit: PAGE_SIZE,
       offset: 0,
@@ -624,6 +677,68 @@
           <td class:cell-warn={p.ImagesNoAlt > 0}>{p.ImagesNoAlt}</td>
           <td class="cell-title">{trunc(p.Title, 50)}</td>
           <td>{fmtN(p.WordCount)}</td>
+        </tr>
+      {/snippet}
+    </DataTable>
+  {:else if subView === 'issues'}
+    <DataTable
+      tableId="pages-issues"
+      columns={[
+        { label: t('issues.severity'), defaultWidth: 100, minWidth: 86 },
+        { label: t('issues.issueType'), defaultWidth: 210, minWidth: 150 },
+        { label: t('session.url'), defaultWidth: 360, minWidth: 180 },
+        { label: t('issues.detail'), defaultWidth: 300, minWidth: 180 },
+        { label: t('session.status'), defaultWidth: 86, minWidth: 72 },
+        { label: t('session.title'), defaultWidth: 260, minWidth: 150 },
+        { label: t('issues.renderedTitle'), defaultWidth: 260, minWidth: 150 },
+        { label: t('issues.renderedH1'), defaultWidth: 180, minWidth: 120 },
+        { label: t('issues.renderedWords'), defaultWidth: 110, minWidth: 90 },
+        { label: t('issues.renderedImages'), defaultWidth: 120, minWidth: 96 },
+      ]}
+      filterKeys={TAB_FILTERS.issues}
+      {filters}
+      data={pages}
+      offset={pagesOffset}
+      pageSize={PAGE_SIZE}
+      hasMore={hasMorePages}
+      hasActiveFilters={hasActiveFilters()}
+      onsetfilter={setFilter}
+      onapplyfilters={applyFilters}
+      onclearfilters={clearFilters}
+      onnextpage={nextPage}
+      onprevpage={prevPage}
+      {sortColumn}
+      {sortOrder}
+      onsort={handleSort}
+    >
+      {#snippet row(issue)}
+        <tr>
+          <td>
+            <span
+              class="badge"
+              class:badge-error={issue.severity === 'error'}
+              class:badge-warning={issue.severity === 'warning'}
+              >{issueSeverityLabel(issue.severity)}</span
+            >
+          </td>
+          <td><span class="issue-type">{issueTypeLabel(issue.issue_type)}</span></td>
+          <td class="cell-url"
+            ><span class="cell-url-inner"
+              ><OverflowText
+                text={issue.url}
+                href={urlDetailHref(issue.url)}
+                onclick={(e) => goToUrlDetail(e, issue.url)}
+              />
+              ><UrlActions url={issue.url} /></span
+            ></td
+          >
+          <td class="cell-title"><OverflowText text={issue.issue_detail || '-'} /></td>
+          <td><span class="badge {statusBadge(issue.status_code)}">{issue.status_code}</span></td>
+          <td class="cell-title"><OverflowText text={issue.title || '-'} /></td>
+          <td class="cell-title"><OverflowText text={issue.rendered_title || '-'} /></td>
+          <td class="cell-title"><OverflowText text={issue.rendered_h1?.join(' | ') || '-'} /></td>
+          <td>{fmtN(issue.rendered_word_count)}</td>
+          <td>{fmtN(issue.rendered_images_count)}</td>
         </tr>
       {/snippet}
     </DataTable>

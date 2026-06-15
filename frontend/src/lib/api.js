@@ -198,6 +198,19 @@ export async function getPages(
   return fetchJSON(url);
 }
 
+export async function getPageIssues(
+  sessionId,
+  limit = DEFAULT_LIMIT,
+  offset = 0,
+  filters = {},
+) {
+  let url = `/sessions/${sessionId}/page-issues?limit=${limit}&offset=${offset}`;
+  for (const [k, v] of Object.entries(filters)) {
+    if (v !== '' && v != null) url += `&${k}=${encodeURIComponent(v)}`;
+  }
+  return fetchJSON(url);
+}
+
 /**
  * @param {string} sessionId
  * @param {number} limit

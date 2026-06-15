@@ -169,6 +169,204 @@ func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset i
 	return pages, nil
 }
 
+const pageIssuesQuery = `
+WITH
+	base AS (
+		SELECT
+			url,
+			status_code,
+			content_type,
+			title,
+			meta_description,
+			rendered_title,
+			rendered_h1,
+			rendered_word_count,
+			rendered_images_count,
+			word_count,
+			images_count,
+			rendered_body_html
+		FROM crawlobserver.pages FINAL
+		WHERE crawl_session_id = ? AND ` + notRedirectedFilter + `
+	),
+	auditable AS (
+		SELECT *
+		FROM base
+		WHERE content_type LIKE '%html%' AND status_code >= 200 AND status_code < 300
+	),
+	soft404 AS (
+		SELECT url
+		FROM auditable
+		WHERE
+			arrayExists(x ->
+				positionCaseInsensitiveUTF8(x, '404') > 0
+				OR positionCaseInsensitiveUTF8(x, 'not found') > 0
+				OR positionCaseInsensitiveUTF8(x, 'page not found') > 0
+				OR positionCaseInsensitiveUTF8(x, 'не знайден') > 0
+				OR positionCaseInsensitiveUTF8(x, 'не існу') > 0,
+				rendered_h1
+			)
+			OR (
+				rendered_word_count > 0
+				AND rendered_word_count <= 300
+				AND rendered_images_count = 0
+				AND (
+					positionCaseInsensitiveUTF8(rendered_title, '404') > 0
+					OR positionCaseInsensitiveUTF8(rendered_title, 'not found') > 0
+					OR positionCaseInsensitiveUTF8(rendered_title, 'page not found') > 0
+					OR positionCaseInsensitiveUTF8(rendered_title, 'не знайден') > 0
+					OR positionCaseInsensitiveUTF8(rendered_title, 'не існу') > 0
+					OR positionCaseInsensitiveUTF8(rendered_body_html, 'page not found') > 0
+					OR positionCaseInsensitiveUTF8(rendered_body_html, 'not found') > 0
+					OR positionCaseInsensitiveUTF8(rendered_body_html, 'сторінку не знайден') > 0
+					OR positionCaseInsensitiveUTF8(rendered_body_html, 'сторінка не знайден') > 0
+				)
+			)
+	),
+	repeated_rendered_titles AS (
+		SELECT rendered_title
+		FROM auditable
+		WHERE rendered_title != ''
+		GROUP BY rendered_title
+		HAVING count() >= 3
+	),
+	repeated_static_metadata AS (
+		SELECT title, meta_description
+		FROM auditable
+		WHERE title != '' OR meta_description != ''
+		GROUP BY title, meta_description
+		HAVING count() >= 3
+	)
+SELECT
+	url,
+	severity,
+	issue_type,
+	issue_detail,
+	status_code,
+	title,
+	rendered_title,
+	rendered_h1,
+	word_count,
+	rendered_word_count,
+	images_count,
+	rendered_images_count
+FROM (
+	SELECT
+		url,
+		'error' AS severity,
+		'soft_404' AS issue_type,
+		'HTTP 2xx page renders not-found signals' AS issue_detail,
+		status_code,
+		title,
+		rendered_title,
+		rendered_h1,
+		word_count,
+		rendered_word_count,
+		images_count,
+		rendered_images_count
+	FROM auditable
+	WHERE url IN (SELECT url FROM soft404)
+
+	UNION ALL
+
+	SELECT
+		url,
+		'warning' AS severity,
+		'generic_rendered_title' AS issue_type,
+		'Rendered title is reused across multiple HTML 2xx pages' AS issue_detail,
+		status_code,
+		title,
+		rendered_title,
+		rendered_h1,
+		word_count,
+		rendered_word_count,
+		images_count,
+		rendered_images_count
+	FROM auditable
+	WHERE rendered_title IN (SELECT rendered_title FROM repeated_rendered_titles)
+		AND url NOT IN (SELECT url FROM soft404)
+
+	UNION ALL
+
+	SELECT
+		url,
+		'warning' AS severity,
+		'generic_static_metadata' AS issue_type,
+		'Static title and meta description are reused across multiple HTML 2xx pages' AS issue_detail,
+		status_code,
+		title,
+		rendered_title,
+		rendered_h1,
+		word_count,
+		rendered_word_count,
+		images_count,
+		rendered_images_count
+	FROM auditable
+	WHERE (title, meta_description) IN (SELECT title, meta_description FROM repeated_static_metadata)
+		AND url NOT IN (SELECT url FROM soft404)
+)
+`
+
+// ListPageIssues returns generic page-level issues derived from crawl signals.
+func (s *Store) ListPageIssues(ctx context.Context, sessionID string, limit, offset int, severity, issueType, urlFilter string) ([]PageIssue, error) {
+	query := pageIssuesQuery + `
+WHERE (? = '' OR severity = ?)
+	AND (? = '' OR issue_type = ?)
+	AND (? = '' OR positionCaseInsensitiveUTF8(url, ?) > 0)
+ORDER BY if(severity = 'error', 0, 1), issue_type ASC, url ASC
+LIMIT ? OFFSET ?`
+	args := []interface{}{
+		sessionID,
+		severity, severity,
+		issueType, issueType,
+		urlFilter, urlFilter,
+		limit, offset,
+	}
+	rows, err := s.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying page issues: %w", err)
+	}
+	defer rows.Close()
+
+	var issues []PageIssue
+	for rows.Next() {
+		var issue PageIssue
+		if err := rows.Scan(
+			&issue.URL,
+			&issue.Severity,
+			&issue.IssueType,
+			&issue.IssueDetail,
+			&issue.StatusCode,
+			&issue.Title,
+			&issue.RenderedTitle,
+			&issue.RenderedH1,
+			&issue.WordCount,
+			&issue.RenderedWordCount,
+			&issue.ImagesCount,
+			&issue.RenderedImagesCount,
+		); err != nil {
+			return nil, fmt.Errorf("scanning page issue: %w", err)
+		}
+		issues = append(issues, issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating page issues: %w", err)
+	}
+	return issues, nil
+}
+
+func (s *Store) pageIssueCounts(ctx context.Context, sessionID string) (soft404, genericRenderedTitle, genericStaticMetadata uint64, err error) {
+	query := `SELECT
+		countIf(issue_type = 'soft_404'),
+		countIf(issue_type = 'generic_rendered_title'),
+		countIf(issue_type = 'generic_static_metadata')
+	FROM (` + pageIssuesQuery + `)`
+	row := s.conn.QueryRow(ctx, query, sessionID)
+	if err := row.Scan(&soft404, &genericRenderedTitle, &genericStaticMetadata); err != nil {
+		return 0, 0, 0, fmt.Errorf("querying page issue counts: %w", err)
+	}
+	return soft404, genericRenderedTitle, genericStaticMetadata, nil
+}
+
 // GetPage retrieves all fields for a single page (excluding body_html).
 func (s *Store) GetPage(ctx context.Context, sessionID, url string) (*PageRow, error) {
 	var p PageRow

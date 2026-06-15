@@ -205,6 +205,27 @@ func (s *Server) handlePages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, pages)
 }
 
+func (s *Server) handlePageIssues(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	if !s.requireSessionAccess(w, r, sessionID) {
+		return
+	}
+	limit, offset := clampPagination(queryInt(r, "limit", 100), queryInt(r, "offset", 0))
+	severity := r.URL.Query().Get("severity")
+	issueType := r.URL.Query().Get("issue_type")
+	urlFilter := r.URL.Query().Get("url")
+
+	issues, err := s.store.ListPageIssues(r.Context(), sessionID, limit, offset, severity, issueType, urlFilter)
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	if issues == nil {
+		issues = []storage.PageIssue{}
+	}
+	writeJSON(w, issues)
+}
+
 func (s *Server) handleLinks(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	if !s.requireSessionAccess(w, r, sessionID) {

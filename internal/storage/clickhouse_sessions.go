@@ -344,22 +344,24 @@ func (s *Store) SessionStats(ctx context.Context, sessionID string) (*SessionSta
 
 // AuditContent holds content-related audit metrics.
 type AuditContent struct {
-	Total                uint64 `json:"total"`
-	HTMLPages            uint64 `json:"html_pages"`
-	TitleMissing         uint64 `json:"title_missing"`
-	TitleTooLong         uint64 `json:"title_too_long"`
-	TitleTooShort        uint64 `json:"title_too_short"`
-	TitleDuplicates      uint64 `json:"title_duplicates"`
-	MetaDescMissing      uint64 `json:"meta_desc_missing"`
-	MetaDescTooLong      uint64 `json:"meta_desc_too_long"`
-	MetaDescTooShort     uint64 `json:"meta_desc_too_short"`
-	H1Missing            uint64 `json:"h1_missing"`
-	H1Multiple           uint64 `json:"h1_multiple"`
-	ThinUnder100         uint64 `json:"thin_under_100"`
-	Thin100300           uint64 `json:"thin_100_300"`
-	ImagesTotal          uint64 `json:"images_total"`
-	ImagesNoAltTotal     uint64 `json:"images_no_alt_total"`
-	PagesWithImagesNoAlt uint64 `json:"pages_with_images_no_alt"`
+	Total                 uint64 `json:"total"`
+	HTMLPages             uint64 `json:"html_pages"`
+	TitleMissing          uint64 `json:"title_missing"`
+	TitleTooLong          uint64 `json:"title_too_long"`
+	TitleTooShort         uint64 `json:"title_too_short"`
+	TitleDuplicates       uint64 `json:"title_duplicates"`
+	GenericRenderedTitle  uint64 `json:"generic_rendered_title"`
+	GenericStaticMetadata uint64 `json:"generic_static_metadata"`
+	MetaDescMissing       uint64 `json:"meta_desc_missing"`
+	MetaDescTooLong       uint64 `json:"meta_desc_too_long"`
+	MetaDescTooShort      uint64 `json:"meta_desc_too_short"`
+	H1Missing             uint64 `json:"h1_missing"`
+	H1Multiple            uint64 `json:"h1_multiple"`
+	ThinUnder100          uint64 `json:"thin_under_100"`
+	Thin100300            uint64 `json:"thin_100_300"`
+	ImagesTotal           uint64 `json:"images_total"`
+	ImagesNoAltTotal      uint64 `json:"images_no_alt_total"`
+	PagesWithImagesNoAlt  uint64 `json:"pages_with_images_no_alt"`
 }
 
 // NoindexReason is a reason + count for non-indexable pages.
@@ -378,6 +380,7 @@ type ContentTypeCount struct {
 type AuditTechnical struct {
 	Indexable           uint64             `json:"indexable"`
 	NonIndexable        uint64             `json:"non_indexable"`
+	Soft404             uint64             `json:"soft_404"`
 	CanonicalSelf       uint64             `json:"canonical_self"`
 	CanonicalOther      uint64             `json:"canonical_other"`
 	CanonicalMissing    uint64             `json:"canonical_missing"`
@@ -553,6 +556,15 @@ func (s *Store) SessionAudit(ctx context.Context, sessionID string) (*AuditResul
 		&tech.ErrorPages,
 	); err != nil {
 		return nil, fmt.Errorf("audit technical: %w", err)
+	}
+
+	soft404, genericRenderedTitle, genericStaticMetadata, err := s.pageIssueCounts(ctx, sessionID)
+	if err != nil {
+		applog.Warnf("audit", "scan page issues: %v", err)
+	} else {
+		tech.Soft404 = soft404
+		content.GenericRenderedTitle = genericRenderedTitle
+		content.GenericStaticMetadata = genericStaticMetadata
 	}
 
 	// Noindex reasons — restricted to HTML 2xx so non-HTML resources don't

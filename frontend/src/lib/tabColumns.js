@@ -19,6 +19,7 @@ export const TAB_FILTERS = {
   meta: ['url', 'meta_description', 'meta_desc_length', 'meta_keywords', 'og_title'],
   headings: ['url', 'h1', 'h2'],
   images: ['url', 'images_count', 'images_no_alt', 'title', 'word_count'],
+  issues: ['severity', 'issue_type', 'url'],
   indexability: [
     'url',
     'is_indexable',
@@ -80,6 +81,7 @@ export const TAB_SUB_VIEWS = {
     'meta',
     'headings',
     'images',
+    'issues',
     'indexability',
     'response',
     'redirects',
@@ -115,6 +117,7 @@ export const OLD_TAB_REDIRECT = {
   meta: { tab: 'pages', subView: 'meta' },
   headings: { tab: 'pages', subView: 'headings' },
   images: { tab: 'pages', subView: 'images' },
+  issues: { tab: 'pages', subView: 'issues' },
   indexability: { tab: 'pages', subView: 'indexability' },
   response: { tab: 'pages', subView: 'response' },
   internal: { tab: 'links', subView: 'internal' },

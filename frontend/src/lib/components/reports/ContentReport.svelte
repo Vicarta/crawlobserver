@@ -195,6 +195,34 @@
             class="stat-card stat-card-link"
             role="button"
             tabindex="0"
+            onclick={() => nav('issues', { issue_type: 'generic_rendered_title' })}
+            onkeydown={a11yKeydown(() =>
+              nav('issues', { issue_type: 'generic_rendered_title' }),
+            )}
+          >
+            <div class="stat-value text-warning">
+              {fmtN(content.generic_rendered_title || 0)}
+            </div>
+            <div class="stat-label">{t('report.content.genericRenderedTitle')}</div>
+          </div>
+          <div
+            class="stat-card stat-card-link"
+            role="button"
+            tabindex="0"
+            onclick={() => nav('issues', { issue_type: 'generic_static_metadata' })}
+            onkeydown={a11yKeydown(() =>
+              nav('issues', { issue_type: 'generic_static_metadata' }),
+            )}
+          >
+            <div class="stat-value text-warning">
+              {fmtN(content.generic_static_metadata || 0)}
+            </div>
+            <div class="stat-label">{t('report.content.genericStaticMetadata')}</div>
+          </div>
+          <div
+            class="stat-card stat-card-link"
+            role="button"
+            tabindex="0"
             onclick={() => nav('titles')}
             onkeydown={a11yKeydown(() => nav('titles'))}
           >

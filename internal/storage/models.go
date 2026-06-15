@@ -106,6 +106,22 @@ type PageRow struct {
 	CWVTTFB     float64 // Time to First Byte (ms)
 }
 
+// PageIssue is a generic SEO/technical issue derived from stored crawl signals.
+type PageIssue struct {
+	URL                 string   `json:"url"`
+	Severity            string   `json:"severity"`   // "error" or "warning"
+	IssueType           string   `json:"issue_type"` // "soft_404", "generic_rendered_title", ...
+	IssueDetail         string   `json:"issue_detail"`
+	StatusCode          uint16   `json:"status_code"`
+	Title               string   `json:"title"`
+	RenderedTitle       string   `json:"rendered_title"`
+	RenderedH1          []string `json:"rendered_h1"`
+	WordCount           uint32   `json:"word_count"`
+	RenderedWordCount   uint32   `json:"rendered_word_count"`
+	ImagesCount         uint16   `json:"images_count"`
+	RenderedImagesCount uint16   `json:"rendered_images_count"`
+}
+
 // RedirectHopRow represents a redirect hop for storage.
 type RedirectHopRow struct {
 	URL        string
@@ -453,18 +469,18 @@ type RedirectPageRow struct {
 
 // WeightedPageRankPage represents a page with weighted PageRank combining internal PR and SEObserver data.
 type WeightedPageRankPage struct {
-	URL              string   `json:"url"`
-	PageRank         float64  `json:"pagerank"`
-	WeightedPR       float64  `json:"weighted_pr"`
-	TrustFlow        *uint8   `json:"trust_flow"`
-	CitationFlow     *uint8   `json:"citation_flow"`
-	ExtBackLinks     *int64   `json:"ext_backlinks"`
-	RefDomains       *int64   `json:"ref_domains"`
-	Depth            uint16   `json:"depth"`
-	InternalLinksOut uint32   `json:"internal_links_out"`
-	StatusCode       uint16   `json:"status_code"`
-	Title            string   `json:"title"`
-	TTFTopic         *string  `json:"ttf_topic"`
+	URL              string  `json:"url"`
+	PageRank         float64 `json:"pagerank"`
+	WeightedPR       float64 `json:"weighted_pr"`
+	TrustFlow        *uint8  `json:"trust_flow"`
+	CitationFlow     *uint8  `json:"citation_flow"`
+	ExtBackLinks     *int64  `json:"ext_backlinks"`
+	RefDomains       *int64  `json:"ref_domains"`
+	Depth            uint16  `json:"depth"`
+	InternalLinksOut uint32  `json:"internal_links_out"`
+	StatusCode       uint16  `json:"status_code"`
+	Title            string  `json:"title"`
+	TTFTopic         *string `json:"ttf_topic"`
 }
 
 // WeightedPageRankResult wraps paginated weighted PageRank results.
@@ -475,15 +491,15 @@ type WeightedPageRankResult struct {
 
 // InterlinkingOpportunity represents a pair of semantically similar pages without an existing internal link.
 type InterlinkingOpportunity struct {
-	CrawlSessionID  string  `json:"crawl_session_id"`
-	SourceURL       string  `json:"source_url"`
-	TargetURL       string  `json:"target_url"`
-	Similarity      float64 `json:"similarity"`
-	Method          string  `json:"method"`
-	SourceTitle     string  `json:"source_title"`
-	TargetTitle     string  `json:"target_title"`
-	SourcePageRank  float64 `json:"source_pagerank"`
-	TargetPageRank  float64 `json:"target_pagerank"`
+	CrawlSessionID   string  `json:"crawl_session_id"`
+	SourceURL        string  `json:"source_url"`
+	TargetURL        string  `json:"target_url"`
+	Similarity       float64 `json:"similarity"`
+	Method           string  `json:"method"`
+	SourceTitle      string  `json:"source_title"`
+	TargetTitle      string  `json:"target_title"`
+	SourcePageRank   float64 `json:"source_pagerank"`
+	TargetPageRank   float64 `json:"target_pagerank"`
 	SourceWordCount  uint32  `json:"source_word_count"`
 	TargetWordCount  uint32  `json:"target_word_count"`
 	OpportunityScore float64 `json:"opportunity_score"`
@@ -547,9 +563,9 @@ type HreflangIssue struct {
 
 // HreflangValidationResult wraps paginated hreflang validation results.
 type HreflangValidationResult struct {
-	Issues  []HreflangIssue    `json:"issues"`
-	Total   uint64             `json:"total"`
-	Summary map[string]uint64  `json:"summary"`
+	Issues  []HreflangIssue   `json:"issues"`
+	Total   uint64            `json:"total"`
+	Summary map[string]uint64 `json:"summary"`
 }
 
 // ResourceTypeSummary holds aggregated stats for one resource type.

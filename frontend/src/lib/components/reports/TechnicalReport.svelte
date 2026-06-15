@@ -379,6 +379,16 @@
         <div class="stat-value text-error"><AnimatedNumber value={tech.error_pages || 0} /></div>
         <div class="stat-label">{t('report.technical.errorPages')}</div>
       </div>
+      <div
+        class="stat-card stat-card-link"
+        role="button"
+        tabindex="0"
+        onclick={() => nav('issues', { issue_type: 'soft_404' })}
+        onkeydown={a11yKeydown(() => nav('issues', { issue_type: 'soft_404' }))}
+      >
+        <div class="stat-value text-error"><AnimatedNumber value={tech.soft_404 || 0} /></div>
+        <div class="stat-label">{t('report.technical.soft404')}</div>
+      </div>
     </div>
   </div>
 

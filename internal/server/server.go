@@ -170,6 +170,7 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	// API routes - read
 	mux.HandleFunc("GET /api/sessions", s.handleSessions)
 	mux.HandleFunc("GET /api/sessions/{id}/pages", s.handlePages)
+	mux.HandleFunc("GET /api/sessions/{id}/page-issues", s.handlePageIssues)
 	mux.HandleFunc("GET /api/sessions/{id}/links", s.handleLinks)
 	mux.HandleFunc("GET /api/sessions/{id}/internal-links", s.handleInternalLinks)
 	mux.HandleFunc("GET /api/sessions/{id}/stats", s.handleStats)

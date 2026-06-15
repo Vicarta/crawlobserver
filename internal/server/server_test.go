@@ -36,6 +36,7 @@ import (
 type mockStore struct {
 	sessions             []storage.CrawlSession
 	pages                []storage.PageRow
+	pageIssues           []storage.PageIssue
 	links                []storage.LinkRow
 	stats                *storage.SessionStats
 	pageHTML             string
@@ -153,6 +154,10 @@ func (m *mockStore) UpdateSessionProject(_ context.Context, sessionID string, pr
 func (m *mockStore) ListPages(_ context.Context, sessionID string, limit, offset int, filters []storage.ParsedFilter, _ *storage.SortParam) ([]storage.PageRow, error) {
 	m.listPagesCalls = append(m.listPagesCalls, listPagesCall{sessionID, limit, offset, filters})
 	return m.pages, m.err
+}
+
+func (m *mockStore) ListPageIssues(_ context.Context, _ string, _, _ int, _, _, _ string) ([]storage.PageIssue, error) {
+	return m.pageIssues, m.err
 }
 
 func (m *mockStore) ExternalLinksPaginated(_ context.Context, _ string, _, _ int, _ []storage.ParsedFilter, _ *storage.SortParam) ([]storage.LinkRow, error) {
@@ -8729,6 +8734,42 @@ func TestPages_NoAuth(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestPageIssues_Success(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	ms := srv.store.(*mockStore)
+	ms.getSessionByID = map[string]*storage.CrawlSession{
+		"sess-1": {ID: "sess-1", Status: "completed"},
+	}
+	ms.pageIssues = []storage.PageIssue{
+		{
+			URL:                 "https://example.test/missing",
+			Severity:            "error",
+			IssueType:           "soft_404",
+			IssueDetail:         "HTTP 2xx page renders not-found signals",
+			StatusCode:          200,
+			RenderedH1:          []string{"404"},
+			RenderedWordCount:   120,
+			RenderedImagesCount: 0,
+		},
+	}
+
+	req := authRequest(httptest.NewRequest("GET", "/api/sessions/sess-1/page-issues?issue_type=soft_404", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var issues []storage.PageIssue
+	decodeJSON(t, rec, &issues)
+	if len(issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(issues))
+	}
+	if issues[0].IssueType != "soft_404" || issues[0].Severity != "error" {
+		t.Fatalf("issue = %+v, want soft_404 error", issues[0])
 	}
 }
 
