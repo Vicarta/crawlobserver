@@ -236,6 +236,11 @@
     return activeDir === 'asc' ? ' ↑' : ' ↓';
   }
 
+  function fmtDate(value) {
+    if (!value) return '-';
+    return String(value).slice(0, 10);
+  }
+
   function nextDefaultDir(key) {
     return key === 'query' || key === 'page' ? 'asc' : 'desc';
   }
@@ -547,9 +552,9 @@
         {#if timeline?.length > 1}
           {@const maxClicks = Math.max(...timeline.map((t) => t.clicks), 1)}
           {@const maxImpr = Math.max(...timeline.map((t) => t.impressions), 1)}
-          {@const chartW = 700}
-          {@const chartH = 200}
-          {@const margin = { left: 50, right: 20, top: 10, bottom: 30 }}
+          {@const chartW = 1000}
+          {@const chartH = 240}
+          {@const margin = { left: 70, right: 70, top: 12, bottom: 42 }}
           {@const plotW = chartW - margin.left - margin.right}
           {@const plotH = chartH - margin.top - margin.bottom}
           <h4 class="sub-heading">{t('gsc.clicksImpressions')}</h4>
@@ -600,7 +605,7 @@
                 text-anchor="middle"
                 class="gsc-axis-label"
               >
-                {timeline[idx].date.slice(5)}
+                {fmtDate(timeline[idx].date)}
               </text>
             {/each}
             <text x={12} y={margin.top + 10} class="gsc-chart-legend">{t('gsc.clicks')}</text>
@@ -1061,7 +1066,7 @@
                 <td class="text-xs">{r.indexing_state || '-'}</td>
                 <td class="text-xs">{r.robots_txt_state || '-'}</td>
                 <td class="text-xs nowrap"
-                  >{r.last_crawl_time ? r.last_crawl_time.slice(0, 10) : '-'}</td
+                  >{fmtDate(r.last_crawl_time)}</td
                 >
                 <td class="cell-url gsc-cell-canonical">{r.canonical_url || '-'}</td>
                 <td class="text-xs">{r.mobile_usability || '-'}</td>
@@ -1265,8 +1270,8 @@
     margin-bottom: 20px;
   }
   .gsc-chart-svg {
+    display: block;
     width: 100%;
-    max-width: 800px;
     height: auto;
     margin-bottom: 24px;
   }
