@@ -73,6 +73,7 @@ func (s *Store) DeltaProblemPageURLs(ctx context.Context, sessionID string, limi
 		FROM crawlobserver.pages FINAL
 		WHERE crawl_session_id = ?
 		  AND `+notRedirectedFilter+`
+		  AND `+deltaConfirmedSiteURLFilter+`
 		  AND (
 			status_code = 0 OR status_code >= 400
 			OR error != ''
@@ -80,7 +81,7 @@ func (s *Store) DeltaProblemPageURLs(ctx context.Context, sessionID string, limi
 			OR index_reason ILIKE '%noindex%'
 		  )
 		ORDER BY crawled_at ASC
-		LIMIT ?`, sessionID, limit)
+		LIMIT ?`, sessionID, sessionID, sessionID, sessionID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("querying delta problem page candidates: %w", err)
 	}
@@ -97,15 +98,34 @@ func (s *Store) DeltaStalePageURLs(ctx context.Context, sessionID string, staleB
 		FROM crawlobserver.pages FINAL
 		WHERE crawl_session_id = ?
 		  AND `+notRedirectedFilter+`
+		  AND `+deltaConfirmedSiteURLFilter+`
 		  AND crawled_at < ?
 		ORDER BY crawled_at ASC
-		LIMIT ?`, sessionID, staleBefore, limit)
+		LIMIT ?`, sessionID, sessionID, sessionID, sessionID, staleBefore, limit)
 	if err != nil {
 		return nil, fmt.Errorf("querying delta stale page candidates: %w", err)
 	}
 	defer rows.Close()
 	return scanStringColumn(rows)
 }
+
+const deltaConfirmedSiteURLFilter = `url IN (
+	SELECT loc AS url
+	FROM crawlobserver.sitemap_urls FINAL
+	WHERE crawl_session_id = ? AND loc != ''
+
+	UNION DISTINCT
+
+	SELECT target_url AS url
+	FROM crawlobserver.links
+	WHERE crawl_session_id = ? AND is_internal = true AND target_url != ''
+
+	UNION DISTINCT
+
+	SELECT arrayJoin(seed_urls) AS url
+	FROM crawlobserver.crawl_sessions FINAL
+	WHERE id = ?
+)`
 
 func (s *Store) DeltaKnownPageURLs(ctx context.Context, sessionID string, limit int) ([]string, error) {
 	if limit <= 0 {
