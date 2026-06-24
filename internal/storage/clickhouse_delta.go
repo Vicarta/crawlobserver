@@ -2,19 +2,47 @@ package storage
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
 
-// LatestProjectSession returns the newest session associated with a project.
+// LatestProjectSession returns the newest sitemap-backed completed session for a project.
+// Daily delta crawls are partial snapshots, so using the latest session blindly can
+// shrink the next candidate set to the previous delta's small URL list.
 func (s *Store) LatestProjectSession(ctx context.Context, projectID string) (*CrawlSession, error) {
-	row := s.conn.QueryRow(ctx, `
+	sess, err := s.latestProjectSession(ctx, `
+		SELECT id, started_at, finished_at, status, seed_urls, config, pages_crawled, user_agent, project_id, label
+		FROM crawlobserver.crawl_sessions FINAL
+		WHERE project_id = ?
+		  AND status = 'completed'
+		  AND pages_crawled > 0
+		  AND id IN (
+			SELECT crawl_session_id
+			FROM crawlobserver.sitemap_urls FINAL
+			WHERE loc != ''
+			GROUP BY crawl_session_id
+			HAVING count() > 0
+		  )
+		ORDER BY started_at DESC
+		LIMIT 1`, projectID)
+	if err == nil {
+		return sess, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("querying latest sitemap-backed project session: %w", err)
+	}
+	return s.latestProjectSession(ctx, `
 		SELECT id, started_at, finished_at, status, seed_urls, config, pages_crawled, user_agent, project_id, label
 		FROM crawlobserver.crawl_sessions FINAL
 		WHERE project_id = ?
 		ORDER BY started_at DESC
 		LIMIT 1`, projectID)
+}
 
+func (s *Store) latestProjectSession(ctx context.Context, query string, args ...interface{}) (*CrawlSession, error) {
+	row := s.conn.QueryRow(ctx, query, args...)
 	var sess CrawlSession
 	if err := row.Scan(
 		&sess.ID, &sess.StartedAt, &sess.FinishedAt,
