@@ -158,6 +158,7 @@
   "session.status": "Статус",
   "session.title": "Заголовок",
   "session.words": "Слова",
+  "session.intIn": "Внутр. вх.",
   "session.intOut": "Внутр. исх.",
   "session.extOut": "Внешн. исх.",
   "session.time": "Время",

@@ -42,6 +42,7 @@ type PageRow struct {
 	H5               []string
 	H6               []string
 	WordCount        uint32
+	InternalLinksIn  uint32
 	InternalLinksOut uint32
 	ExternalLinksOut uint32
 	ImagesCount      uint16

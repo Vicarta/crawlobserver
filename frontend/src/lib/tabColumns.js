@@ -8,6 +8,7 @@ export const TAB_FILTERS = {
     'status_code',
     'title',
     'word_count',
+    'internal_links_in',
     'internal_links_out',
     'external_links_out',
     'body_size',

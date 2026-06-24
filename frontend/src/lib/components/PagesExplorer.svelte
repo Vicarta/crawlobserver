@@ -435,6 +435,7 @@
         { label: t('session.status'), sortKey: 'status_code', defaultWidth: 92, minWidth: 76 },
         { label: t('session.title'), sortKey: 'title', defaultWidth: 300, minWidth: 160 },
         { label: t('session.words'), sortKey: 'word_count', defaultWidth: 92, minWidth: 74 },
+        { label: t('session.intIn'), sortKey: 'internal_links_in', defaultWidth: 98, minWidth: 78 },
         { label: t('session.intOut'), sortKey: 'internal_links_out', defaultWidth: 108, minWidth: 84 },
         { label: t('session.extOut'), sortKey: 'external_links_out', defaultWidth: 108, minWidth: 84 },
         { label: t('common.size'), sortKey: 'body_size', defaultWidth: 92, minWidth: 74 },
@@ -483,6 +484,7 @@
           <td><span class="badge {statusBadge(p.StatusCode)}">{p.StatusCode}</span></td>
           <td class="cell-title"><OverflowText text={p.Title || '-'} /></td>
           <td>{fmtN(p.WordCount)}</td>
+          <td>{fmtN(p.InternalLinksIn)}</td>
           <td>{fmtN(p.InternalLinksOut)}</td>
           <td>{fmtN(p.ExternalLinksOut)}</td>
           <td>{fmtSize(p.BodySize)}</td>

@@ -102,11 +102,11 @@ func (s *Store) CountPages(ctx context.Context, sessionID string) (uint64, error
 // ListPages retrieves pages for a session with pagination and optional filters.
 func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset int, filters []ParsedFilter, sort *SortParam) ([]PageRow, error) {
 	query := `
-		SELECT crawl_session_id, url, final_url, status_code, content_type,
+		SELECT p.crawl_session_id, p.url, p.final_url, p.status_code, p.content_type,
 			title, title_length, canonical, canonical_is_self, is_indexable, index_reason,
 			meta_robots, meta_description, meta_desc_length, meta_keywords,
 			h1, h2, h3, h4, h5, h6,
-			word_count, internal_links_out, external_links_out,
+			word_count, ifNull(inlinks.internal_links_in, 0) AS internal_links_in, internal_links_out, external_links_out,
 			images_count, images_no_alt,
 			lang, og_title, og_description, og_image, schema_types,
 			body_size, fetch_duration_ms, content_encoding, x_robots_tag,
@@ -117,9 +117,16 @@ func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset i
 			js_added_links, js_added_images, js_added_schema,
 			schema_valid_count, schema_error_count, schema_warning_count,
 			cwv_lcp_ms, cwv_cls, cwv_ttfb_ms, cwv_measured
-		FROM crawlobserver.pages FINAL
-		WHERE crawl_session_id = ? AND ` + notRedirectedFilter
-	args := []interface{}{sessionID}
+		FROM crawlobserver.pages AS p FINAL
+		LEFT JOIN (
+			SELECT crawl_session_id, target_url, countDistinct(source_url) AS internal_links_in
+			FROM crawlobserver.links
+			WHERE crawl_session_id = ? AND is_internal = true AND target_url != ''
+			GROUP BY crawl_session_id, target_url
+		) AS inlinks
+			ON inlinks.crawl_session_id = p.crawl_session_id AND inlinks.target_url = p.url
+		WHERE p.crawl_session_id = ? AND (p.final_url = '' OR p.final_url = p.url)`
+	args := []interface{}{sessionID, sessionID}
 
 	whereExtra, filterArgs, err := BuildWhereClause(filters)
 	if err != nil {
@@ -147,7 +154,7 @@ func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset i
 			&p.Title, &p.TitleLength, &p.Canonical, &p.CanonicalIsSelf, &p.IsIndexable, &p.IndexReason,
 			&p.MetaRobots, &p.MetaDescription, &p.MetaDescLength, &p.MetaKeywords,
 			&p.H1, &p.H2, &p.H3, &p.H4, &p.H5, &p.H6,
-			&p.WordCount, &p.InternalLinksOut, &p.ExternalLinksOut,
+			&p.WordCount, &p.InternalLinksIn, &p.InternalLinksOut, &p.ExternalLinksOut,
 			&p.ImagesCount, &p.ImagesNoAlt,
 			&p.Lang, &p.OGTitle, &p.OGDescription, &p.OGImage, &p.SchemaTypes,
 			&p.BodySize, &p.FetchDurationMs, &p.ContentEncoding, &p.XRobotsTag,

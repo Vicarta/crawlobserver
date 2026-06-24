@@ -46,6 +46,7 @@ var PageFilters = map[string]FilterDef{
 	"meta_desc_length":   {Column: "meta_desc_length", Type: FilterUint},
 	"depth":              {Column: "depth", Type: FilterUint},
 	"word_count":         {Column: "word_count", Type: FilterUint},
+	"internal_links_in":  {Column: "ifNull(inlinks.internal_links_in, 0)", Type: FilterUint},
 	"internal_links_out": {Column: "internal_links_out", Type: FilterUint},
 	"external_links_out": {Column: "external_links_out", Type: FilterUint},
 	"images_count":       {Column: "images_count", Type: FilterUint},
@@ -172,14 +173,14 @@ type SortParam struct {
 
 // BacklinkFilters defines the allowed filter columns for provider_backlinks.
 var BacklinkFilters = map[string]FilterDef{
-	"source_url":  {Column: "source_url", Type: FilterLike},
-	"target_url":  {Column: "target_url", Type: FilterLike},
-	"anchor_text": {Column: "anchor_text", Type: FilterLike},
-	"trust_flow":  {Column: "domain_rank", Type: FilterUint},
+	"source_url":    {Column: "source_url", Type: FilterLike},
+	"target_url":    {Column: "target_url", Type: FilterLike},
+	"anchor_text":   {Column: "anchor_text", Type: FilterLike},
+	"trust_flow":    {Column: "domain_rank", Type: FilterUint},
 	"citation_flow": {Column: "page_rank", Type: FilterUint},
-	"nofollow":    {Column: "nofollow", Type: FilterBool},
-	"first_seen":  {Column: "first_seen", Type: FilterLike},
-	"last_seen":   {Column: "last_seen", Type: FilterLike},
+	"nofollow":      {Column: "nofollow", Type: FilterBool},
+	"first_seen":    {Column: "first_seen", Type: FilterLike},
+	"last_seen":     {Column: "last_seen", Type: FilterLike},
 }
 
 // BacklinkSortColumns maps query param names to DB column names for provider_backlinks.
@@ -201,6 +202,7 @@ var PageSortColumns = map[string]string{
 	"title":              "title",
 	"title_length":       "title_length",
 	"word_count":         "word_count",
+	"internal_links_in":  "internal_links_in",
 	"internal_links_out": "internal_links_out",
 	"external_links_out": "external_links_out",
 	"body_size":          "body_size",
@@ -236,12 +238,12 @@ var LinkSortColumns = map[string]string{
 
 // HreflangIssueFilters defines the allowed filter columns for hreflang_issues.
 var HreflangIssueFilters = map[string]FilterDef{
-	"source_url": {Column: "source_url", Type: FilterLike},
-	"target_url": {Column: "target_url", Type: FilterLike},
-	"issue_type": {Column: "issue_type", Type: FilterLike},
+	"source_url":  {Column: "source_url", Type: FilterLike},
+	"target_url":  {Column: "target_url", Type: FilterLike},
+	"issue_type":  {Column: "issue_type", Type: FilterLike},
 	"source_lang": {Column: "source_lang", Type: FilterLike},
 	"target_lang": {Column: "target_lang", Type: FilterLike},
-	"detail":     {Column: "detail", Type: FilterLike},
+	"detail":      {Column: "detail", Type: FilterLike},
 }
 
 // HreflangIssueSortColumns maps query param names to DB column names for hreflang_issues.

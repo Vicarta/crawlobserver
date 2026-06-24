@@ -181,6 +181,7 @@
   "session.status": "Status",
   "session.title": "Title",
   "session.words": "Words",
+  "session.intIn": "Int In",
   "session.intOut": "Int Out",
   "session.extOut": "Ext Out",
   "session.time": "Time",

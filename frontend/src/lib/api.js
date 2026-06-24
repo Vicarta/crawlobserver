@@ -31,6 +31,7 @@
  * @property {number} WordCount
  * @property {number} FetchDurationMs
  * @property {number} Depth
+ * @property {number} InternalLinksIn
  * @property {number} InternalLinksOut
  * @property {number} ExternalLinksOut
  * @property {number} ImagesCount
