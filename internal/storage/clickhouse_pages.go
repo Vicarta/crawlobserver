@@ -103,6 +103,7 @@ func (s *Store) CountPages(ctx context.Context, sessionID string) (uint64, error
 func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset int, filters []ParsedFilter, sort *SortParam) ([]PageRow, error) {
 	query := `
 		SELECT p.crawl_session_id, p.url, p.final_url, p.status_code, p.content_type,
+			` + PageTypeSQLExpression + ` AS page_type,
 			title, title_length, canonical, canonical_is_self, is_indexable, index_reason,
 			meta_robots, meta_description, meta_desc_length, meta_keywords,
 			h1, h2, h3, h4, h5, h6,
@@ -150,7 +151,7 @@ func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset i
 	for rows.Next() {
 		var p PageRow
 		if err := rows.Scan(
-			&p.CrawlSessionID, &p.URL, &p.FinalURL, &p.StatusCode, &p.ContentType,
+			&p.CrawlSessionID, &p.URL, &p.FinalURL, &p.StatusCode, &p.ContentType, &p.PageType,
 			&p.Title, &p.TitleLength, &p.Canonical, &p.CanonicalIsSelf, &p.IsIndexable, &p.IndexReason,
 			&p.MetaRobots, &p.MetaDescription, &p.MetaDescLength, &p.MetaKeywords,
 			&p.H1, &p.H2, &p.H3, &p.H4, &p.H5, &p.H6,

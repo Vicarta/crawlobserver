@@ -25,6 +25,7 @@ type PageRow struct {
 	FinalURL         string
 	StatusCode       uint16
 	ContentType      string
+	PageType         string
 	Title            string
 	TitleLength      uint16
 	Canonical        string

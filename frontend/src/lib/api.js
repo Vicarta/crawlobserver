@@ -16,6 +16,7 @@
  * @property {string} FinalURL
  * @property {number} StatusCode
  * @property {string} Title
+ * @property {string} PageType
  * @property {number} TitleLength
  * @property {string} MetaDescription
  * @property {number} MetaDescLength

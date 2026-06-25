@@ -26,10 +26,34 @@ type ParsedFilter struct {
 	Value string
 }
 
+// PageTypeSQLExpression classifies crawled rows into stable UI/API buckets.
+const PageTypeSQLExpression = `multiIf(
+	p.status_code >= 300 AND p.status_code < 400, 'redirect',
+	p.final_url != '' AND p.final_url != p.url, 'redirect',
+	positionCaseInsensitiveUTF8(p.content_type, 'html') > 0, 'html',
+	positionCaseInsensitiveUTF8(p.content_type, 'css') > 0, 'css',
+	positionCaseInsensitiveUTF8(p.content_type, 'javascript') > 0 OR positionCaseInsensitiveUTF8(p.content_type, 'ecmascript') > 0, 'js',
+	positionCaseInsensitiveUTF8(p.content_type, 'image/') = 1, 'image',
+	positionCaseInsensitiveUTF8(p.content_type, 'video/') = 1, 'video',
+	positionCaseInsensitiveUTF8(p.content_type, 'pdf') > 0
+		OR positionCaseInsensitiveUTF8(p.content_type, 'zip') > 0
+		OR positionCaseInsensitiveUTF8(p.content_type, 'octet-stream') > 0
+		OR positionCaseInsensitiveUTF8(p.content_type, 'msword') > 0
+		OR positionCaseInsensitiveUTF8(p.content_type, 'vnd.ms-') > 0
+		OR positionCaseInsensitiveUTF8(p.content_type, 'openxmlformats') > 0
+		OR positionCaseInsensitiveUTF8(p.content_type, 'opendocument') > 0
+		OR positionCaseInsensitiveUTF8(p.content_type, 'gzip') > 0
+		OR positionCaseInsensitiveUTF8(p.content_type, 'tar') > 0
+		OR positionCaseInsensitiveUTF8(p.content_type, 'rar') > 0
+		OR positionCaseInsensitiveUTF8(p.content_type, '7z') > 0, 'file',
+	'other'
+)`
+
 // PageFilters defines the allowed filter columns for the pages table.
 var PageFilters = map[string]FilterDef{
 	"url":                {Column: "url", Type: FilterLike},
 	"content_type":       {Column: "content_type", Type: FilterLike},
+	"page_type":          {Column: PageTypeSQLExpression, Type: FilterLike},
 	"title":              {Column: "title", Type: FilterLike},
 	"canonical":          {Column: "canonical", Type: FilterLike},
 	"meta_robots":        {Column: "meta_robots", Type: FilterLike},
@@ -210,6 +234,7 @@ var PageSortColumns = map[string]string{
 	"depth":              "depth",
 	"pagerank":           "pagerank",
 	"content_type":       "content_type",
+	"page_type":          "page_type",
 	"meta_description":   "meta_description",
 	"meta_desc_length":   "meta_desc_length",
 	"meta_keywords":      "meta_keywords",

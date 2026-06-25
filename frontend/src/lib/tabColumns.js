@@ -6,6 +6,7 @@ export const TAB_FILTERS = {
   overview: [
     'url',
     'status_code',
+    'page_type',
     'title',
     'word_count',
     'internal_links_in',
@@ -78,6 +79,7 @@ export const TAB_SUB_VIEWS = {
   reports: ['overview', 'content', 'technical', 'links', 'structure', 'sitemaps', 'international'],
   pages: [
     'all',
+    'html',
     'titles',
     'meta',
     'headings',
@@ -114,6 +116,7 @@ export const TAB_DEFAULT_SUB_VIEW = {
 // Map old flat tab IDs to { tab, subView } for URL compat
 export const OLD_TAB_REDIRECT = {
   overview: { tab: 'pages', subView: 'all' },
+  html: { tab: 'pages', subView: 'html' },
   titles: { tab: 'pages', subView: 'titles' },
   meta: { tab: 'pages', subView: 'meta' },
   headings: { tab: 'pages', subView: 'headings' },

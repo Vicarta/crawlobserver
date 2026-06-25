@@ -25,6 +25,7 @@
 
   const SUB_VIEWS = [
     { id: 'all', label: () => t('pages.all') },
+    { id: 'html', label: () => t('pages.html') },
     { id: 'titles', label: () => t('pages.titles') },
     { id: 'meta', label: () => t('pages.meta') },
     { id: 'headings', label: () => t('pages.headings') },
@@ -85,9 +86,30 @@
     onpushurl?.(qs ? `${path}?${qs}` : path);
   }
 
-  function effectiveFilters() {
-    if (filters.content_type || filters.status_code) return filters;
-    return { content_type: 'text/html', ...filters };
+  function pageFilters() {
+    const active = { ...filters };
+    if (subView === 'html') active.page_type = 'html';
+    return active;
+  }
+
+  function overviewFilterKeys() {
+    const keys = [null, ...TAB_FILTERS.overview];
+    if (subView === 'html') keys[3] = null; // page_type is enforced by the tab.
+    return keys;
+  }
+
+  function pageTypeLabel(type) {
+    const labels = {
+      html: 'HTML',
+      css: 'CSS',
+      js: 'JS',
+      image: 'Image',
+      video: 'Video',
+      file: 'File',
+      redirect: 'Redirect',
+      other: 'Other',
+    };
+    return labels[type] || 'Other';
   }
 
   async function loadData() {
@@ -112,7 +134,7 @@
           sessionId,
           PAGE_SIZE,
           pagesOffset,
-          effectiveFilters(),
+          pageFilters(),
           sortColumn,
           sortOrder,
         );
@@ -195,8 +217,10 @@
       headers: [
         'URL',
         'Status',
+        'Type',
         'Title',
         'Words',
+        'Internal Links In',
         'Internal Links Out',
         'External Links Out',
         'Size',
@@ -207,8 +231,40 @@
       keys: [
         'URL',
         'StatusCode',
+        'PageType',
         'Title',
         'WordCount',
+        'InternalLinksIn',
+        'InternalLinksOut',
+        'ExternalLinksOut',
+        'BodySize',
+        'FetchDurationMs',
+        'Depth',
+        'PageRank',
+      ],
+    },
+    html: {
+      headers: [
+        'URL',
+        'Status',
+        'Type',
+        'Title',
+        'Words',
+        'Internal Links In',
+        'Internal Links Out',
+        'External Links Out',
+        'Size',
+        'Time (ms)',
+        'Depth',
+        'PageRank',
+      ],
+      keys: [
+        'URL',
+        'StatusCode',
+        'PageType',
+        'Title',
+        'WordCount',
+        'InternalLinksIn',
         'InternalLinksOut',
         'ExternalLinksOut',
         'BodySize',
@@ -311,7 +367,7 @@
         ? (limit, offset) => getRedirectPages(sessionId, limit, offset, filters)
         : subView === 'issues'
           ? (limit, offset) => getPageIssues(sessionId, limit, offset, filters)
-        : (limit, offset) => getPages(sessionId, limit, offset, effectiveFilters());
+        : (limit, offset) => getPages(sessionId, limit, offset, pageFilters());
     const allData = await fetchAll(fetcher);
     const keys = cfg.customKeys || cfg.keys;
     let rows = allData;
@@ -385,7 +441,7 @@
         : subView === 'issues'
           ? `/sessions/${sessionId}/page-issues`
         : `/sessions/${sessionId}/pages`;
-    const activeF = subView === 'redirects' || subView === 'issues' ? filters : effectiveFilters();
+    const activeF = subView === 'redirects' || subView === 'issues' ? filters : pageFilters();
     return buildApiPath(endpoint, {
       limit: PAGE_SIZE,
       offset: 0,
@@ -417,7 +473,7 @@
     {/if}
   </div>
 
-  {#if subView === 'all'}
+  {#if subView === 'all' || subView === 'html'}
     {#if selectedList.length > 0}
       <div class="bulk-action-bar">
         <span>{selectedList.length} selected</span>
@@ -428,11 +484,12 @@
       </div>
     {/if}
     <DataTable
-      tableId="pages-all"
+      tableId={subView === 'html' ? 'pages-html' : 'pages-all'}
       columns={[
         { label: '', defaultWidth: 42, minWidth: 42, resizable: false, class: 'select-col' },
         { label: t('session.url'), sortKey: 'url', defaultWidth: 380, minWidth: 180 },
         { label: t('session.status'), sortKey: 'status_code', defaultWidth: 92, minWidth: 76 },
+        { label: t('session.type'), sortKey: 'page_type', defaultWidth: 96, minWidth: 78 },
         { label: t('session.title'), sortKey: 'title', defaultWidth: 300, minWidth: 160 },
         { label: t('session.words'), sortKey: 'word_count', defaultWidth: 92, minWidth: 74 },
         { label: t('session.intIn'), sortKey: 'internal_links_in', defaultWidth: 98, minWidth: 78 },
@@ -444,7 +501,7 @@
         { label: t('session.pr'), sortKey: 'pagerank', defaultWidth: 82, minWidth: 64 },
         { label: '', defaultWidth: 52, minWidth: 44, resizable: false },
       ]}
-      filterKeys={[null, ...TAB_FILTERS.overview]}
+      filterKeys={overviewFilterKeys()}
       {filters}
       data={pages}
       offset={pagesOffset}
@@ -482,6 +539,7 @@
             ></td
           >
           <td><span class="badge {statusBadge(p.StatusCode)}">{p.StatusCode}</span></td>
+          <td><span class="type-badge type-{p.PageType || 'other'}">{pageTypeLabel(p.PageType)}</span></td>
           <td class="cell-title"><OverflowText text={p.Title || '-'} /></td>
           <td>{fmtN(p.WordCount)}</td>
           <td>{fmtN(p.InternalLinksIn)}</td>
@@ -938,5 +996,46 @@
     width: 15px;
     height: 15px;
     accent-color: var(--accent);
+  }
+
+  .type-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 54px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-hover) 80%, transparent);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.2;
+  }
+
+  .type-html {
+    background: rgba(16, 185, 129, 0.12);
+    color: #10b981;
+  }
+
+  .type-css,
+  .type-js {
+    background: rgba(59, 130, 246, 0.12);
+    color: #3b82f6;
+  }
+
+  .type-image,
+  .type-video {
+    background: rgba(168, 85, 247, 0.13);
+    color: #8b5cf6;
+  }
+
+  .type-file {
+    background: rgba(245, 158, 11, 0.14);
+    color: #d97706;
+  }
+
+  .type-redirect {
+    background: rgba(234, 179, 8, 0.16);
+    color: #ca8a04;
   }
 </style>
