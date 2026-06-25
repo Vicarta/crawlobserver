@@ -8,12 +8,14 @@
     getTelemetry,
     updateTelemetry,
     updateSessionRecording,
+    getProjects,
   } from '../api.js';
   import { enableTelemetry, disableTelemetry } from '../telemetry.js';
   import { fmtSize } from '../utils.js';
   import { t, setLocale, getLocale } from '../i18n/index.svelte.js';
   import ConfirmModal from './ConfirmModal.svelte';
   import UserManagement from './UserManagement.svelte';
+  import QualitySettingsTab from './QualitySettingsTab.svelte';
 
   let { initialTheme, onerror, onsave, oncancel, onsessionrecording, onprojectschanged } = $props();
 
@@ -25,6 +27,9 @@
 
   let editTheme = $state({ ...initialTheme });
   let savingTheme = $state(false);
+  let projects = $state([]);
+  let selectedQualityProjectId = $state('');
+  let loadingProjects = $state(false);
 
   // Backups
   let backups = $state([]);
@@ -57,6 +62,20 @@
       backupMessage = e.message;
     } finally {
       loadingBackups = false;
+    }
+  }
+
+  async function loadProjectsForQuality() {
+    loadingProjects = true;
+    try {
+      projects = await getProjects();
+      if (!selectedQualityProjectId && projects.length > 0) {
+        selectedQualityProjectId = projects[0].id;
+      }
+    } catch (e) {
+      onerror?.(e.message);
+    } finally {
+      loadingProjects = false;
     }
   }
 
@@ -153,6 +172,7 @@
 
   loadBackups();
   loadTelemetry();
+  loadProjectsForQuality();
 </script>
 
 <!-- Settings -->
@@ -263,6 +283,42 @@
 </div>
 
 <UserManagement {onerror} {onprojectschanged} />
+
+<!-- Project Quality -->
+<div class="page-header section-gap">
+  <h1>Project quality</h1>
+</div>
+<div class="card">
+  <div class="project-quality-header">
+    <div>
+      <div class="field-label">Project</div>
+      <select
+        class="project-quality-select"
+        bind:value={selectedQualityProjectId}
+        disabled={loadingProjects || projects.length === 0}
+      >
+        {#each projects as p}
+          <option value={p.id}>{p.name}</option>
+        {/each}
+      </select>
+    </div>
+    <p class="project-quality-note">
+      Configure crawl trust thresholds and canary URLs. These settings are project-specific and
+      admin-only.
+    </p>
+  </div>
+  {#if selectedQualityProjectId}
+    {#key selectedQualityProjectId}
+      <QualitySettingsTab
+        projectId={selectedQualityProjectId}
+        isAdmin={true}
+        onerror={(msg) => onerror?.(msg)}
+      />
+    {/key}
+  {:else}
+    <div class="card-empty-msg">No projects available.</div>
+  {/if}
+</div>
 
 <!-- Backups -->
 <div class="page-header section-gap">
@@ -447,6 +503,32 @@
     background: #332701;
     color: #ffc107;
     border-color: #664d00;
+  }
+  .project-quality-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .project-quality-select {
+    min-width: 260px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-card);
+    color: var(--text);
+  }
+  .project-quality-note {
+    max-width: 560px;
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  :global(.card > .quality-layout) {
+    padding: 20px;
   }
   .btn-delete-icon {
     padding: 4px;

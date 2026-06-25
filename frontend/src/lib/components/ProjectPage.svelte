@@ -7,6 +7,7 @@
     deleteProjectWithSessions,
     getProviderConnections,
     disassociateSession,
+    getSessionQuality,
   } from '../api.js';
   import { fmtN, timeAgo } from '../utils.js';
   import { pushURL } from '../router.js';
@@ -51,6 +52,9 @@
   let providerSubView = $state(initialProviderSubView);
   let confirmState = $state(null);
   let providerConnections = $state([]);
+  let qualityDetailSession = $state(null);
+  let qualityDetail = $state(null);
+  let qualityDetailLoading = $state(false);
 
   function showConfirm(message, onConfirm, opts = {}) {
     confirmState = { message, onConfirm, ...opts };
@@ -77,6 +81,31 @@
     // Use "providers" in URL for any provider tab
     const urlTab = tab.startsWith('provider:') ? 'providers' : tab;
     if (project) pushURL(`/projects/${project.id}/${urlTab}`);
+  }
+
+  function sessionTypeLabel(session) {
+    return session?.quality?.is_full_crawl === false || session?.Label === 'Daily Delta Crawl'
+      ? 'Daily Delta'
+      : 'Full crawl';
+  }
+
+  function qualityBadgeLabel(quality) {
+    if (!quality) return 'pending';
+    if (quality.is_full_crawl === false) return 'Delta · not baseline';
+    return `${quality.status} · ${quality.score}`;
+  }
+
+  async function openQualityDetail(session) {
+    qualityDetailSession = session;
+    qualityDetail = null;
+    qualityDetailLoading = true;
+    try {
+      qualityDetail = await getSessionQuality(session.ID);
+    } catch (e) {
+      onerror?.(e.message);
+    } finally {
+      qualityDetailLoading = false;
+    }
   }
 
   // --- Rename ---
@@ -276,6 +305,7 @@
         <thead>
           <tr>
             <th>{t('project.seedUrl')}</th>
+            <th>Type</th>
             <th>{t('common.status')}</th>
             <th>Quality</th>
             <th>{t('common.pages')}</th>
@@ -287,6 +317,15 @@
           {#each projSessions as s}
             <tr class="clickable-row" onclick={() => onselectsession?.(s)}>
               <td class="cell-url">{s.SeedURLs?.[0] || s.ID}</td>
+              <td>
+                <span
+                  class="badge"
+                  class:badge-info={sessionTypeLabel(s) === 'Daily Delta'}
+                  title={sessionTypeLabel(s) === 'Daily Delta'
+                    ? 'Checks changed, new, stale, problem, and manually queued candidates. It is not a full site baseline.'
+                    : 'Full crawl session.'}>{sessionTypeLabel(s)}</span
+                >
+              </td>
               <td>
                 {#if s.is_running}
                   <span class="badge badge-info">{t('common.running')}</span>
@@ -300,13 +339,18 @@
               </td>
               <td>
                 {#if s.quality}
-                  <span
+                  <button
+                    type="button"
                     class="badge"
                     class:badge-success={s.quality.status === 'trusted'}
                     class:badge-warning={s.quality.status === 'warning'}
                     class:badge-error={s.quality.status === 'untrusted'}
+                    class:badge-info={s.quality.is_full_crawl === false}
                     title={s.quality.summary}
-                    >{s.quality.status} · {s.quality.score}</span
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      openQualityDetail(s);
+                    }}>{qualityBadgeLabel(s.quality)}</button
                   >
                 {:else}
                   <span class="badge">pending</span>
@@ -490,6 +534,87 @@
   </details>
 {/if}
 
+{#if qualityDetailSession}
+  <div
+    class="quality-modal-overlay"
+    role="button"
+    tabindex="0"
+    onclick={() => {
+      qualityDetailSession = null;
+      qualityDetail = null;
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') {
+        qualityDetailSession = null;
+        qualityDetail = null;
+      }
+    }}
+  >
+    <div class="quality-modal" role="dialog" onclick={(e) => e.stopPropagation()}>
+      <div class="quality-modal-header">
+        <div>
+          <div class="eyebrow">Crawl Quality</div>
+          <h2>{sessionTypeLabel(qualityDetailSession)} · {qualityDetailSession.SeedURLs?.[0]}</h2>
+        </div>
+        <button
+          class="btn btn-sm"
+          onclick={() => {
+            qualityDetailSession = null;
+            qualityDetail = null;
+          }}>Close</button
+        >
+      </div>
+      {#if qualityDetailLoading}
+        <p class="text-muted">Loading quality details...</p>
+      {:else if qualityDetail}
+        <div class="quality-summary-grid">
+          <div>
+            <span>Status</span>
+            <strong>{qualityBadgeLabel(qualityDetail)}</strong>
+          </div>
+          <div>
+            <span>Trusted</span>
+            <strong>{qualityDetail.trusted ? 'Yes' : 'No'}</strong>
+          </div>
+          <div>
+            <span>Baseline</span>
+            <strong>{qualityDetail.baseline_session_id || '-'}</strong>
+          </div>
+        </div>
+        <p class="quality-summary-text">{qualityDetail.summary}</p>
+
+        {#if qualityDetail.metrics}
+          <div class="quality-metrics">
+            {#each Object.entries(qualityDetail.metrics) as [key, value]}
+              <div>
+                <span>{key.replaceAll('_', ' ')}</span>
+                <strong>{fmtN(value)}</strong>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <h3>Findings</h3>
+        {#if qualityDetail.findings?.length}
+          <div class="quality-findings">
+            {#each qualityDetail.findings as f}
+              <div class="quality-finding" class:blocking={f.blocking}>
+                <div>
+                  <strong>{f.finding_type}</strong>
+                  <p>{f.message}</p>
+                </div>
+                <span class="badge" class:badge-error={f.severity === 'error'} class:badge-warning={f.severity === 'warning'}>{f.severity}</span>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p class="text-muted">No findings recorded.</p>
+        {/if}
+      {/if}
+    </div>
+  </div>
+{/if}
+
 {#if confirmState}
   <ConfirmModal
     message={confirmState.message}
@@ -567,6 +692,102 @@
   }
   .btn-unlink:hover {
     color: #dc2626;
+  }
+  .badge {
+    border: 0;
+  }
+  button.badge {
+    cursor: pointer;
+    font: inherit;
+  }
+  .quality-modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: rgba(15, 23, 42, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .quality-modal {
+    width: min(900px, 100%);
+    max-height: 86vh;
+    overflow: auto;
+    background: var(--bg-card);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 24px 80px rgba(15, 23, 42, 0.3);
+  }
+  .quality-modal-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 18px;
+  }
+  .quality-modal-header h2 {
+    margin: 3px 0 0;
+    font-size: 18px;
+    word-break: break-word;
+  }
+  .eyebrow {
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .quality-summary-grid,
+  .quality-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .quality-summary-grid > div,
+  .quality-metrics > div {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+  }
+  .quality-summary-grid span,
+  .quality-metrics span {
+    display: block;
+    color: var(--text-muted);
+    font-size: 12px;
+    text-transform: capitalize;
+  }
+  .quality-summary-grid strong,
+  .quality-metrics strong {
+    display: block;
+    margin-top: 4px;
+    font-size: 16px;
+  }
+  .quality-summary-text {
+    color: var(--text);
+    margin: 0 0 18px;
+  }
+  .quality-findings {
+    display: grid;
+    gap: 8px;
+  }
+  .quality-finding {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+  }
+  .quality-finding.blocking {
+    border-color: rgba(220, 38, 38, 0.45);
+  }
+  .quality-finding p {
+    margin: 4px 0 0;
+    color: var(--text-muted);
+    font-size: 13px;
   }
   .btn-danger {
     background: var(--bg-card);
