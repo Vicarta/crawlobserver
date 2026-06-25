@@ -155,7 +155,25 @@ func (s *Store) UpdateSessionLabel(ctx context.Context, sessionID, label string)
 // Uses DROP PARTITION for instant deletion on partitioned tables.
 func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
 	// Drop partition on data tables (partitioned by crawl_session_id)
-	dataTables := []string{"pages", "links", "robots_txt", "sitemaps", "sitemap_urls", "external_link_checks", "page_resource_checks", "page_resource_refs", "extractions", "near_duplicate_pairs", "retry_attempts"}
+	dataTables := []string{
+		"pages",
+		"links",
+		"robots_txt",
+		"sitemaps",
+		"sitemap_urls",
+		"external_link_checks",
+		"page_resource_checks",
+		"page_resource_refs",
+		"extractions",
+		"near_duplicate_pairs",
+		"retry_attempts",
+		"structured_data_items",
+		"hreflang_issues",
+		"interlinking_opportunities",
+		"interlinking_simulation_results",
+		"interlinking_simulations",
+		"page_embeddings",
+	}
 	for _, table := range dataTables {
 		q := fmt.Sprintf("ALTER TABLE crawlobserver.%s DROP PARTITION ?", table)
 		if err := s.conn.Exec(ctx, q, sessionID); err != nil {
