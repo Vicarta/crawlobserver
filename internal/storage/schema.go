@@ -461,7 +461,7 @@ CREATE TABLE IF NOT EXISTS crawlobserver.application_logs (
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMMDD(timestamp)
 ORDER BY (timestamp, level, component)
-TTL toDateTime(timestamp) + INTERVAL 7 DAY DELETE
+TTL toDateTime(timestamp) + INTERVAL 5 DAY DELETE
 `
 
 // repartitionTable migrates a table to use PARTITION BY crawl_session_id.

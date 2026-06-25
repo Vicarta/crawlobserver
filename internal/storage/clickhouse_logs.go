@@ -69,7 +69,7 @@ func (s *Store) ListLogs(ctx context.Context, limit, offset int, level, componen
 	return results, int(total), nil
 }
 
-// ExportLogs returns all logs (up to 7 days per TTL) for JSONL export.
+// ExportLogs returns all logs (up to 5 days per TTL) for JSONL export.
 func (s *Store) ExportLogs(ctx context.Context) ([]applog.LogRow, error) {
 	rows, err := s.conn.Query(ctx, `SELECT timestamp, level, component, message, context FROM crawlobserver.application_logs ORDER BY timestamp DESC`)
 	if err != nil {
