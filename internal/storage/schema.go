@@ -781,6 +781,8 @@ var Migrations = []Migration{
 	{Name: "alter pages v7 structured data", DDL: AlterPagesV7StructuredData},
 	{Name: "alter pages v8 cwv", DDL: AlterPagesV8CWV},
 	{Name: "create hreflang_issues", DDL: CreateHreflangIssues},
+	{Name: "create crawl_quality_results", DDL: CreateCrawlQualityResults},
+	{Name: "create crawl_quality_findings", DDL: CreateCrawlQualityFindings},
 }
 
 const AlterSessionsV3 = `
@@ -838,4 +840,38 @@ CREATE TABLE IF NOT EXISTS crawlobserver.hreflang_issues (
 ) ENGINE = ReplacingMergeTree(computed_at)
 PARTITION BY crawl_session_id
 ORDER BY (crawl_session_id, issue_type, source_url, target_url)
+`
+
+const CreateCrawlQualityResults = `
+CREATE TABLE IF NOT EXISTS crawlobserver.crawl_quality_results (
+    session_id UUID,
+    project_id String,
+    baseline_session_id String,
+    status LowCardinality(String),
+    score UInt8,
+    trusted Bool,
+    is_full_crawl Bool,
+    summary String,
+    metrics String CODEC(ZSTD(3)),
+    evaluated_at DateTime64(3)
+) ENGINE = ReplacingMergeTree(evaluated_at)
+ORDER BY (session_id)
+`
+
+const CreateCrawlQualityFindings = `
+CREATE TABLE IF NOT EXISTS crawlobserver.crawl_quality_findings (
+    session_id UUID,
+    project_id String,
+    severity LowCardinality(String),
+    finding_type LowCardinality(String),
+    message String,
+    metric LowCardinality(String),
+    current_value Float64,
+    baseline_value Float64,
+    threshold_value Float64,
+    blocking Bool,
+    created_at DateTime64(3)
+) ENGINE = MergeTree()
+PARTITION BY session_id
+ORDER BY (session_id, severity, finding_type, created_at)
 `

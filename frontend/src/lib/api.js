@@ -703,6 +703,46 @@ export async function addProjectDeltaManualURLs(projectId, urls) {
   });
 }
 
+export async function getProjectQualitySettings(projectId) {
+  return fetchJSON(`/projects/${projectId}/quality/settings`);
+}
+
+export async function updateProjectQualitySettings(projectId, settings) {
+  return fetchJSON(`/projects/${projectId}/quality/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  });
+}
+
+export async function getProjectCanaries(projectId) {
+  return fetchJSON(`/projects/${projectId}/canaries`);
+}
+
+export async function createProjectCanary(projectId, canary) {
+  return fetchJSON(`/projects/${projectId}/canaries`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(canary),
+  });
+}
+
+export async function updateProjectCanary(projectId, canaryId, canary) {
+  return fetchJSON(`/projects/${projectId}/canaries/${canaryId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(canary),
+  });
+}
+
+export async function deleteProjectCanary(projectId, canaryId) {
+  return fetchJSON(`/projects/${projectId}/canaries/${canaryId}`, { method: 'DELETE' });
+}
+
+export async function getSessionQuality(sessionId) {
+  return fetchJSON(`/sessions/${sessionId}/quality`);
+}
+
 /**
  * @param {string} sessionId
  * @param {string} label

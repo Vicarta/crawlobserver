@@ -14,6 +14,7 @@
   import GSCTab from './GSCTab.svelte';
   import ProvidersTab from './ProvidersTab.svelte';
   import DeltaCrawlTab from './DeltaCrawlTab.svelte';
+  import QualitySettingsTab from './QualitySettingsTab.svelte';
   import ConfirmModal from './ConfirmModal.svelte';
 
   const PROJ_SESSIONS_LIMIT = 30;
@@ -241,6 +242,11 @@
     class:tab-active={projectTab === 'delta'}
     onclick={() => switchProjectTab('delta')}>Daily Delta</button
   >
+  <button
+    class="tab"
+    class:tab-active={projectTab === 'quality'}
+    onclick={() => switchProjectTab('quality')}>Quality</button
+  >
   {#each providerConnections as conn}
     {@const meta = providerMeta[conn.provider]}
     <button
@@ -271,6 +277,7 @@
           <tr>
             <th>{t('project.seedUrl')}</th>
             <th>{t('common.status')}</th>
+            <th>Quality</th>
             <th>{t('common.pages')}</th>
             <th>{t('actionBar.started')}</th>
             <th style="width:1%"></th>
@@ -289,6 +296,20 @@
                   <span class="badge badge-error">{s.Status}</span>
                 {:else}
                   <span class="badge">{s.Status || t('common.unknown')}</span>
+                {/if}
+              </td>
+              <td>
+                {#if s.quality}
+                  <span
+                    class="badge"
+                    class:badge-success={s.quality.status === 'trusted'}
+                    class:badge-warning={s.quality.status === 'warning'}
+                    class:badge-error={s.quality.status === 'untrusted'}
+                    title={s.quality.summary}
+                    >{s.quality.status} · {s.quality.score}</span
+                  >
+                {:else}
+                  <span class="badge">pending</span>
                 {/if}
               </td>
               <td>{fmtN(s.PagesCrawled || 0)}</td>
@@ -392,11 +413,13 @@
       projectId={project.id}
       onerror={(msg) => onerror?.(msg)}
       onopensessions={async () => {
-        await ce();
-        be('sessions');
+        await loadProjectSessions();
+        switchProjectTab('sessions');
       }}
       {isAdmin}
     />
+  {:else if projectTab === 'quality'}
+    <QualitySettingsTab projectId={project.id} {isAdmin} onerror={(msg) => onerror?.(msg)} />
   {:else if projectTab.startsWith('provider:')}
     <ProvidersTab
       projectId={project.id}

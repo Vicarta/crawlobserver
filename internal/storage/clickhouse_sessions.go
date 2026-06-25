@@ -173,6 +173,7 @@ func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
 		"interlinking_simulation_results",
 		"interlinking_simulations",
 		"page_embeddings",
+		"crawl_quality_findings",
 	}
 	for _, table := range dataTables {
 		q := fmt.Sprintf("ALTER TABLE crawlobserver.%s DROP PARTITION ?", table)
@@ -184,6 +185,9 @@ func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
 	// crawl_sessions is not partitioned by session, use regular DELETE
 	if err := s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_sessions DELETE WHERE id = ?`, sessionID); err != nil {
 		return fmt.Errorf("deleting session row: %w", err)
+	}
+	if err := s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_quality_results DELETE WHERE session_id = ?`, sessionID); err != nil {
+		return fmt.Errorf("deleting quality result row: %w", err)
 	}
 
 	return nil

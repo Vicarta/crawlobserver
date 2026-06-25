@@ -318,6 +318,56 @@ func NewStore(dbPath string) (*Store, error) {
 	}
 
 	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS project_quality_settings (
+			project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			min_trusted_score INTEGER NOT NULL DEFAULT 85,
+			untrusted_score_below INTEGER NOT NULL DEFAULT 60,
+			coverage_drop_percent REAL NOT NULL DEFAULT 30,
+			coverage_growth_percent REAL NOT NULL DEFAULT 50,
+			coverage_min_pages_delta INTEGER NOT NULL DEFAULT 50,
+			internal_links_drop_percent REAL NOT NULL DEFAULT 25,
+			internal_links_min_delta INTEGER NOT NULL DEFAULT 500,
+			status_404_percent REAL NOT NULL DEFAULT 10,
+			status_404_min_delta INTEGER NOT NULL DEFAULT 25,
+			noindex_percent REAL NOT NULL DEFAULT 10,
+			noindex_min_delta INTEGER NOT NULL DEFAULT 25,
+			redirect_percent REAL NOT NULL DEFAULT 15,
+			redirect_min_delta INTEGER NOT NULL DEFAULT 25,
+			canonical_mismatch_percent REAL NOT NULL DEFAULT 10,
+			canonical_mismatch_min_delta INTEGER NOT NULL DEFAULT 25,
+			pagerank_top_n INTEGER NOT NULL DEFAULT 20,
+			pagerank_top_overlap_min_percent REAL NOT NULL DEFAULT 50,
+			pagerank_zero_top_pages_max INTEGER NOT NULL DEFAULT 2,
+			canary_min_internal_links_default INTEGER NOT NULL DEFAULT 1,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating project_quality_settings table: %w", err)
+	}
+
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS project_canaries (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			url TEXT NOT NULL,
+			expected_status INTEGER NOT NULL DEFAULT 200,
+			expected_final_url TEXT NOT NULL DEFAULT '',
+			expected_canonical TEXT NOT NULL DEFAULT '',
+			title_contains TEXT NOT NULL DEFAULT '',
+			min_internal_links INTEGER NOT NULL DEFAULT 1,
+			expect_indexable INTEGER NOT NULL DEFAULT 1,
+			active INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating project_canaries table: %w", err)
+	}
+
+	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS rulesets (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,

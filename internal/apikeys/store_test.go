@@ -249,6 +249,88 @@ func TestProjectDeltaSettingsSaveAndManualQueue(t *testing.T) {
 	}
 }
 
+func TestProjectQualitySettingsAndCanaries(t *testing.T) {
+	s := newTestStore(t)
+	p, err := s.CreateProject("quality")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defaults, err := s.GetProjectQualitySettings(p.ID)
+	if err != nil {
+		t.Fatalf("GetProjectQualitySettings default: %v", err)
+	}
+	if defaults.ProjectID != p.ID || !defaults.Enabled || defaults.MinTrustedScore != 85 {
+		t.Fatalf("unexpected quality defaults: %+v", defaults)
+	}
+
+	defaults.MinTrustedScore = 90
+	defaults.UntrustedScoreBelow = 70
+	defaults.CoverageDropPercent = 20
+	defaults.InternalLinksMinDelta = 250
+	defaults.PageRankTopN = 15
+	defaults.CanaryMinInternalLinksDefault = 3
+	saved, err := s.SaveProjectQualitySettings(*defaults)
+	if err != nil {
+		t.Fatalf("SaveProjectQualitySettings: %v", err)
+	}
+	if saved.MinTrustedScore != 90 || saved.UntrustedScoreBelow != 70 || saved.PageRankTopN != 15 {
+		t.Fatalf("unexpected saved quality settings: %+v", saved)
+	}
+
+	canaries, err := s.ListProjectCanaries(p.ID)
+	if err != nil {
+		t.Fatalf("ListProjectCanaries empty: %v", err)
+	}
+	if len(canaries) != 0 {
+		t.Fatalf("expected no canaries, got %d", len(canaries))
+	}
+
+	created, err := s.SaveProjectCanary(ProjectCanary{
+		ProjectID:        p.ID,
+		URL:              " https://example.com/ ",
+		ExpectedStatus:   200,
+		TitleContains:    "Example",
+		MinInternalLinks: 5,
+		ExpectIndexable:  true,
+		Active:           true,
+	})
+	if err != nil {
+		t.Fatalf("SaveProjectCanary create: %v", err)
+	}
+	if created.ID == "" || created.URL != "https://example.com/" || !created.Active {
+		t.Fatalf("unexpected created canary: %+v", created)
+	}
+
+	created.MinInternalLinks = 7
+	updated, err := s.SaveProjectCanary(*created)
+	if err != nil {
+		t.Fatalf("SaveProjectCanary update: %v", err)
+	}
+	if updated.MinInternalLinks != 7 {
+		t.Fatalf("expected updated min links, got %+v", updated)
+	}
+
+	canaries, err = s.ListProjectCanaries(p.ID)
+	if err != nil {
+		t.Fatalf("ListProjectCanaries: %v", err)
+	}
+	if len(canaries) != 1 || canaries[0].ID != created.ID {
+		t.Fatalf("unexpected canaries: %+v", canaries)
+	}
+
+	if err := s.DeleteProjectCanary(p.ID, created.ID); err != nil {
+		t.Fatalf("DeleteProjectCanary: %v", err)
+	}
+	canaries, err = s.ListProjectCanaries(p.ID)
+	if err != nil {
+		t.Fatalf("ListProjectCanaries after delete: %v", err)
+	}
+	if len(canaries) != 0 {
+		t.Fatalf("expected canary deletion, got %+v", canaries)
+	}
+}
+
 // --- API Keys ---
 
 func TestCreateAPIKeyGeneral(t *testing.T) {

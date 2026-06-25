@@ -109,6 +109,9 @@ type Server struct {
 
 	deltaSchedulerMu     sync.Mutex
 	deltaSchedulerCancel context.CancelFunc
+
+	qualitySchedulerMu     sync.Mutex
+	qualitySchedulerCancel context.CancelFunc
 }
 
 // New creates a new Server.
@@ -174,6 +177,7 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("GET /api/sessions/{id}/links", s.handleLinks)
 	mux.HandleFunc("GET /api/sessions/{id}/internal-links", s.handleInternalLinks)
 	mux.HandleFunc("GET /api/sessions/{id}/stats", s.handleStats)
+	mux.HandleFunc("GET /api/sessions/{id}/quality", s.handleSessionQuality)
 	mux.HandleFunc("GET /api/sessions/{id}/audit", s.handleAudit)
 	mux.HandleFunc("GET /api/sessions/{id}/progress", s.handleProgress)
 	mux.HandleFunc("GET /api/sessions/{id}/events", s.handleSSE)
@@ -267,6 +271,12 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("POST /api/projects/{id}/delta/manual-queue", s.handleProjectDeltaManualQueue)
 	mux.HandleFunc("GET /api/projects/{id}/delta/preview", s.handleProjectDeltaPreview)
 	mux.HandleFunc("POST /api/projects/{id}/delta/run", s.handleProjectDeltaRun)
+	mux.HandleFunc("GET /api/projects/{id}/quality/settings", s.handleProjectQualitySettings)
+	mux.HandleFunc("PUT /api/projects/{id}/quality/settings", s.handleUpdateProjectQualitySettings)
+	mux.HandleFunc("GET /api/projects/{id}/canaries", s.handleProjectCanaries)
+	mux.HandleFunc("POST /api/projects/{id}/canaries", s.handleCreateProjectCanary)
+	mux.HandleFunc("PUT /api/projects/{id}/canaries/{canaryId}", s.handleUpdateProjectCanary)
+	mux.HandleFunc("DELETE /api/projects/{id}/canaries/{canaryId}", s.handleDeleteProjectCanary)
 	mux.HandleFunc("POST /api/projects/{pid}/sessions/{sid}", s.handleAssociateSession)
 	mux.HandleFunc("DELETE /api/projects/{pid}/sessions/{sid}", s.handleDisassociateSession)
 	mux.HandleFunc("PUT /api/sessions/{sid}/label", s.handleRenameSession)
@@ -507,6 +517,7 @@ func (s *Server) Start() error {
 
 	s.startAnnouncer()
 	s.startDeltaScheduler()
+	s.startQualityScheduler()
 
 	handler, err := s.buildHandler()
 	if err != nil {
@@ -545,6 +556,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 	s.announcerMu.Unlock()
 	s.stopDeltaScheduler()
+	s.stopQualityScheduler()
 
 	if s.manager != nil {
 		s.manager.Shutdown(30 * time.Second)

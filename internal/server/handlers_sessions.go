@@ -45,29 +45,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		var resp []map[string]interface{}
-		for _, sess := range sessions {
-			pagesCrawled := sess.PagesCrawled
-			if pages, _, running := s.manager.Progress(sess.ID); running {
-				pagesCrawled = uint64(pages)
-			}
-			resp = append(resp, map[string]interface{}{
-				"ID":           sess.ID,
-				"StartedAt":    sess.StartedAt,
-				"FinishedAt":   sess.FinishedAt,
-				"Status":       sess.Status,
-				"SeedURLs":     sess.SeedURLs,
-				"Config":       config.RedactSensitiveConfigJSON(sess.Config),
-				"PagesCrawled": pagesCrawled,
-				"UserAgent":    sess.UserAgent,
-				"ProjectID":    sess.ProjectID,
-				"is_running":   s.manager.IsRunning(sess.ID),
-				"is_queued":    s.manager.IsQueued(sess.ID),
-			})
-		}
-		if resp == nil {
-			resp = []map[string]interface{}{}
-		}
+		resp := s.sessionListPayload(sessions)
 		writeJSON(w, map[string]interface{}{
 			"sessions": resp,
 			"total":    total,
@@ -162,12 +140,22 @@ func sessionMatchesSearch(sess storage.CrawlSession, search string) bool {
 
 func (s *Server) sessionListPayload(sessions []storage.CrawlSession) []map[string]interface{} {
 	var resp []map[string]interface{}
+	qualityBySession := map[string]storage.CrawlQualityResult{}
+	if qs, ok := s.qualityStore(); ok {
+		sessionIDs := make([]string, 0, len(sessions))
+		for _, sess := range sessions {
+			sessionIDs = append(sessionIDs, sess.ID)
+		}
+		if quality, err := qs.CrawlQualityResultsForSessions(context.Background(), sessionIDs); err == nil {
+			qualityBySession = quality
+		}
+	}
 	for _, sess := range sessions {
 		pagesCrawled := sess.PagesCrawled
 		if pages, _, running := s.manager.Progress(sess.ID); running {
 			pagesCrawled = uint64(pages)
 		}
-		resp = append(resp, map[string]interface{}{
+		item := map[string]interface{}{
 			"ID":           sess.ID,
 			"StartedAt":    sess.StartedAt,
 			"FinishedAt":   sess.FinishedAt,
@@ -180,7 +168,18 @@ func (s *Server) sessionListPayload(sessions []storage.CrawlSession) []map[strin
 			"Label":        sess.Label,
 			"is_running":   s.manager.IsRunning(sess.ID),
 			"is_queued":    s.manager.IsQueued(sess.ID),
-		})
+		}
+		if quality, ok := qualityBySession[sess.ID]; ok {
+			item["quality"] = map[string]interface{}{
+				"status":              quality.Status,
+				"score":               quality.Score,
+				"trusted":             quality.Trusted,
+				"is_full_crawl":       quality.IsFullCrawl,
+				"baseline_session_id": quality.BaselineSessionID,
+				"summary":             quality.Summary,
+			}
+		}
+		resp = append(resp, item)
 	}
 	if resp == nil {
 		resp = []map[string]interface{}{}

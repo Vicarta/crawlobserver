@@ -124,6 +124,60 @@ type PageIssue struct {
 	RenderedImagesCount uint16   `json:"rendered_images_count"`
 }
 
+// CrawlQualityResult is the trust gate outcome for a crawl session.
+type CrawlQualityResult struct {
+	SessionID         string                 `json:"session_id"`
+	ProjectID         string                 `json:"project_id"`
+	BaselineSessionID string                 `json:"baseline_session_id"`
+	Status            string                 `json:"status"` // trusted, warning, untrusted
+	Score             uint8                  `json:"score"`
+	Trusted           bool                   `json:"trusted"`
+	IsFullCrawl       bool                   `json:"is_full_crawl"`
+	Summary           string                 `json:"summary"`
+	Metrics           map[string]interface{} `json:"metrics,omitempty"`
+	EvaluatedAt       time.Time              `json:"evaluated_at"`
+	Findings          []CrawlQualityFinding  `json:"findings,omitempty"`
+}
+
+// CrawlQualityFinding is a single data-quality signal for a crawl session.
+type CrawlQualityFinding struct {
+	SessionID      string    `json:"session_id"`
+	ProjectID      string    `json:"project_id"`
+	Severity       string    `json:"severity"` // info, warning, error
+	FindingType    string    `json:"finding_type"`
+	Message        string    `json:"message"`
+	Metric         string    `json:"metric"`
+	CurrentValue   float64   `json:"current_value"`
+	BaselineValue  float64   `json:"baseline_value"`
+	ThresholdValue float64   `json:"threshold_value"`
+	Blocking       bool      `json:"blocking"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// CrawlQualityMetrics is the aggregate data used by the quality evaluator.
+type CrawlQualityMetrics struct {
+	HTMLPages            uint64
+	InternalLinks        uint64
+	Status404            uint64
+	Noindex              uint64
+	Redirects            uint64
+	CanonicalMismatch    uint64
+	PageRankZeroTopPages uint64
+}
+
+// CanaryPageCheck is the crawled page state used to validate project canaries.
+type CanaryPageCheck struct {
+	Found            bool
+	URL              string
+	FinalURL         string
+	StatusCode       uint16
+	Title            string
+	Canonical        string
+	IsIndexable      bool
+	InternalLinksOut uint32
+	PageRank         float64
+}
+
 // RedirectHopRow represents a redirect hop for storage.
 type RedirectHopRow struct {
 	URL        string
