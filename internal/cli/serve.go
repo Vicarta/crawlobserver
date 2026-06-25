@@ -140,9 +140,9 @@ func runBackupScheduler(ctx context.Context, cfg *config.Config, opts *backup.SQ
 
 	applog.Infof("cli", "Auto-backup enabled: every %s, retaining %d backups in %s", interval, retain, opts.BackupDir)
 
-	// Run first backup shortly after startup
+	// Run first backup shortly after startup, after the app has settled.
 	select {
-	case <-time.After(30 * time.Second):
+	case <-time.After(90 * time.Second):
 	case <-ctx.Done():
 		return
 	}
