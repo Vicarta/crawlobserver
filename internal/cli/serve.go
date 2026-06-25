@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -104,6 +105,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if cfg.Backup.Enabled {
 		go runBackupScheduler(ctx, cfg, sqlBackupOpts, store)
 	}
+	if cfg.Retention.SessionsPerProject > 0 {
+		go runSessionRetentionScheduler(ctx, cfg, store)
+	}
 
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -178,6 +182,101 @@ func performBackup(ctx context.Context, opts *backup.SQLBackupOptions, retain in
 	} else {
 		applog.Info("cli", "Critical table export complete")
 	}
+}
+
+func runSessionRetentionScheduler(ctx context.Context, cfg *config.Config, store *storage.Store) {
+	keep := cfg.Retention.SessionsPerProject
+	if keep < 1 {
+		return
+	}
+
+	interval, err := time.ParseDuration(cfg.Retention.Interval)
+	if err != nil || interval < time.Minute {
+		interval = 15 * time.Minute
+	}
+
+	applog.Infof("cli", "Session retention enabled: keeping %d inactive session(s) per project every %s", keep, interval)
+
+	select {
+	case <-time.After(2 * time.Minute):
+	case <-ctx.Done():
+		return
+	}
+	pruneOldSessions(ctx, store, keep)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			pruneOldSessions(ctx, store, keep)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func pruneOldSessions(ctx context.Context, store *storage.Store, keep int) {
+	if ctx.Err() != nil || keep < 1 {
+		return
+	}
+	sessions, err := store.ListSessions(ctx)
+	if err != nil {
+		applog.Errorf("cli", "Session retention failed to list sessions: %v", err)
+		return
+	}
+	for _, sess := range sessionsToPrune(sessions, keep) {
+		if err := store.DeleteSession(ctx, sess.ID); err != nil {
+			applog.Errorf("cli", "Session retention failed to delete session %s: %v", sess.ID, err)
+			continue
+		}
+		applog.Infof("cli", "Session retention deleted old session %s from project %s", sess.ID, retentionProjectKey(sess))
+	}
+}
+
+func sessionsToPrune(sessions []storage.CrawlSession, keep int) []storage.CrawlSession {
+	if keep < 1 {
+		return nil
+	}
+
+	byProject := make(map[string][]storage.CrawlSession)
+	for _, sess := range sessions {
+		if isActiveSessionStatus(sess.Status) {
+			continue
+		}
+		key := retentionProjectKey(sess)
+		byProject[key] = append(byProject[key], sess)
+	}
+
+	var prune []storage.CrawlSession
+	for _, projectSessions := range byProject {
+		sort.SliceStable(projectSessions, func(i, j int) bool {
+			return projectSessions[i].StartedAt.After(projectSessions[j].StartedAt)
+		})
+		if len(projectSessions) > keep {
+			prune = append(prune, projectSessions[keep:]...)
+		}
+	}
+	sort.SliceStable(prune, func(i, j int) bool {
+		return prune[i].StartedAt.Before(prune[j].StartedAt)
+	})
+	return prune
+}
+
+func isActiveSessionStatus(status string) bool {
+	switch status {
+	case "running", "queued", "stopping":
+		return true
+	default:
+		return false
+	}
+}
+
+func retentionProjectKey(sess storage.CrawlSession) string {
+	if sess.ProjectID == nil || *sess.ProjectID == "" {
+		return "_unassigned"
+	}
+	return *sess.ProjectID
 }
 
 // resolveBackupDir returns the backup directory from config or a default.

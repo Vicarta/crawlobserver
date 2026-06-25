@@ -61,7 +61,12 @@ backup:
   enabled: true
   interval: 6h
   dir: /var/backups/crawlobserver
-  retain: 5
+  retain: 4
+
+retention:
+  # Keep 0 to disable automatic deletion of old crawl sessions.
+  sessions_per_project: 0
+  interval: 15m
 
 telemetry:
   enabled: false

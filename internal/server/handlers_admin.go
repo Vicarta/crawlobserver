@@ -506,8 +506,7 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		} else {
 			applog.Infof("server", "Pre-update backup created: %s", info.Filename)
 		}
-		// Keep only the 5 most recent backups
-		if pruned, _ := backup.PruneBackups(s.BackupOpts.BackupDir, 5); pruned > 0 {
+		if pruned, _ := backup.PruneBackups(s.BackupOpts.BackupDir, s.backupRetain()); pruned > 0 {
 			applog.Infof("server", "Pruned %d old backup(s)", pruned)
 		}
 	}
@@ -565,6 +564,17 @@ func (s *Server) backupDir() string {
 	return ""
 }
 
+func (s *Server) backupRetain() int {
+	retain := s.ExportRetain
+	if retain < 1 && s.cfg != nil {
+		retain = s.cfg.Backup.Retain
+	}
+	if retain < 1 {
+		return 5
+	}
+	return retain
+}
+
 func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 	if !requireFullAccess(w, r) {
 		return
@@ -578,7 +588,7 @@ func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 			internalError(w, r, err)
 			return
 		}
-		if pruned, _ := backup.PruneBackups(s.SQLBackupOpts.BackupDir, 5); pruned > 0 {
+		if pruned, _ := backup.PruneBackups(s.SQLBackupOpts.BackupDir, s.backupRetain()); pruned > 0 {
 			applog.Infof("server", "Pruned %d old backup(s)", pruned)
 		}
 		w.WriteHeader(http.StatusCreated)
@@ -611,7 +621,7 @@ func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if pruned, _ := backup.PruneBackups(s.BackupOpts.BackupDir, 5); pruned > 0 {
+	if pruned, _ := backup.PruneBackups(s.BackupOpts.BackupDir, s.backupRetain()); pruned > 0 {
 		applog.Infof("server", "Pruned %d old backup(s)", pruned)
 	}
 

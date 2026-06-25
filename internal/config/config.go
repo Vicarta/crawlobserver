@@ -23,6 +23,7 @@ type Config struct {
 	GSC           GSCConfig           `mapstructure:"gsc"`
 	Interlinking  InterlinkingConfig  `mapstructure:"interlinking"`
 	Backup        BackupConfig        `mapstructure:"backup"`
+	Retention     RetentionConfig     `mapstructure:"retention"`
 	Telemetry     TelemetryConfig     `mapstructure:"telemetry"`
 	Announcements AnnouncementsConfig `mapstructure:"announcements"`
 	SetupComplete bool                `mapstructure:"setup_complete"`
@@ -195,6 +196,11 @@ type BackupConfig struct {
 	Retain   int    `mapstructure:"retain"`   // number of backups to keep
 }
 
+type RetentionConfig struct {
+	SessionsPerProject int    `mapstructure:"sessions_per_project"` // 0 = disabled
+	Interval           string `mapstructure:"interval"`             // duration string; default 15m when sessions_per_project > 0
+}
+
 func SetDefaults() {
 	viper.SetDefault("crawler.workers", 10)
 	viper.SetDefault("crawler.delay", "1s")
@@ -272,7 +278,10 @@ func SetDefaults() {
 	viper.SetDefault("backup.enabled", true)
 	viper.SetDefault("backup.interval", "6h")
 	viper.SetDefault("backup.dir", "")
-	viper.SetDefault("backup.retain", 5)
+	viper.SetDefault("backup.retain", 4)
+
+	viper.SetDefault("retention.sessions_per_project", 0)
+	viper.SetDefault("retention.interval", "15m")
 
 	viper.SetDefault("telemetry.enabled", false)
 	viper.SetDefault("telemetry.instance_id", "")
