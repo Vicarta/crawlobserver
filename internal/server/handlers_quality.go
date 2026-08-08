@@ -50,7 +50,10 @@ func (s *Server) qualityStore() (qualityStorage, bool) {
 
 type currentSnapshotStorage interface {
 	GetProjectCurrentSnapshot(ctx context.Context, projectID string) (*storage.ProjectCurrentSnapshot, error)
+	GetProjectCurrentSnapshotRevision(ctx context.Context, projectID string, snapshotRevision uint64) (*storage.ProjectCurrentSnapshot, error)
+	CanPromoteCurrentSnapshotSource(ctx context.Context, projectID, candidateSessionID string) (bool, *storage.ProjectCurrentSnapshot, error)
 	ValidateProjectCurrentSnapshotBinding(ctx context.Context, snap storage.ProjectCurrentSnapshot) (*storage.CrawlQualityResult, *storage.PageRankEvidence, error)
+	ValidateProjectCurrentSnapshotHistoricalBinding(ctx context.Context, snap storage.ProjectCurrentSnapshot) (*storage.CrawlQualityResult, *storage.PageRankEvidence, error)
 	InitializeProjectCurrentSnapshot(ctx context.Context, projectID, baselineSessionID string, binding storage.CrawlQualityPromotionEvent) (*storage.ProjectCurrentSnapshot, error)
 	PromoteDeltaToCurrentSnapshot(ctx context.Context, projectID, deltaSessionID, baselineSessionID string, maxDeltas, foldIntervalDays int, opts storage.PageRankOptions, binding storage.CrawlQualityPromotionEvent) (*storage.ProjectCurrentSnapshot, error)
 }
@@ -531,6 +534,10 @@ func (s *Server) handleProjectCurrentSnapshot(w http.ResponseWriter, r *http.Req
 	}
 	snap, err := cs.GetProjectCurrentSnapshot(r.Context(), projectID)
 	if err != nil {
+		if errors.Is(err, storage.ErrCurrentSnapshotBindingConflict) {
+			writeCurrentSnapshotBindingConflict(w, "current_snapshot_binding_incomplete", nil, nil, nil)
+			return
+		}
 		if isNotFoundErr(err) {
 			snap, err = s.initializeCurrentSnapshotFromTrustedBaseline(r.Context(), projectID, cs)
 			if err != nil {
@@ -858,9 +865,11 @@ func (s *Server) evaluateSessionQualityResult(ctx context.Context, sess storage.
 		result.IsFullCrawl = false
 		result.Metrics["pages_crawled"] = sess.PagesCrawled
 		result.Metrics["planned_pages"] = crawlConfigDeltaPlannedPages(sess.Config)
-		if plan := crawlConfigDeltaPlan(sess.Config); plan != nil {
+		plan := crawlConfigDeltaPlan(sess.Config)
+		if plan != nil {
 			addDeltaPlanMetrics(result.Metrics, plan)
 		}
+		result.Findings = append(result.Findings, s.bindDeltaQualityBaseline(ctx, qs, sess, projectID, plan, &result, now)...)
 		current, err := qs.CrawlQualityMetrics(ctx, sess.ID, settings.PageRankTopN)
 		if err != nil {
 			result.Findings = append(result.Findings, qualityFinding(sess.ID, projectID, "error", "delta_metrics_unavailable", "Daily Delta quality metrics could not be loaded.", "delta_metrics", 0, 1, 1, true, now))
@@ -1107,9 +1116,25 @@ func (s *Server) reconcileCurrentSnapshotPromotion(ctx context.Context, qs quali
 		event.Detail = "PageRank evidence changed before promotion"
 		return recordQualityPromotion(ctx, qs, event)
 	}
+	canPromote, _, promotionGuardErr := cs.CanPromoteCurrentSnapshotSource(ctx, projectID, sess.ID)
+	legacyFullRecovery := result.IsFullCrawl && errors.Is(promotionGuardErr, storage.ErrCurrentSnapshotBindingConflict)
+	if (promotionGuardErr != nil && !legacyFullRecovery) || (!canPromote && !legacyFullRecovery) {
+		event.Status = "conflict"
+		event.Detail = "current snapshot authority could not be verified"
+		if errors.Is(promotionGuardErr, storage.ErrCurrentSnapshotSourceSuperseded) || (promotionGuardErr == nil && !canPromote) {
+			event.Status = "superseded"
+			event.Detail = "newer crawl content is already authoritative for the project current snapshot"
+		}
+		return recordQualityPromotion(ctx, qs, event)
+	}
 	if latest, latestErr := qs.LatestQualityPromotionEvent(ctx, projectID, sess.ID); latestErr == nil && latest != nil &&
-		latest.Status == "applied" && latest.EvaluationRevision == result.EvaluationRevision && latest.PageRankEvidenceRevision == evidence.AttemptID {
-		return false, latest, nil
+		latest.EvaluationRevision == result.EvaluationRevision && latest.PageRankEvidenceRevision == evidence.AttemptID {
+		if latest.Status == "applied" {
+			return false, latest, nil
+		}
+		if latest.Status == "started" && latest.PromotionID != "" {
+			event.PromotionID = latest.PromotionID
+		}
 	}
 	event.Status = "started"
 	event.OccurredAt = time.Now().UTC()
@@ -1121,11 +1146,6 @@ func (s *Server) reconcileCurrentSnapshotPromotion(ctx context.Context, qs quali
 		_, err = cs.InitializeProjectCurrentSnapshot(ctx, projectID, sess.ID, event)
 	} else {
 		baselineID := result.BaselineSessionID
-		if baselineID == "" {
-			if snap, snapErr := cs.GetProjectCurrentSnapshot(ctx, projectID); snapErr == nil {
-				baselineID = snap.BaselineSessionID
-			}
-		}
 		settings, settingsErr := s.keyStore.GetProjectDeltaSettings(projectID)
 		if settingsErr != nil {
 			err = settingsErr
@@ -1138,13 +1158,18 @@ func (s *Server) reconcileCurrentSnapshotPromotion(ctx context.Context, qs quali
 	}
 	if err != nil {
 		event.Status = "failed"
+		if errors.Is(err, storage.ErrCurrentSnapshotSourceSuperseded) {
+			event.Status = "superseded"
+		}
 		event.OccurredAt = time.Now().UTC()
 		event.Detail = sanitizeQualityAuditDetail(err.Error())
 		changed, failed, recordErr := recordQualityPromotion(ctx, qs, event)
 		if recordErr != nil {
 			return false, failed, recordErr
 		}
-		applog.Warnf("server", "quality promotion failed for session %s: %v", sess.ID, err)
+		if event.Status == "failed" {
+			applog.Warnf("server", "quality promotion failed for session %s: %v", sess.ID, err)
+		}
 		return changed, failed, nil
 	}
 	current, qualityErr := qs.GetCrawlQualityResult(ctx, sess.ID)
@@ -1159,6 +1184,47 @@ func (s *Server) reconcileCurrentSnapshotPromotion(ctx context.Context, qs quali
 	event.OccurredAt = time.Now().UTC()
 	event.Detail = "current snapshot promotion applied"
 	return recordQualityPromotion(ctx, qs, event)
+}
+
+func (s *Server) bindDeltaQualityBaseline(ctx context.Context, qs qualityStorage, sess storage.CrawlSession, projectID string, plan *config.DeltaPlanConfig, result *storage.CrawlQualityResult, now time.Time) []storage.CrawlQualityFinding {
+	stale := func(detail string) []storage.CrawlQualityFinding {
+		result.Metrics["delta_baseline_lineage_error"] = detail
+		return []storage.CrawlQualityFinding{qualityFinding(
+			sess.ID, projectID, "error", "stale_delta_baseline",
+			"Daily Delta baseline lineage changed after planning; create a new Delta plan before promotion.",
+			"delta_baseline_lineage", 0, 1, 1, true, now,
+		)}
+	}
+	if plan == nil || plan.BaselineSessionID == "" || plan.BaselineSourceSessionID == "" ||
+		plan.BaselineEvaluationRevision == "" || plan.BaselineSourceEvaluationRevision == "" || plan.BaselineSnapshotRevision == 0 ||
+		plan.BaselineContentWatermarkSessionID == "" {
+		return stale("delta plan lineage is incomplete")
+	}
+	cs, ok := s.currentSnapshotStore()
+	if !ok {
+		return stale("current snapshot storage unavailable")
+	}
+	snap, err := cs.GetProjectCurrentSnapshotRevision(ctx, projectID, plan.BaselineSnapshotRevision)
+	if err != nil || snap.CurrentSessionID != plan.BaselineSessionID ||
+		snap.SourceSessionID != plan.BaselineSourceSessionID ||
+		snap.SnapshotRevision != plan.BaselineSnapshotRevision ||
+		snap.ContentWatermarkSessionID != plan.BaselineContentWatermarkSessionID {
+		return stale("current snapshot lineage no longer matches delta plan")
+	}
+	historicalQuality, _, err := cs.ValidateProjectCurrentSnapshotHistoricalBinding(ctx, *snap)
+	if err != nil || historicalQuality == nil || historicalQuality.EvaluationRevision != plan.BaselineEvaluationRevision ||
+		historicalQuality.EvaluationRevision != snap.QualityEvaluationRevision ||
+		snap.QualityBaselineSessionID != plan.BaselineSourceSessionID ||
+		snap.BaselineQualityEvaluationRevision != plan.BaselineSourceEvaluationRevision {
+		return stale("immutable current snapshot binding is unavailable")
+	}
+	source, err := s.store.GetSession(ctx, plan.BaselineSourceSessionID)
+	if err != nil || source.ProjectID == nil || *source.ProjectID != projectID || !isFullCrawlSession(*source) {
+		return stale("raw full-crawl source is unavailable")
+	}
+	result.BaselineSessionID = plan.BaselineSourceSessionID
+	result.BaselineEvaluationRevision = plan.BaselineSourceEvaluationRevision
+	return nil
 }
 
 func recordQualityPromotion(ctx context.Context, qs qualityStorage, event storage.CrawlQualityPromotionEvent) (bool, *storage.CrawlQualityPromotionEvent, error) {
@@ -1359,6 +1425,12 @@ func crawlConfigDeltaPlan(configJSON string) *config.DeltaPlanConfig {
 }
 
 func addDeltaPlanMetrics(metrics map[string]interface{}, plan *config.DeltaPlanConfig) {
+	metrics["baseline_session_id"] = plan.BaselineSessionID
+	metrics["baseline_source_session_id"] = plan.BaselineSourceSessionID
+	metrics["baseline_evaluation_revision"] = plan.BaselineEvaluationRevision
+	metrics["baseline_source_evaluation_revision"] = plan.BaselineSourceEvaluationRevision
+	metrics["baseline_snapshot_revision"] = plan.BaselineSnapshotRevision
+	metrics["baseline_content_watermark_session_id"] = plan.BaselineContentWatermarkSessionID
 	metrics["candidate_total"] = plan.TotalCandidates
 	metrics["launched_candidates"] = plan.LaunchedCandidates
 	metrics["deferred_candidates"] = plan.DeferredCandidates

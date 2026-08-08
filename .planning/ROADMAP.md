@@ -338,6 +338,10 @@ evidence so stale or pre-finalization quality facts cannot be published.
   trusted quality result evaluated from the currently finalized PageRank
   evidence revision, records the bound evaluation/evidence/rules/baseline
   revisions, and retries promotion independently without duplicating quality.
+- **SNAP-251-02:** Historical quality uses the latest trusted full crawl
+  strictly older by `(started_at, session_id)`. Current Snapshot persists a
+  full-crawl source plus latest-content watermark; older full/delta replay is
+  recorded as `superseded` and cannot mutate or move the authoritative pointer.
 - **API-251-01:** Provide an admin-only, session-authorized, synchronous and
   idempotent quality re-evaluation endpoint with durable GET readback; it must
   repair already-completed sessions without a new crawl or PageRank recompute.
@@ -346,13 +350,15 @@ evidence so stale or pre-finalization quality facts cannot be published.
   action without hiding the current finding history.
 - **TEST-251-01:** Cover initial finalization ordering, mutation visibility,
   shared predicates, JS/non-JS sessions, stale positive/negative replacement,
-  scheduler replay/restart, API authorization/idempotency, and UI provenance.
-- **DEPLOY-251-01:** Update ProductFeatures and rollout only the app through the
-  active-crawl safe gate, then verify the exact Gerus session and ClickHouse
-  continuity without rewriting historical page rows.
+  scheduler replay/restart fixed-point convergence, monotonic full/delta
+  promotion across fold/restart, API authorization/idempotency, and UI provenance.
+- **DEPLOY-251-01:** Update ProductFeatures, enforce a shared-state single-writer
+  lock, and rollout only the app through the active-crawl safe gate without
+  overlapping app and migration writers; then verify the exact Gerus session
+  and ClickHouse continuity without rewriting historical page rows.
 
 **Covers:** PRQ-251-01, PRQ-251-02, PRQ-251-03, QUAL-251-01, QUAL-251-02,
-SNAP-251-01, API-251-01, UI-251-01, TEST-251-01, DEPLOY-251-01
+SNAP-251-01, SNAP-251-02, API-251-01, UI-251-01, TEST-251-01, DEPLOY-251-01
 **Depends on:** Phase 25
 **Plans:** 3 plans
 

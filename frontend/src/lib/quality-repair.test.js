@@ -17,6 +17,7 @@ describe('qualityRepairOutcome', () => {
     ],
     [{ promotion: { status: 'rejected' } }, 'quality.promotionRejected', 'error'],
     [{ promotion: { status: 'conflict' } }, 'quality.promotionConflict', 'conflict'],
+    [{ promotion: { status: 'superseded' } }, 'quality.promotionSuperseded', 'conflict'],
   ])('maps %o to a typed outcome', (response, messageKey, state) => {
     expect(qualityRepairOutcome(response)).toEqual({ messageKey, state });
   });

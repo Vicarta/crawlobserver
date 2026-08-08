@@ -53,20 +53,20 @@ func init() {
 }
 
 func runGUI(cmd *cobra.Command, args []string) error {
-	// Ensure data directory exists for GUI mode (macOS launches .app with cwd=/)
-	dataDir, err := appDataDir()
+	// Point viper to the writable app config before acquiring the writer lock.
+	// Its parent is created by the lock helper only after the lock is acquired.
+	dataDir, err := config.DefaultDataDir()
 	if err != nil {
-		return fmt.Errorf("creating data directory: %w", err)
+		return fmt.Errorf("resolving data directory: %w", err)
 	}
-
-	// Point viper to writable config in app data dir (cwd is / in .app bundles)
 	viper.SetConfigFile(filepath.Join(dataDir, "config.yaml"))
 	_ = viper.ReadInConfig()
 
-	cfg, err := config.Load()
+	cfg, releaseWriterLock, err := loadWriterConfig()
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return err
 	}
+	defer releaseWriterLock()
 
 	telemetry.Init(cfg.Telemetry.Enabled, cfg.Telemetry.InstanceID, updater.Version)
 	defer telemetry.Close()

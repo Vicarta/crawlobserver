@@ -5,7 +5,9 @@ cd "$(dirname "$0")"
 
 ENV_FILE="${ENV_FILE:-.env}"
 SERVICE="${SERVICE:-app}"
-RUN_MIGRATIONS="${RUN_MIGRATIONS:-1}"
+# The app's `serve` startup performs schema migration while holding the writer
+# lock. An explicit tool-container migration is only needed for maintenance.
+RUN_MIGRATIONS="${RUN_MIGRATIONS:-0}"
 IMAGE="${1:-${CRAWLOBSERVER_IMAGE:-}}"
 PREVIOUS_IMAGE_FILE="${PREVIOUS_IMAGE_FILE:-.previous-app-image}"
 
@@ -80,13 +82,23 @@ else
   echo "Skipping pull for local image: ${IMAGE:-crawlobserver local fallback}"
 fi
 
+# A deployment can recreate the app container, which would interrupt an active
+# crawl. Always use the no-FORCE safety gate before stopping or starting it.
+echo "Checking whether the app can be safely restarted"
+FORCE=0 CHECK_ONLY=1 APP_SERVICE="$SERVICE" ./restart-app-safe.sh
+
 if [ "$RUN_MIGRATIONS" = "1" ]; then
+  echo "Stopping only $SERVICE before the explicit migration"
+  compose stop "$SERVICE"
   echo "Running migrations with the app image"
-  compose --profile tools run --rm --no-deps migrate
+  if ! compose --profile tools run --rm --no-deps migrate; then
+    echo "Migration failed; $SERVICE remains stopped. Resolve the migration error before starting the app." >&2
+    exit 1
+  fi
 fi
 
-echo "Starting only $SERVICE"
-compose up -d --no-deps "$SERVICE"
+echo "Safely starting only $SERVICE"
+FORCE=0 APP_SERVICE="$SERVICE" ./restart-app-safe.sh
 
 echo "Checking health: $HEALTH_URL"
 i=1

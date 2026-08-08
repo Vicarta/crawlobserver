@@ -2,12 +2,14 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
 	"time"
 
 	"github.com/SEObserver/crawlobserver/internal/applog"
+	"github.com/SEObserver/crawlobserver/internal/config"
 )
 
 // InsertSession inserts or updates a crawl session.
@@ -72,17 +74,27 @@ func (s *Store) RetentionProtectedSessionIDs(ctx context.Context) (map[string]st
 	}
 
 	rows, err := s.conn.Query(ctx, `
-		SELECT toString(current_session_id), baseline_session_id, last_delta_session_id
-		FROM crawlobserver.project_current_snapshots FINAL`)
+		SELECT project_id, toString(source_session_id), toString(content_watermark_session_id),
+			toString(current_session_id), baseline_session_id, last_delta_session_id
+		FROM crawlobserver.project_current_snapshot_promotions_v2 FINAL
+		ORDER BY project_id, content_watermark_started_at DESC, toString(content_watermark_session_id) DESC,
+			snapshot_revision DESC, updated_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("querying protected current snapshots: %w", err)
 	}
+	var seenProjects = map[string]struct{}{}
 	for rows.Next() {
-		var currentID, baselineID, lastDeltaID string
-		if err := rows.Scan(&currentID, &baselineID, &lastDeltaID); err != nil {
+		var projectID, sourceID, watermarkID, currentID, baselineID, lastDeltaID string
+		if err := rows.Scan(&projectID, &sourceID, &watermarkID, &currentID, &baselineID, &lastDeltaID); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scanning protected current snapshots: %w", err)
 		}
+		if _, seen := seenProjects[projectID]; seen {
+			continue
+		}
+		seenProjects[projectID] = struct{}{}
+		add(sourceID)
+		add(watermarkID)
 		add(currentID)
 		add(baselineID)
 		add(lastDeltaID)
@@ -297,6 +309,7 @@ func (s *Store) deleteSession(ctx context.Context, sessionID string, allowSnapsh
 		"crawl_quality_evaluation_findings",
 		"crawl_quality_promotion_events",
 		"crawl_quality_action_events",
+		"pagerank_evidence",
 	}
 	for _, table := range dataTables {
 		q := fmt.Sprintf("ALTER TABLE crawlobserver.%s DROP PARTITION ?", table)
@@ -329,6 +342,13 @@ func (s *Store) isSessionSnapshotProtected(ctx context.Context, sessionID string
 			return true, label, nil
 		}
 	}
+	planProtected, err := s.isCurrentSnapshotDeltaPlanPredecessor(ctx, sessionID)
+	if err != nil {
+		return false, "", err
+	}
+	if planProtected {
+		return true, "current_snapshot_delta_plan_predecessor", nil
+	}
 
 	var currentRefs uint64
 	if err := s.conn.QueryRow(ctx, `
@@ -343,6 +363,27 @@ func (s *Store) isSessionSnapshotProtected(ctx context.Context, sessionID string
 	}
 	if currentRefs > 0 {
 		return true, "project_current_snapshots", nil
+	}
+	if err := s.conn.QueryRow(ctx, `
+		SELECT count()
+		FROM (
+			SELECT source_session_id, content_watermark_session_id, current_session_id, baseline_session_id, last_delta_session_id
+			FROM crawlobserver.project_current_snapshot_promotions_v2 FINAL
+			ORDER BY project_id, content_watermark_started_at DESC, toString(content_watermark_session_id) DESC,
+				snapshot_revision DESC, updated_at DESC
+			LIMIT 1 BY project_id
+		)
+		WHERE toString(source_session_id) = ?
+		   OR toString(content_watermark_session_id) = ?
+		   OR toString(current_session_id) = ?
+		   OR baseline_session_id = ?
+		   OR last_delta_session_id = ?`,
+		sessionID, sessionID, sessionID, sessionID, sessionID,
+	).Scan(&currentRefs); err != nil {
+		return false, "", fmt.Errorf("checking current snapshot promotion references: %w", err)
+	}
+	if currentRefs > 0 {
+		return true, "project_current_snapshot_promotions_v2", nil
 	}
 
 	var deltaRefs uint64
@@ -359,6 +400,39 @@ func (s *Store) isSessionSnapshotProtected(ctx context.Context, sessionID string
 		return true, "project_current_snapshot_deltas", nil
 	}
 	return false, "", nil
+}
+
+// The predecessor raw session can already be pruned, so protection is derived
+// from the live D2 DeltaPlan and journal rather than session-label heuristics.
+func (s *Store) isCurrentSnapshotDeltaPlanPredecessor(ctx context.Context, sessionID string) (bool, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT toString(content_watermark_session_id)
+		FROM crawlobserver.project_current_snapshot_promotions_v2 FINAL
+		ORDER BY project_id, content_watermark_started_at DESC, toString(content_watermark_session_id) DESC,
+			snapshot_revision DESC, updated_at DESC
+		LIMIT 1 BY project_id`)
+	if err != nil {
+		return false, fmt.Errorf("querying current delta plan predecessors: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var watermarkID string
+		if err := rows.Scan(&watermarkID); err != nil {
+			return false, err
+		}
+		watermark, err := s.GetSession(ctx, watermarkID)
+		if err != nil {
+			continue
+		}
+		var cfg config.Config
+		if err := json.Unmarshal([]byte(watermark.Config), &cfg); err != nil {
+			return false, fmt.Errorf("decoding current delta plan predecessor: %w", err)
+		}
+		if cfg.Crawler.DeltaPlan != nil && cfg.Crawler.DeltaPlan.BaselineContentWatermarkSessionID == sessionID {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // PageRankEntry holds a URL and its PageRank score.

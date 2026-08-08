@@ -376,6 +376,7 @@
   "quality.promotionFailed": "Quality was published, but Current Snapshot promotion failed.",
   "quality.promotionRejected": "Quality was evaluated, but Current Snapshot promotion was rejected.",
   "quality.promotionConflict": "Quality was published, but Current Snapshot promotion found newer provenance and was not applied.",
+  "quality.promotionSuperseded": "Quality was evaluated, but a newer crawl is already authoritative for Current Snapshot.",
   "quality.history": "Evaluation history ({count})",
   "settings.title": "Settings",
   "settings.appName": "App Name",

@@ -57,6 +57,12 @@ type mockStore struct {
 	sitemaps             []storage.SitemapRow
 	sitemapURLs          []storage.SitemapURLRow
 	deltaSitemapURLs     []string
+	deltaProblemURLs     []string
+	deltaProblemEntered  chan struct{}
+	deltaProblemRelease  chan struct{}
+	orphanCandidates     []storage.Orphan404CleanupCandidate
+	pagerankEntered      chan struct{}
+	pagerankRelease      chan struct{}
 	urlsByHost           map[string][]string // host prefix -> URLs
 	compareStatsResult   *storage.CompareStatsResult
 	comparePagesResult   *storage.PageDiffResult
@@ -199,7 +205,7 @@ func (m *mockStore) DeletePagesAndReferences(_ context.Context, _ string, urls [
 }
 
 func (m *mockStore) ListOrphan404CleanupCandidates(_ context.Context, _ string, _ time.Time, _ int) ([]storage.Orphan404CleanupCandidate, error) {
-	return nil, m.err
+	return append([]storage.Orphan404CleanupCandidate(nil), m.orphanCandidates...), m.err
 }
 
 func (m *mockStore) ExternalLinksPaginated(_ context.Context, _ string, _, _ int, _ []storage.ParsedFilter, _ *storage.SortParam) ([]storage.LinkRow, error) {
@@ -293,6 +299,16 @@ func (m *mockStore) ComputePageRank(_ context.Context, _ string) error {
 }
 
 func (m *mockStore) ComputePageRankWithOptions(_ context.Context, _ string, _ storage.PageRankOptions) error {
+	if m.pagerankEntered != nil {
+		select {
+		case <-m.pagerankEntered:
+		default:
+			close(m.pagerankEntered)
+		}
+	}
+	if m.pagerankRelease != nil {
+		<-m.pagerankRelease
+	}
 	return m.err
 }
 
@@ -422,7 +438,17 @@ func (m *mockStore) DeltaSitemapCandidateURLs(_ context.Context, _ string, _ int
 }
 
 func (m *mockStore) DeltaProblemPageURLs(_ context.Context, _ string, _ int) ([]string, error) {
-	return []string{}, m.err
+	if m.deltaProblemEntered != nil {
+		select {
+		case <-m.deltaProblemEntered:
+		default:
+			close(m.deltaProblemEntered)
+		}
+	}
+	if m.deltaProblemRelease != nil {
+		<-m.deltaProblemRelease
+	}
+	return append([]string(nil), m.deltaProblemURLs...), m.err
 }
 
 func (m *mockStore) DeltaStalePageURLs(_ context.Context, _ string, _ time.Time, _ int) ([]string, error) {

@@ -312,6 +312,9 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	lock := qualityPromotionLock(id)
+	lock.Lock()
+	defer lock.Unlock()
 	if err := s.deleteProjectCurrentSnapshot(r.Context(), id); err != nil {
 		internalError(w, r, err)
 		return
@@ -328,6 +331,9 @@ func (s *Server) handleDeleteProjectWithSessions(w http.ResponseWriter, r *http.
 		return
 	}
 	id := r.PathValue("id")
+	lock := qualityPromotionLock(id)
+	lock.Lock()
+	defer lock.Unlock()
 	if err := s.deleteProjectCurrentSnapshot(r.Context(), id); err != nil {
 		internalError(w, r, err)
 		return

@@ -82,16 +82,21 @@ type CrawlerConfig struct {
 }
 
 type DeltaPlanConfig struct {
-	BaselineSessionID       string               `json:"baseline_session_id" mapstructure:"baseline_session_id"`
-	TotalCandidates         int                  `json:"total_candidates" mapstructure:"total_candidates"`
-	LaunchedCandidates      int                  `json:"launched_candidates" mapstructure:"launched_candidates"`
-	DeferredCandidates      int                  `json:"deferred_candidates" mapstructure:"deferred_candidates"`
-	LaunchLimit             int                  `json:"launch_limit" mapstructure:"launch_limit"`
-	SourceCounts            map[string]int       `json:"source_counts" mapstructure:"source_counts"`
-	BaselineSitemapURLCount int                  `json:"baseline_sitemap_url_count" mapstructure:"baseline_sitemap_url_count"`
-	LaunchedURLs            []string             `json:"launched_urls,omitempty" mapstructure:"launched_urls"`
-	CandidateSources        map[string][]string  `json:"candidate_sources,omitempty" mapstructure:"candidate_sources"`
-	SitemapRefresh          *DeltaSitemapRefresh `json:"sitemap_refresh,omitempty" mapstructure:"sitemap_refresh"`
+	BaselineSessionID                 string               `json:"baseline_session_id" mapstructure:"baseline_session_id"`
+	BaselineSourceSessionID           string               `json:"baseline_source_session_id" mapstructure:"baseline_source_session_id"`
+	BaselineEvaluationRevision        string               `json:"baseline_evaluation_revision" mapstructure:"baseline_evaluation_revision"`
+	BaselineSourceEvaluationRevision  string               `json:"baseline_source_evaluation_revision" mapstructure:"baseline_source_evaluation_revision"`
+	BaselineSnapshotRevision          uint64               `json:"baseline_snapshot_revision" mapstructure:"baseline_snapshot_revision"`
+	BaselineContentWatermarkSessionID string               `json:"baseline_content_watermark_session_id" mapstructure:"baseline_content_watermark_session_id"`
+	TotalCandidates                   int                  `json:"total_candidates" mapstructure:"total_candidates"`
+	LaunchedCandidates                int                  `json:"launched_candidates" mapstructure:"launched_candidates"`
+	DeferredCandidates                int                  `json:"deferred_candidates" mapstructure:"deferred_candidates"`
+	LaunchLimit                       int                  `json:"launch_limit" mapstructure:"launch_limit"`
+	SourceCounts                      map[string]int       `json:"source_counts" mapstructure:"source_counts"`
+	BaselineSitemapURLCount           int                  `json:"baseline_sitemap_url_count" mapstructure:"baseline_sitemap_url_count"`
+	LaunchedURLs                      []string             `json:"launched_urls,omitempty" mapstructure:"launched_urls"`
+	CandidateSources                  map[string][]string  `json:"candidate_sources,omitempty" mapstructure:"candidate_sources"`
+	SitemapRefresh                    *DeltaSitemapRefresh `json:"sitemap_refresh,omitempty" mapstructure:"sitemap_refresh"`
 }
 
 // DeltaSitemapRefresh records the sitemap provenance used to build a Delta
@@ -471,6 +476,25 @@ func DefaultDataDir() (string, error) {
 	default:
 		return filepath.Join(home, ".local", "share", "crawlobserver"), nil
 	}
+}
+
+// WriterStateDir resolves the directory shared by state-mutating commands
+// without creating files or changing configuration. Callers use it to take the
+// process writer lock before Load performs first-run persistence or legacy
+// SQLite recovery.
+func WriterStateDir() (string, error) {
+	sqlitePath := viper.GetString("server.sqlite_path")
+	if sqlitePath == "" {
+		sqlitePath = "crawlobserver.db"
+	}
+	if filepath.IsAbs(sqlitePath) {
+		return filepath.Dir(sqlitePath), nil
+	}
+	dataDir, err := DefaultDataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(filepath.Join(dataDir, sqlitePath)), nil
 }
 
 func validate(cfg *Config) error {

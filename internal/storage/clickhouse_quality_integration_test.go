@@ -4,6 +4,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"testing"
@@ -201,26 +202,40 @@ func TestProjectCurrentSnapshotSequenceSurvivesSameMillisecondCompactionAndResta
 	ctx := context.Background()
 	projectID := "snapshot-sequence-" + uuid.NewString()
 	t.Cleanup(func() {
-		if err := s.conn.Exec(ctx, `ALTER TABLE crawlobserver.project_current_snapshots DELETE WHERE project_id = ? SETTINGS mutations_sync = 1`, projectID); err != nil {
-			t.Logf("cleanup current snapshot: %v", err)
+		for _, table := range []string{"project_current_snapshots", "project_current_snapshot_promotions_v2"} {
+			if err := s.conn.Exec(ctx, `ALTER TABLE crawlobserver.`+table+` DELETE WHERE project_id = ? SETTINGS mutations_sync = 1`, projectID); err != nil {
+				t.Logf("cleanup %s: %v", table, err)
+			}
 		}
 	})
 	sameMillisecond := time.Now().UTC().Add(time.Minute).Truncate(time.Millisecond)
 	first := ProjectCurrentSnapshot{
-		ProjectID: projectID, CurrentSessionID: uuid.NewString(), BaselineSessionID: uuid.NewString(),
+		ProjectID: projectID, SourceSessionID: "11111111-1111-4111-8111-111111111111", SourceStartedAt: sameMillisecond,
+		ContentWatermarkSessionID: "11111111-1111-4111-8111-111111111111", ContentWatermarkStartedAt: sameMillisecond,
+		CurrentSessionID: "11111111-1111-4111-8111-111111111112", BaselineSessionID: uuid.NewString(),
 		BaselineCreatedAt: sameMillisecond, UpdatedAt: sameMillisecond,
 	}
 	if err := s.upsertProjectCurrentSnapshot(ctx, &first); err != nil {
 		t.Fatalf("insert first snapshot pointer: %v", err)
 	}
 	second := first
-	second.CurrentSessionID = uuid.NewString()
+	second.CurrentSessionID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	second.ContentWatermarkSessionID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
 	second.UpdatedAt = sameMillisecond.Add(500 * time.Microsecond)
 	if err := s.upsertProjectCurrentSnapshot(ctx, &second); err != nil {
 		t.Fatalf("insert second snapshot pointer: %v", err)
 	}
-	if err := s.conn.Exec(ctx, `OPTIMIZE TABLE crawlobserver.project_current_snapshots FINAL`); err != nil {
-		t.Fatalf("compact current snapshot pointers: %v", err)
+	// A late historical promotion receives a newer write timestamp/revision, but
+	// its lower source tuple must remain unreadable after FINAL compaction.
+	lateHistorical := first
+	lateHistorical.CurrentSessionID = "00000000-0000-4000-8000-000000000001"
+	lateHistorical.ContentWatermarkSessionID = "00000000-0000-4000-8000-000000000001"
+	lateHistorical.UpdatedAt = sameMillisecond.Add(time.Second)
+	if err := s.upsertProjectCurrentSnapshot(ctx, &lateHistorical); err != nil {
+		t.Fatalf("insert late historical snapshot pointer: %v", err)
+	}
+	if err := s.conn.Exec(ctx, `OPTIMIZE TABLE crawlobserver.project_current_snapshot_promotions_v2 FINAL`); err != nil {
+		t.Fatalf("compact current snapshot promotion journal: %v", err)
 	}
 
 	restarted := &Store{conn: s.conn}
@@ -231,8 +246,152 @@ func TestProjectCurrentSnapshotSequenceSurvivesSameMillisecondCompactionAndResta
 	if latest.CurrentSessionID != second.CurrentSessionID || latest.SnapshotRevision != 2 {
 		t.Fatalf("current snapshot = %#v, want second pointer revision 2", latest)
 	}
+	revision, err := restarted.GetProjectCurrentSnapshotRevision(ctx, projectID, second.SnapshotRevision)
+	if err != nil || revision.CurrentSessionID != second.CurrentSessionID || revision.ContentWatermarkSessionID != second.ContentWatermarkSessionID {
+		t.Fatalf("restart journal revision = %#v err=%v, want second pointer", revision, err)
+	}
 	if !latest.UpdatedAt.After(sameMillisecond) {
 		t.Fatalf("current snapshot version timestamp %s must advance beyond %s", latest.UpdatedAt, sameMillisecond)
+	}
+}
+
+func TestProjectCurrentSnapshotPromotionsV2MigratesOldJournalRevisions(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := "snapshot-v2-upgrade-" + uuid.NewString()
+	sourceID, watermarkID, currentID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	t.Cleanup(func() {
+		for _, table := range []string{"project_current_snapshot_promotions", "project_current_snapshot_promotions_v2"} {
+			_ = s.conn.Exec(ctx, `ALTER TABLE crawlobserver.`+table+` DELETE WHERE project_id = ? SETTINGS mutations_sync = 1`, projectID)
+		}
+		_ = s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_sessions DELETE WHERE id = ? SETTINGS mutations_sync = 1`, currentID)
+	})
+	if err := s.InsertSession(ctx, &CrawlSession{ID: currentID, StartedAt: now, FinishedAt: now, Status: "completed", ProjectID: &projectID, Label: CurrentSnapshotLabel}); err != nil {
+		t.Fatalf("insert synthetic current session: %v", err)
+	}
+	for _, revision := range []uint64{7, 8} {
+		if err := s.conn.Exec(ctx, `
+			INSERT INTO crawlobserver.project_current_snapshot_promotions (
+				project_id, source_session_id, source_started_at, content_watermark_session_id, content_watermark_started_at,
+				snapshot_revision, current_session_id, baseline_session_id, baseline_created_at, last_delta_session_id, delta_count, updated_at
+			) VALUES (?, toUUID(?), ?, toUUID(?), ?, ?, toUUID(?), ?, ?, '', 0, ?)`,
+			projectID, sourceID, now.Add(-time.Hour), watermarkID, now, revision, currentID, sourceID, now, now.Add(time.Duration(revision)*time.Second)); err != nil {
+			t.Fatalf("insert old journal revision %d: %v", revision, err)
+		}
+	}
+	if err := MigrateProjectCurrentSnapshotPromotionsV2(ctx, s.conn); err != nil {
+		t.Fatalf("migrate old journal to v2: %v", err)
+	}
+	if err := s.conn.Exec(ctx, `OPTIMIZE TABLE crawlobserver.project_current_snapshot_promotions_v2 FINAL`); err != nil {
+		t.Fatalf("compact v2 journal: %v", err)
+	}
+	restarted := &Store{conn: s.conn}
+	for _, revision := range []uint64{7, 8} {
+		snap, err := restarted.GetProjectCurrentSnapshotRevision(ctx, projectID, revision)
+		if err != nil || snap.SnapshotRevision != revision {
+			t.Fatalf("v2 journal revision %d = %#v err=%v", revision, snap, err)
+		}
+	}
+	canonical, err := restarted.GetProjectCurrentSnapshot(ctx, projectID)
+	if err != nil || canonical.SnapshotRevision != 8 {
+		t.Fatalf("v2 canonical snapshot = %#v err=%v, want revision 8", canonical, err)
+	}
+	if err := restarted.DeleteProjectCurrentSnapshot(ctx, projectID); err != nil {
+		t.Fatalf("delete migrated current snapshot: %v", err)
+	}
+	if err := MigrateProjectCurrentSnapshotPromotionsV2(ctx, s.conn); err != nil {
+		t.Fatalf("rerun migration after delete: %v", err)
+	}
+	var remaining uint64
+	if err := s.conn.QueryRow(ctx, `SELECT count() FROM crawlobserver.project_current_snapshot_promotions_v2 WHERE project_id = ?`, projectID).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("deleted snapshot resurrected in v2 count=%d err=%v", remaining, err)
+	}
+	if err := s.conn.QueryRow(ctx, `SELECT count() FROM crawlobserver.project_current_snapshot_promotions WHERE project_id = ?`, projectID).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("delete retained legacy journal rows count=%d err=%v", remaining, err)
+	}
+	if _, err := s.GetSession(ctx, currentID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleted snapshot synthetic session remains referenced or present: %v", err)
+	}
+}
+
+func TestCurrentSnapshotJournalRejectsOutOfOrderDeltaWatermark(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := "snapshot-delta-order-" + uuid.NewString()
+	fullID, newerDeltaID, olderDeltaID, currentID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	t.Cleanup(func() {
+		for _, table := range []string{"project_current_snapshot_deltas", "project_current_snapshot_promotions_v2"} {
+			_ = s.conn.Exec(ctx, `ALTER TABLE crawlobserver.`+table+` DELETE WHERE project_id = ? SETTINGS mutations_sync = 1`, projectID)
+		}
+		_ = s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_sessions DELETE WHERE id IN (?, ?, ?, ?) SETTINGS mutations_sync = 1`, fullID, newerDeltaID, olderDeltaID, currentID)
+	})
+	for id, started := range map[string]time.Time{fullID: now.Add(-3 * time.Hour), olderDeltaID: now.Add(-time.Hour), newerDeltaID: now, currentID: now.Add(-3 * time.Hour)} {
+		if err := s.InsertSession(ctx, &CrawlSession{ID: id, StartedAt: started, FinishedAt: started, Status: "completed", ProjectID: &projectID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap := ProjectCurrentSnapshot{ProjectID: projectID, SourceSessionID: fullID, SourceStartedAt: now.Add(-3 * time.Hour), ContentWatermarkSessionID: newerDeltaID, ContentWatermarkStartedAt: now, CurrentSessionID: currentID, BaselineSessionID: fullID, BaselineCreatedAt: now, UpdatedAt: now}
+	if err := s.upsertProjectCurrentSnapshot(ctx, &snap); err != nil {
+		t.Fatal(err)
+	}
+	allowed, _, err := s.CanPromoteCurrentSnapshotSource(ctx, projectID, olderDeltaID)
+	if err != nil || allowed {
+		t.Fatalf("older delta allowed=%t err=%v", allowed, err)
+	}
+	if count, err := s.countProjectCurrentSnapshotDeltas(ctx, projectID); err != nil || count != 0 {
+		t.Fatalf("out-of-order delta mutated marker count=%d err=%v", count, err)
+	}
+	got, err := s.GetProjectCurrentSnapshot(ctx, projectID)
+	if err != nil || got.ContentWatermarkSessionID != newerDeltaID {
+		t.Fatalf("out-of-order delta changed watermark=%#v err=%v", got, err)
+	}
+}
+
+func TestCurrentSnapshotJournalEqualWatermarkUpdatesBindingWithoutContentMutation(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := "snapshot-equal-watermark-" + uuid.NewString()
+	fullID, deltaID, currentID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	t.Cleanup(func() {
+		_ = s.conn.Exec(ctx, `ALTER TABLE crawlobserver.project_current_snapshot_promotions_v2 DELETE WHERE project_id = ? SETTINGS mutations_sync = 1`, projectID)
+	})
+	base := ProjectCurrentSnapshot{ProjectID: projectID, SourceSessionID: fullID, SourceStartedAt: now.Add(-time.Hour), ContentWatermarkSessionID: deltaID, ContentWatermarkStartedAt: now, CurrentSessionID: currentID, BaselineSessionID: fullID, QualityEvaluationRevision: uuid.NewString(), BaselineCreatedAt: now, UpdatedAt: now}
+	if err := s.upsertProjectCurrentSnapshot(ctx, &base); err != nil {
+		t.Fatal(err)
+	}
+	updated := base
+	updated.QualityEvaluationRevision = uuid.NewString()
+	updated.UpdatedAt = now.Add(time.Second)
+	if err := s.upsertProjectCurrentSnapshot(ctx, &updated); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetProjectCurrentSnapshot(ctx, projectID)
+	if err != nil || got.QualityEvaluationRevision != updated.QualityEvaluationRevision || got.ContentWatermarkSessionID != deltaID {
+		t.Fatalf("equal watermark binding readback=%#v err=%v", got, err)
+	}
+}
+
+func TestLegacyCurrentSnapshotMigrationAmbiguousProvenanceFailsClosed(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID, currentID := "snapshot-legacy-"+uuid.NewString(), uuid.NewString()
+	t.Cleanup(func() {
+		for _, table := range []string{"project_current_snapshots", "project_current_snapshot_promotions_v2"} {
+			_ = s.conn.Exec(ctx, `ALTER TABLE crawlobserver.`+table+` DELETE WHERE project_id = ? SETTINGS mutations_sync = 1`, projectID)
+		}
+	})
+	if err := s.conn.Exec(ctx, `INSERT INTO crawlobserver.project_current_snapshots (project_id, current_session_id, baseline_session_id, baseline_created_at, last_delta_session_id, delta_count, updated_at) VALUES (?, toUUID(?), '', ?, '', 0, ?)`, projectID, currentID, time.Now().UTC(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetProjectCurrentSnapshot(ctx, projectID); !errors.Is(err, ErrCurrentSnapshotBindingConflict) {
+		t.Fatalf("legacy ambiguous provenance err=%v", err)
+	}
+	var count uint64
+	if err := s.conn.QueryRow(ctx, `SELECT count() FROM crawlobserver.project_current_snapshot_promotions_v2 WHERE project_id = ?`, projectID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("legacy migration wrote journal count=%d err=%v", count, err)
 	}
 }
 
@@ -385,5 +544,110 @@ func TestQualityPublishRecoversPartialFindingsBeforePointer(t *testing.T) {
 	pointer, err := s.getCrawlQualityCurrentPointer(ctx, sessionID)
 	if err != nil || pointer.EvaluationRevision != result.EvaluationRevision {
 		t.Fatalf("pointer not published after complete recovery: %#v err=%v", pointer, err)
+	}
+}
+
+func TestLatestTrustedFullCrawlSessionUsesStrictHistoricalOrder(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := "quality-historical-" + uuid.NewString()
+	olderAtSameTimeID := "10000000-0000-4000-8000-000000000001"
+	evaluatedID := "20000000-0000-4000-8000-000000000001"
+	newerAtSameTimeID := "30000000-0000-4000-8000-000000000001"
+	futureID := "40000000-0000-4000-8000-000000000001"
+	sessionIDs := []string{olderAtSameTimeID, evaluatedID, newerAtSameTimeID, futureID}
+	for _, sessionID := range sessionIDs {
+		cleanupQualitySession(t, s, sessionID)
+	}
+	t.Cleanup(func() {
+		for _, sessionID := range sessionIDs {
+			cleanupQualitySession(t, s, sessionID)
+			if err := s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_sessions DELETE WHERE id = ? SETTINGS mutations_sync = 1`, sessionID); err != nil {
+				t.Logf("cleanup historical session %s: %v", sessionID, err)
+			}
+		}
+	})
+
+	startedAt := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	for _, session := range []CrawlSession{
+		{ID: olderAtSameTimeID, StartedAt: startedAt, FinishedAt: startedAt.Add(time.Minute), Status: "completed", ProjectID: &projectID},
+		{ID: evaluatedID, StartedAt: startedAt, FinishedAt: startedAt.Add(time.Minute), Status: "completed", ProjectID: &projectID},
+		{ID: newerAtSameTimeID, StartedAt: startedAt, FinishedAt: startedAt.Add(time.Minute), Status: "completed", ProjectID: &projectID},
+		{ID: futureID, StartedAt: startedAt.Add(time.Hour), FinishedAt: startedAt.Add(time.Hour + time.Minute), Status: "completed", ProjectID: &projectID},
+	} {
+		session := session
+		if err := s.InsertSession(ctx, &session); err != nil {
+			t.Fatalf("insert session %s: %v", session.ID, err)
+		}
+		if _, _, err := s.PublishCrawlQualityEvaluation(ctx, CrawlQualityResult{
+			SessionID: session.ID, ProjectID: projectID, EvaluationRevision: uuid.NewString(),
+			Trusted: true, IsFullCrawl: true, Status: "trusted", Score: 100, EvaluatedAt: startedAt,
+		}, ""); err != nil {
+			t.Fatalf("publish trusted full quality %s: %v", session.ID, err)
+		}
+	}
+
+	baseline, err := s.LatestTrustedFullCrawlSession(ctx, projectID, evaluatedID)
+	if err != nil {
+		t.Fatalf("select historical baseline: %v", err)
+	}
+	if baseline.ID != olderAtSameTimeID {
+		t.Fatalf("historical baseline = %s, want %s; selected future/cyclic baseline", baseline.ID, olderAtSameTimeID)
+	}
+
+	latest, err := s.LatestTrustedFullCrawlSession(ctx, projectID, "")
+	if err != nil {
+		t.Fatalf("select unrestricted latest trusted baseline: %v", err)
+	}
+	if latest.ID != futureID {
+		t.Fatalf("unrestricted baseline = %s, want %s", latest.ID, futureID)
+	}
+}
+
+func TestLatestTrustedFullCrawlSessionLegacyFallbackRespectsHistoricalCutoff(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := "quality-legacy-historical-" + uuid.NewString()
+	historicalID := "50000000-0000-4000-8000-000000000001"
+	evaluatedID := "60000000-0000-4000-8000-000000000001"
+	futureID := "70000000-0000-4000-8000-000000000001"
+	sessionIDs := []string{historicalID, evaluatedID, futureID}
+	for _, sessionID := range sessionIDs {
+		cleanupQualitySession(t, s, sessionID)
+	}
+	t.Cleanup(func() {
+		for _, sessionID := range sessionIDs {
+			cleanupQualitySession(t, s, sessionID)
+			if err := s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_sessions DELETE WHERE id = ? SETTINGS mutations_sync = 1`, sessionID); err != nil {
+				t.Logf("cleanup legacy historical session %s: %v", sessionID, err)
+			}
+		}
+	})
+
+	startedAt := time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC)
+	for _, session := range []CrawlSession{
+		{ID: historicalID, StartedAt: startedAt.Add(-time.Hour), FinishedAt: startedAt.Add(-59 * time.Minute), Status: "completed", ProjectID: &projectID},
+		{ID: evaluatedID, StartedAt: startedAt, FinishedAt: startedAt.Add(time.Minute), Status: "completed", ProjectID: &projectID},
+		{ID: futureID, StartedAt: startedAt.Add(time.Hour), FinishedAt: startedAt.Add(time.Hour + time.Minute), Status: "completed", ProjectID: &projectID},
+	} {
+		session := session
+		if err := s.InsertSession(ctx, &session); err != nil {
+			t.Fatalf("insert legacy session %s: %v", session.ID, err)
+		}
+		insertLegacyQuality(t, s, CrawlQualityResult{
+			SessionID: session.ID, ProjectID: projectID, Trusted: true, IsFullCrawl: true,
+			Status: "trusted", Score: 100, EvaluatedAt: startedAt,
+		}, nil)
+	}
+
+	baseline, err := s.LatestTrustedFullCrawlSession(ctx, projectID, evaluatedID)
+	if err != nil {
+		t.Fatalf("select legacy historical baseline: %v", err)
+	}
+	if baseline.ID != historicalID {
+		t.Fatalf("legacy historical baseline = %s, want %s", baseline.ID, historicalID)
+	}
+	if _, err := s.getCrawlQualityCurrentPointer(ctx, futureID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("future legacy quality was imported despite cutoff: %v", err)
 	}
 }

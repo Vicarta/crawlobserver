@@ -46,6 +46,27 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestWriterStateDirUsesNestedRelativeSQLiteParent(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	viper.Set("server.sqlite_path", "nested/state/crawlobserver.db")
+
+	got, err := WriterStateDir()
+	if err != nil {
+		t.Fatalf("WriterStateDir() error = %v", err)
+	}
+	base, err := DefaultDataDir()
+	if err != nil {
+		t.Fatalf("DefaultDataDir() error = %v", err)
+	}
+	want := filepath.Join(base, "nested", "state")
+	if got != want {
+		t.Fatalf("WriterStateDir() = %q, want %q", got, want)
+	}
+}
+
 func TestValidateRejectsInvalid(t *testing.T) {
 	tests := []struct {
 		name   string

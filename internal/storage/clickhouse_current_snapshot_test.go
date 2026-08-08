@@ -1,6 +1,28 @@
 package storage
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+func TestCompareSnapshotSourceUsesSessionIDForEqualStartedAt(t *testing.T) {
+	at := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	if got := compareSnapshotSource(at, "00000000-0000-4000-8000-000000000001", at, "ffffffff-ffff-4fff-8fff-ffffffffffff"); got >= 0 {
+		t.Fatalf("older equal-timestamp ID compare = %d, want < 0", got)
+	}
+	if got := compareSnapshotSource(at, "ffffffff-ffff-4fff-8fff-ffffffffffff", at, "00000000-0000-4000-8000-000000000001"); got <= 0 {
+		t.Fatalf("newer equal-timestamp ID compare = %d, want > 0", got)
+	}
+}
+
+func TestHistoricalSnapshotBindingFailsClosedForIncompleteFacts(t *testing.T) {
+	_, _, err := (&Store{}).ValidateProjectCurrentSnapshotHistoricalBinding(context.Background(), ProjectCurrentSnapshot{})
+	if !errors.Is(err, ErrCurrentSnapshotBindingConflict) {
+		t.Fatalf("incomplete historical binding err=%v, want binding conflict", err)
+	}
+}
 
 func TestCurrentSnapshotBindingMatchesOnlyCompletePublishedBinding(t *testing.T) {
 	binding := CrawlQualityPromotionEvent{

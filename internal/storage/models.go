@@ -307,8 +307,13 @@ type QualityReevaluateResponse struct {
 
 // ProjectCurrentSnapshot describes the materialized full-site current state for a project.
 type ProjectCurrentSnapshot struct {
-	ProjectID                         string    `json:"project_id"`
-	SnapshotRevision                  uint64    `json:"snapshot_revision"`
+	ProjectID        string `json:"project_id"`
+	SnapshotRevision uint64 `json:"snapshot_revision"`
+	// SourceSessionID is the trusted full crawl that supplies baseline lineage.
+	SourceSessionID                   string    `json:"source_session_id"`
+	SourceStartedAt                   time.Time `json:"source_started_at"`
+	ContentWatermarkSessionID         string    `json:"content_watermark_session_id"`
+	ContentWatermarkStartedAt         time.Time `json:"content_watermark_started_at"`
 	CurrentSessionID                  string    `json:"current_session_id"`
 	BaselineSessionID                 string    `json:"baseline_session_id"`
 	QualityBaselineSessionID          string    `json:"quality_baseline_session_id,omitempty"`

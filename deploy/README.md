@@ -64,9 +64,31 @@ The deploy script:
 - updates `CRAWLOBSERVER_IMAGE` in `deploy/.env`;
 - saves the currently running app image to `.previous-app-image`;
 - pulls only the app image when it is a registry image;
-- runs migrations through the `migrate` tool container with `--no-deps`;
-- starts only the `app` service with `--no-deps`;
+- runs `CHECK_ONLY=1 ./restart-app-safe.sh` with `FORCE=0` before any explicit
+  migration, and runs `restart-app-safe.sh` again to recheck immediately before
+  recreating the app;
+- relies on `serve` startup migrations by default (`RUN_MIGRATIONS=0`);
+- safely recreates only the `app` service with `--no-deps`;
 - checks `http://127.0.0.1:8899/api/health`.
+
+### Single Writer Rule
+
+`serve`, `gui`, `crawl`, and `migrate` take an exclusive OS advisory lock in
+the configured state directory (the Compose deployment shares
+`/var/lib/crawlobserver`). Only one of these writer processes may run against
+that directory at a time. A second process fails immediately with the lock
+path; do not delete the lock file to bypass this protection. The OS releases
+the lock when its owner exits or crashes, so a stale file alone does not block
+a safe restart. The lock is acquired before first-run config persistence or
+legacy SQLite recovery, so a rejected second writer leaves shared state intact.
+
+`serve` runs migrations during startup while it owns this lock, so production
+deploys use that path by default. For an explicit maintenance migration, run
+`RUN_MIGRATIONS=1 ./deploy-app.sh <image>`: after the no-`FORCE` safety gate,
+the script stops only the app, runs the `migrate` tool container, then starts
+only the app. A migration failure leaves the app stopped; do not start it until
+the failure is resolved. Never run a migration tool container alongside the
+app service.
 
 Do not use `docker compose up -d` without a service name for production app deploys.
 Do not use `docker compose down` for app-only deploys.

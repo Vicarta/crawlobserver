@@ -23,10 +23,52 @@ const (
 var currentSnapshotPromotionLocks sync.Map
 
 var ErrCurrentSnapshotBindingConflict = errors.New("current snapshot quality binding conflict")
+var ErrCurrentSnapshotSourceSuperseded = errors.New("current snapshot source is superseded")
 
 func currentSnapshotPromotionLock(projectID string) *sync.Mutex {
 	lock, _ := currentSnapshotPromotionLocks.LoadOrStore(projectID, &sync.Mutex{})
 	return lock.(*sync.Mutex)
+}
+
+// CanPromoteCurrentSnapshotSource is a durable preflight for callers. The
+// journal remains authoritative: concurrent writers may both insert, but the
+// greatest persisted watermark is the only readable pointer after restart or
+// FINAL compaction.
+func (s *Store) CanPromoteCurrentSnapshotSource(ctx context.Context, projectID, candidateSessionID string) (bool, *ProjectCurrentSnapshot, error) {
+	candidate, err := s.GetSession(ctx, candidateSessionID)
+	if err != nil {
+		return false, nil, err
+	}
+	if candidate.ProjectID == nil || *candidate.ProjectID != projectID {
+		return false, nil, fmt.Errorf("candidate session does not belong to project")
+	}
+	current, err := s.GetProjectCurrentSnapshot(ctx, projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil, nil
+	}
+	if err != nil {
+		return false, nil, err
+	}
+	if compareSnapshotSource(candidate.StartedAt, candidate.ID, current.ContentWatermarkStartedAt, current.ContentWatermarkSessionID) < 0 {
+		return false, current, nil
+	}
+	return true, current, nil
+}
+
+func compareSnapshotSource(leftAt time.Time, leftID string, rightAt time.Time, rightID string) int {
+	if leftAt.Before(rightAt) {
+		return -1
+	}
+	if leftAt.After(rightAt) {
+		return 1
+	}
+	if leftID < rightID {
+		return -1
+	}
+	if leftID > rightID {
+		return 1
+	}
+	return 0
 }
 
 const snapshotPageColumns = `crawl_session_id, url, final_url, status_code, content_type,
@@ -81,28 +123,139 @@ const snapshotPageSelectColumns = `url, final_url, status_code, content_type,
 
 func (s *Store) GetProjectCurrentSnapshot(ctx context.Context, projectID string) (*ProjectCurrentSnapshot, error) {
 	row := s.conn.QueryRow(ctx, `
-		SELECT project_id, snapshot_revision, toString(current_session_id), baseline_session_id,
+		SELECT project_id, snapshot_revision, toString(source_session_id), source_started_at,
+			toString(content_watermark_session_id), content_watermark_started_at,
+			toString(current_session_id), baseline_session_id,
 			quality_baseline_session_id,
 			quality_evaluation_revision, baseline_quality_evaluation_revision,
 			pagerank_evidence_revision, quality_evaluator_revision, quality_rules_revision,
 			quality_promotion_status, baseline_created_at,
 			last_delta_session_id, delta_count, updated_at
-		FROM crawlobserver.project_current_snapshots FINAL
+		FROM crawlobserver.project_current_snapshot_promotions_v2 FINAL
 		WHERE project_id = ?
-		ORDER BY snapshot_revision DESC, updated_at DESC
+		ORDER BY content_watermark_started_at DESC, toString(content_watermark_session_id) DESC, snapshot_revision DESC, updated_at DESC
 		LIMIT 1`, projectID)
 	var snap ProjectCurrentSnapshot
 	if err := row.Scan(
-		&snap.ProjectID, &snap.SnapshotRevision, &snap.CurrentSessionID, &snap.BaselineSessionID,
+		&snap.ProjectID, &snap.SnapshotRevision, &snap.SourceSessionID, &snap.SourceStartedAt,
+		&snap.ContentWatermarkSessionID, &snap.ContentWatermarkStartedAt,
+		&snap.CurrentSessionID, &snap.BaselineSessionID,
 		&snap.QualityBaselineSessionID,
 		&snap.QualityEvaluationRevision, &snap.BaselineQualityEvaluationRevision,
 		&snap.PageRankEvidenceRevision, &snap.QualityEvaluatorRevision, &snap.QualityRulesRevision,
 		&snap.QualityPromotionStatus, &snap.BaselineCreatedAt,
 		&snap.LastDeltaSessionID, &snap.DeltaCount, &snap.UpdatedAt,
 	); err != nil {
-		return nil, err
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		return s.migrateLegacyProjectCurrentSnapshot(ctx, projectID)
+	}
+	if !isValidUUID(snap.SourceSessionID) || snap.SourceStartedAt.IsZero() ||
+		!isValidUUID(snap.ContentWatermarkSessionID) || snap.ContentWatermarkStartedAt.IsZero() {
+		return nil, fmt.Errorf("%w: snapshot source lineage is incomplete", ErrCurrentSnapshotBindingConflict)
 	}
 	return &snap, nil
+}
+
+// GetProjectCurrentSnapshotRevision reads one immutable journal revision.
+// Unlike the canonical getter it must not guess when a malformed concurrent
+// write produced duplicate revision values.
+func (s *Store) GetProjectCurrentSnapshotRevision(ctx context.Context, projectID string, snapshotRevision uint64) (*ProjectCurrentSnapshot, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT project_id, snapshot_revision, toString(source_session_id), source_started_at,
+			toString(content_watermark_session_id), content_watermark_started_at,
+			toString(current_session_id), baseline_session_id, quality_baseline_session_id,
+			quality_evaluation_revision, baseline_quality_evaluation_revision,
+			pagerank_evidence_revision, quality_evaluator_revision, quality_rules_revision,
+			quality_promotion_status, baseline_created_at, last_delta_session_id, delta_count, updated_at
+		FROM crawlobserver.project_current_snapshot_promotions_v2 FINAL
+		WHERE project_id = ? AND snapshot_revision = ?
+		LIMIT 2`, projectID, snapshotRevision)
+	if err != nil {
+		return nil, fmt.Errorf("querying current snapshot journal revision: %w", err)
+	}
+	defer rows.Close()
+	var snapshots []ProjectCurrentSnapshot
+	for rows.Next() {
+		var snap ProjectCurrentSnapshot
+		if err := rows.Scan(&snap.ProjectID, &snap.SnapshotRevision, &snap.SourceSessionID, &snap.SourceStartedAt,
+			&snap.ContentWatermarkSessionID, &snap.ContentWatermarkStartedAt, &snap.CurrentSessionID, &snap.BaselineSessionID,
+			&snap.QualityBaselineSessionID, &snap.QualityEvaluationRevision, &snap.BaselineQualityEvaluationRevision,
+			&snap.PageRankEvidenceRevision, &snap.QualityEvaluatorRevision, &snap.QualityRulesRevision,
+			&snap.QualityPromotionStatus, &snap.BaselineCreatedAt, &snap.LastDeltaSessionID, &snap.DeltaCount, &snap.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scanning current snapshot journal revision: %w", err)
+		}
+		snapshots = append(snapshots, snap)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating current snapshot journal revision: %w", err)
+	}
+	if len(snapshots) != 1 || !isValidUUID(snapshots[0].SourceSessionID) || !isValidUUID(snapshots[0].ContentWatermarkSessionID) {
+		return nil, fmt.Errorf("%w: snapshot revision is missing or ambiguous", ErrCurrentSnapshotBindingConflict)
+	}
+	return &snapshots[0], nil
+}
+
+// migrateLegacyProjectCurrentSnapshot imports only legacy pointers whose raw
+// source can be proved uniquely from their immutable quality evaluation. A
+// guessed source would let an old pointer bypass the monotonic journal.
+func (s *Store) migrateLegacyProjectCurrentSnapshot(ctx context.Context, projectID string) (*ProjectCurrentSnapshot, error) {
+	row := s.conn.QueryRow(ctx, `
+		SELECT project_id, snapshot_revision, source_session_id, source_started_at,
+			content_watermark_session_id, content_watermark_started_at,
+			toString(current_session_id), baseline_session_id, quality_baseline_session_id,
+			quality_evaluation_revision, baseline_quality_evaluation_revision,
+			pagerank_evidence_revision, quality_evaluator_revision, quality_rules_revision,
+			quality_promotion_status, baseline_created_at, last_delta_session_id, delta_count, updated_at
+		FROM crawlobserver.project_current_snapshots FINAL
+		WHERE project_id = ?
+		ORDER BY snapshot_revision DESC, updated_at DESC LIMIT 1`, projectID)
+	var snap ProjectCurrentSnapshot
+	if err := row.Scan(&snap.ProjectID, &snap.SnapshotRevision, &snap.SourceSessionID, &snap.SourceStartedAt,
+		&snap.ContentWatermarkSessionID, &snap.ContentWatermarkStartedAt, &snap.CurrentSessionID, &snap.BaselineSessionID,
+		&snap.QualityBaselineSessionID, &snap.QualityEvaluationRevision, &snap.BaselineQualityEvaluationRevision,
+		&snap.PageRankEvidenceRevision, &snap.QualityEvaluatorRevision, &snap.QualityRulesRevision,
+		&snap.QualityPromotionStatus, &snap.BaselineCreatedAt, &snap.LastDeltaSessionID, &snap.DeltaCount, &snap.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if !isValidUUID(snap.QualityEvaluationRevision) || snap.QualityPromotionStatus != "applied" {
+		return nil, fmt.Errorf("%w: legacy snapshot provenance is incomplete", ErrCurrentSnapshotBindingConflict)
+	}
+	qualitySourceID, err := s.currentSnapshotQualitySourceSessionID(ctx, snap)
+	if err != nil {
+		return nil, err
+	}
+	quality, err := s.GetCrawlQualityResult(ctx, qualitySourceID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: legacy snapshot quality source cannot be proven", ErrCurrentSnapshotBindingConflict)
+	}
+	if !isValidUUID(snap.SourceSessionID) {
+		if quality.IsFullCrawl {
+			snap.SourceSessionID = qualitySourceID
+		} else {
+			snap.SourceSessionID = quality.BaselineSessionID
+		}
+	}
+	source, err := s.GetSession(ctx, snap.SourceSessionID)
+	if err != nil || source.ProjectID == nil || *source.ProjectID != projectID {
+		return nil, fmt.Errorf("%w: legacy snapshot source cannot be proven", ErrCurrentSnapshotBindingConflict)
+	}
+	if snap.SourceStartedAt.IsZero() {
+		snap.SourceStartedAt = source.StartedAt
+	}
+	if !isValidUUID(snap.ContentWatermarkSessionID) {
+		watermark, watermarkErr := s.GetSession(ctx, qualitySourceID)
+		if watermarkErr != nil || watermark.ProjectID == nil || *watermark.ProjectID != projectID {
+			return nil, fmt.Errorf("%w: legacy snapshot content watermark cannot be proven", ErrCurrentSnapshotBindingConflict)
+		}
+		snap.ContentWatermarkSessionID = qualitySourceID
+		snap.ContentWatermarkStartedAt = watermark.StartedAt
+	}
+	if err := s.upsertProjectCurrentSnapshot(ctx, &snap); err != nil {
+		return nil, err
+	}
+	return s.GetProjectCurrentSnapshot(ctx, projectID)
 }
 
 // ValidateProjectCurrentSnapshotBinding resolves the immutable evaluation that
@@ -160,7 +313,55 @@ func (s *Store) ValidateProjectCurrentSnapshotBinding(ctx context.Context, snap 
 	return quality, evidence, nil
 }
 
+// ValidateProjectCurrentSnapshotHistoricalBinding validates the immutable
+// facts captured by a journal revision. It intentionally does not require the
+// quality or PageRank current pointers to still select those revisions.
+func (s *Store) ValidateProjectCurrentSnapshotHistoricalBinding(ctx context.Context, snap ProjectCurrentSnapshot) (*CrawlQualityResult, *PageRankEvidence, error) {
+	fail := func(format string, args ...interface{}) (*CrawlQualityResult, *PageRankEvidence, error) {
+		return nil, nil, fmt.Errorf("%w: "+format, append([]interface{}{ErrCurrentSnapshotBindingConflict}, args...)...)
+	}
+	if snap.ProjectID == "" || !isValidUUID(snap.SourceSessionID) || !isValidUUID(snap.ContentWatermarkSessionID) ||
+		!isValidUUID(snap.QualityEvaluationRevision) || !isValidUUID(snap.PageRankEvidenceRevision) ||
+		!isValidUUID(snap.BaselineQualityEvaluationRevision) || snap.QualityPromotionStatus != "applied" ||
+		snap.QualityBaselineSessionID != snap.SourceSessionID {
+		return fail("historical snapshot provenance is incomplete")
+	}
+	quality, err := s.GetCrawlQualityEvaluation(ctx, snap.ContentWatermarkSessionID, snap.QualityEvaluationRevision)
+	if err != nil {
+		return fail("historical quality evaluation is unavailable")
+	}
+	if quality.ProjectID != snap.ProjectID || !quality.Trusted || quality.Stale ||
+		quality.PageRankEvidenceRevision != snap.PageRankEvidenceRevision || quality.EvaluatorRevision != snap.QualityEvaluatorRevision ||
+		quality.RulesRevision != snap.QualityRulesRevision || quality.PageRankPredicateVersion != PageRankEligiblePredicateVersion {
+		return fail("historical quality evaluation does not match snapshot")
+	}
+	if quality.IsFullCrawl {
+		if snap.ContentWatermarkSessionID != snap.SourceSessionID || quality.EvaluationRevision != snap.BaselineQualityEvaluationRevision {
+			return fail("historical full-crawl baseline does not match snapshot")
+		}
+	} else if quality.BaselineSessionID != snap.SourceSessionID || quality.BaselineEvaluationRevision != snap.BaselineQualityEvaluationRevision {
+		return fail("historical delta baseline does not match snapshot")
+	}
+	evidence, err := s.GetPageRankEvidence(ctx, snap.ContentWatermarkSessionID, snap.PageRankEvidenceRevision)
+	if err != nil || evidence.State != PageRankEvidenceFinalized || evidence.PredicateVersion != PageRankEligiblePredicateVersion {
+		return fail("historical PageRank evidence is unavailable or incomplete")
+	}
+	baseline, err := s.GetCrawlQualityEvaluation(ctx, snap.SourceSessionID, snap.BaselineQualityEvaluationRevision)
+	if err != nil || baseline.ProjectID != snap.ProjectID || !baseline.Trusted || baseline.Stale ||
+		!baseline.IsFullCrawl || baseline.PageRankPredicateVersion != PageRankEligiblePredicateVersion {
+		return fail("historical baseline evaluation is unavailable or incomplete")
+	}
+	baselineEvidence, err := s.GetPageRankEvidence(ctx, snap.SourceSessionID, baseline.PageRankEvidenceRevision)
+	if err != nil || baselineEvidence.State != PageRankEvidenceFinalized || baselineEvidence.PredicateVersion != PageRankEligiblePredicateVersion {
+		return fail("historical baseline PageRank evidence is unavailable or incomplete")
+	}
+	return quality, evidence, nil
+}
+
 func (s *Store) currentSnapshotQualitySourceSessionID(ctx context.Context, snap ProjectCurrentSnapshot) (string, error) {
+	if isValidUUID(snap.ContentWatermarkSessionID) {
+		return snap.ContentWatermarkSessionID, nil
+	}
 	rows, err := s.conn.Query(ctx, `
 		SELECT toString(session_id)
 		FROM crawlobserver.crawl_quality_evaluations
@@ -205,8 +406,47 @@ func (s *Store) InitializeProjectCurrentSnapshot(ctx context.Context, projectID,
 	if baseline.ProjectID == nil || *baseline.ProjectID != projectID {
 		return nil, fmt.Errorf("baseline session does not belong to project")
 	}
+	allowed, existing, err := s.CanPromoteCurrentSnapshotSource(ctx, projectID, baselineSessionID)
+	if err != nil {
+		if !errors.Is(err, ErrCurrentSnapshotBindingConflict) {
+			return nil, err
+		}
+		var v2Count uint64
+		if countErr := s.conn.QueryRow(ctx, `SELECT count() FROM crawlobserver.project_current_snapshot_promotions_v2 WHERE project_id = ?`, projectID).Scan(&v2Count); countErr != nil {
+			return nil, countErr
+		}
+		if v2Count != 0 {
+			return nil, err
+		}
+		// The only supported recovery is a validated full crawl replacing an
+		// unprovable legacy pointer. Binding validation below proves the new
+		// source before it can publish v2; legacy rows remain audit-only.
+		allowed = true
+	}
+	if !allowed {
+		return existing, ErrCurrentSnapshotSourceSuperseded
+	}
+	quality, err := s.GetCrawlQualityResult(ctx, baselineSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("reading full snapshot recovery quality: %w", err)
+	}
+	if !quality.IsFullCrawl {
+		return nil, fmt.Errorf("%w: current snapshot initialization requires a trusted full crawl", ErrCurrentSnapshotBindingConflict)
+	}
+	if binding.BaselineSessionID != baselineSessionID || binding.BaselineEvaluationRevision != quality.EvaluationRevision {
+		return nil, fmt.Errorf("%w: full snapshot initialization requires self-baseline binding", ErrCurrentSnapshotBindingConflict)
+	}
 	if err := s.validateCurrentSnapshotBinding(ctx, projectID, baselineSessionID, binding); err != nil {
 		return nil, err
+	}
+	if existing != nil && existing.SourceSessionID == baselineSessionID && existing.ContentWatermarkSessionID == baselineSessionID &&
+		currentSnapshotBindingMatches(*existing, binding) {
+		if currentSnapshotNeedsFoldCleanup(*existing) {
+			if err := s.completeFoldedSnapshotCleanup(ctx, *existing); err != nil {
+				return nil, err
+			}
+		}
+		return existing, nil
 	}
 
 	var oldCurrentID string
@@ -228,7 +468,9 @@ func (s *Store) InitializeProjectCurrentSnapshot(ctx context.Context, projectID,
 		baselineCreatedAt = now
 	}
 	snap := ProjectCurrentSnapshot{
-		ProjectID: projectID, CurrentSessionID: currentID, BaselineSessionID: baselineSessionID,
+		ProjectID: projectID, SourceSessionID: baselineSessionID, SourceStartedAt: baseline.StartedAt,
+		ContentWatermarkSessionID: baselineSessionID, ContentWatermarkStartedAt: baseline.StartedAt,
+		CurrentSessionID: currentID, BaselineSessionID: baselineSessionID,
 		QualityBaselineSessionID:          binding.BaselineSessionID,
 		QualityEvaluationRevision:         binding.EvaluationRevision,
 		BaselineQualityEvaluationRevision: binding.BaselineEvaluationRevision,
@@ -245,6 +487,16 @@ func (s *Store) InitializeProjectCurrentSnapshot(ctx context.Context, projectID,
 		return nil, err
 	}
 	if err := s.verifyProjectCurrentSnapshotBinding(ctx, snap); err != nil {
+		if canonical, readErr := s.GetProjectCurrentSnapshot(ctx, projectID); readErr == nil &&
+			compareSnapshotSource(canonical.ContentWatermarkStartedAt, canonical.ContentWatermarkSessionID, baseline.StartedAt, baselineSessionID) > 0 {
+			// A concurrent writer published a newer durable source after our
+			// preflight. This synthetic copy was never canonical, so remove it
+			// before returning a typed retry-safe outcome to the caller.
+			if deleteErr := s.deleteSession(ctx, currentID, true); deleteErr != nil {
+				return nil, fmt.Errorf("%w: deleting superseded synthetic snapshot: %v", ErrCurrentSnapshotSourceSuperseded, deleteErr)
+			}
+			return canonical, ErrCurrentSnapshotSourceSuperseded
+		}
 		return nil, err
 	}
 	if err := s.clearProjectCurrentSnapshotDeltas(ctx, projectID); err != nil {
@@ -269,9 +521,6 @@ func (s *Store) PromoteDeltaToCurrentSnapshot(ctx context.Context, projectID, de
 	if !isValidUUID(deltaSessionID) {
 		return nil, fmt.Errorf("invalid delta session ID: %s", deltaSessionID)
 	}
-	if err := s.validateCurrentSnapshotBinding(ctx, projectID, deltaSessionID, binding); err != nil {
-		return nil, err
-	}
 	if maxDeltas <= 0 {
 		maxDeltas = 14
 	}
@@ -288,18 +537,46 @@ func (s *Store) PromoteDeltaToCurrentSnapshot(ctx context.Context, projectID, de
 	} else if _, err := s.GetSession(ctx, snap.BaselineSessionID); err != nil {
 		return nil, fmt.Errorf("current snapshot baseline missing; reconcile a trusted full-crawl baseline first")
 	}
+	delta, err := s.GetSession(ctx, deltaSessionID)
+	if err != nil {
+		return nil, err
+	}
+	if compareSnapshotSource(delta.StartedAt, delta.ID, snap.SourceStartedAt, snap.SourceSessionID) <= 0 ||
+		compareSnapshotSource(delta.StartedAt, delta.ID, snap.ContentWatermarkStartedAt, snap.ContentWatermarkSessionID) < 0 {
+		return snap, ErrCurrentSnapshotSourceSuperseded
+	}
+	// A delta can only extend the exact trusted full source that produced the
+	// current materialization. Do not let a caller-provided or evaluation-bound
+	// baseline silently drift away from the persisted full-crawl lineage.
+	if baselineSessionID == "" || binding.BaselineSessionID == "" ||
+		baselineSessionID != snap.SourceSessionID || binding.BaselineSessionID != snap.SourceSessionID {
+		return snap, fmt.Errorf("%w: delta baseline does not match current snapshot source", ErrCurrentSnapshotBindingConflict)
+	}
+	if err := s.validateCurrentSnapshotBinding(ctx, projectID, deltaSessionID, binding); err != nil {
+		return nil, err
+	}
 	if currentSnapshotBindingMatches(*snap, binding) {
 		if currentSnapshotNeedsFoldCleanup(*snap) {
 			if err := s.completeFoldedSnapshotCleanup(ctx, *snap); err != nil {
 				return nil, err
 			}
 		}
+		if err := s.cleanupSupersededDeltaPlanPredecessor(ctx, *snap); err != nil {
+			return nil, err
+		}
 		return snap, nil
 	}
 
-	alreadyApplied, err := s.isCurrentSnapshotDeltaApplied(ctx, projectID, deltaSessionID)
-	if err != nil {
-		return nil, err
+	// A fold clears content markers, but an equal durable watermark still proves
+	// the delta content is already present. Re-evaluation may update only the
+	// immutable binding and must never overlay the pages a second time.
+	alreadyApplied := compareSnapshotSource(delta.StartedAt, delta.ID, snap.ContentWatermarkStartedAt, snap.ContentWatermarkSessionID) == 0
+	if !alreadyApplied {
+		var err error
+		alreadyApplied, err = s.isCurrentSnapshotDeltaApplied(ctx, projectID, deltaSessionID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !alreadyApplied {
 		if err := s.overlayDeltaPages(ctx, snap.CurrentSessionID, deltaSessionID); err != nil {
@@ -334,6 +611,10 @@ func (s *Store) PromoteDeltaToCurrentSnapshot(ctx context.Context, projectID, de
 
 func (s *Store) finalizeCurrentSnapshotDelta(ctx context.Context, snap ProjectCurrentSnapshot, deltaSessionID string, maxDeltas, foldIntervalDays int, binding CrawlQualityPromotionEvent) (*ProjectCurrentSnapshot, error) {
 	projectID := snap.ProjectID
+	delta, err := s.GetSession(ctx, deltaSessionID)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	lastDeltaID := deltaSessionID
 	baselineID := snap.BaselineSessionID
@@ -375,6 +656,10 @@ func (s *Store) finalizeCurrentSnapshotDelta(ctx context.Context, snap ProjectCu
 
 	updated := ProjectCurrentSnapshot{
 		ProjectID:                         projectID,
+		SourceSessionID:                   snap.SourceSessionID,
+		SourceStartedAt:                   snap.SourceStartedAt,
+		ContentWatermarkSessionID:         deltaSessionID,
+		ContentWatermarkStartedAt:         delta.StartedAt,
 		CurrentSessionID:                  snap.CurrentSessionID,
 		BaselineSessionID:                 baselineID,
 		QualityBaselineSessionID:          binding.BaselineSessionID,
@@ -398,12 +683,52 @@ func (s *Store) finalizeCurrentSnapshotDelta(ctx context.Context, snap ProjectCu
 	if err := s.verifyProjectCurrentSnapshotBinding(ctx, updated); err != nil {
 		return nil, err
 	}
+	if err := s.cleanupSupersededDeltaPlanPredecessor(ctx, updated); err != nil {
+		return nil, err
+	}
 	if folded {
 		if err := s.completeFoldedSnapshotCleanup(ctx, updated); err != nil {
 			return nil, err
 		}
 	}
 	return &updated, nil
+}
+
+// Once D3 is durably canonical, its live plan references D2. D2's own plan
+// may still name an already-pruned D1; reclaim that metadata only after the
+// D3 pointer readback succeeds. A retry reaches the idempotent branch above.
+func (s *Store) cleanupSupersededDeltaPlanPredecessor(ctx context.Context, snap ProjectCurrentSnapshot) error {
+	current, err := s.GetSession(ctx, snap.ContentWatermarkSessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var currentCfg config.Config
+	if err := json.Unmarshal([]byte(current.Config), &currentCfg); err != nil || currentCfg.Crawler.DeltaPlan == nil {
+		return nil
+	}
+	predecessorID := currentCfg.Crawler.DeltaPlan.BaselineContentWatermarkSessionID
+	if !isValidUUID(predecessorID) {
+		return nil
+	}
+	predecessor, err := s.GetSession(ctx, predecessorID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var predecessorCfg config.Config
+	if err := json.Unmarshal([]byte(predecessor.Config), &predecessorCfg); err != nil || predecessorCfg.Crawler.DeltaPlan == nil {
+		return nil
+	}
+	priorID := predecessorCfg.Crawler.DeltaPlan.BaselineContentWatermarkSessionID
+	if !isValidUUID(priorID) || priorID == predecessorID {
+		return nil
+	}
+	return s.deleteDeltaSnapshotSessionChecked(ctx, priorID)
 }
 
 func currentSnapshotNeedsFoldCleanup(snap ProjectCurrentSnapshot) bool {
@@ -645,6 +970,10 @@ func (s *Store) RepairProjectCurrentSnapshotBaseline(ctx context.Context, projec
 	}
 	repaired := ProjectCurrentSnapshot{
 		ProjectID:                         projectID,
+		SourceSessionID:                   snap.SourceSessionID,
+		SourceStartedAt:                   snap.SourceStartedAt,
+		ContentWatermarkSessionID:         snap.ContentWatermarkSessionID,
+		ContentWatermarkStartedAt:         snap.ContentWatermarkStartedAt,
 		CurrentSessionID:                  snap.CurrentSessionID,
 		BaselineSessionID:                 newBaselineID,
 		QualityBaselineSessionID:          snap.QualityBaselineSessionID,
@@ -674,11 +1003,15 @@ func (s *Store) upsertProjectCurrentSnapshot(ctx context.Context, snap *ProjectC
 	if snap == nil {
 		return fmt.Errorf("current snapshot is required")
 	}
+	if !isValidUUID(snap.SourceSessionID) || !isValidUUID(snap.ContentWatermarkSessionID) ||
+		snap.SourceStartedAt.IsZero() || snap.ContentWatermarkStartedAt.IsZero() {
+		return fmt.Errorf("current snapshot source lineage is required")
+	}
 	var maxRevision uint64
 	var maxUpdatedAt time.Time
 	if err := s.conn.QueryRow(ctx, `
 		SELECT max(snapshot_revision), max(updated_at)
-		FROM crawlobserver.project_current_snapshots
+		FROM crawlobserver.project_current_snapshot_promotions_v2
 		WHERE project_id = ?`, snap.ProjectID).Scan(&maxRevision, &maxUpdatedAt); err != nil {
 		return fmt.Errorf("reading current snapshot pointer revision: %w", err)
 	}
@@ -700,15 +1033,17 @@ func (s *Store) upsertProjectCurrentSnapshot(ctx context.Context, snap *ProjectC
 		return fmt.Errorf("invalid current session ID: %s", snap.CurrentSessionID)
 	}
 	return s.conn.Exec(ctx, `
-		INSERT INTO crawlobserver.project_current_snapshots (
-			project_id, snapshot_revision, current_session_id, baseline_session_id,
+		INSERT INTO crawlobserver.project_current_snapshot_promotions_v2 (
+			project_id, source_session_id, source_started_at, content_watermark_session_id, content_watermark_started_at,
+			snapshot_revision, current_session_id, baseline_session_id,
 			quality_baseline_session_id,
 			quality_evaluation_revision, baseline_quality_evaluation_revision,
 			pagerank_evidence_revision, quality_evaluator_revision, quality_rules_revision,
 			quality_promotion_status, baseline_created_at,
 			last_delta_session_id, delta_count, updated_at
-		) VALUES (?, ?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		snap.ProjectID, snap.SnapshotRevision, snap.CurrentSessionID, snap.BaselineSessionID,
+		) VALUES (?, toUUID(?), ?, toUUID(?), ?, ?, toUUID(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		snap.ProjectID, snap.SourceSessionID, snap.SourceStartedAt, snap.ContentWatermarkSessionID, snap.ContentWatermarkStartedAt,
+		snap.SnapshotRevision, snap.CurrentSessionID, snap.BaselineSessionID,
 		snap.QualityBaselineSessionID,
 		snap.QualityEvaluationRevision, snap.BaselineQualityEvaluationRevision,
 		snap.PageRankEvidenceRevision, snap.QualityEvaluatorRevision, snap.QualityRulesRevision,
@@ -912,6 +1247,19 @@ func (s *Store) DeleteProjectCurrentSnapshot(ctx context.Context, projectID stri
 		SETTINGS mutations_sync = 1`, projectID); err != nil {
 		return fmt.Errorf("deleting project current snapshot metadata: %w", err)
 	}
+	if err := s.conn.Exec(ctx, `
+		ALTER TABLE crawlobserver.project_current_snapshot_promotions_v2 DELETE
+		WHERE project_id = ?
+		SETTINGS mutations_sync = 1`, projectID); err != nil {
+		return fmt.Errorf("deleting current snapshot promotion journal: %w", err)
+	}
+	// Keep the retained v1 table from re-seeding v2 on the next startup.
+	if err := s.conn.Exec(ctx, `
+		ALTER TABLE crawlobserver.project_current_snapshot_promotions DELETE
+		WHERE project_id = ?
+		SETTINGS mutations_sync = 1`, projectID); err != nil {
+		return fmt.Errorf("deleting legacy current snapshot promotion journal: %w", err)
+	}
 	return nil
 }
 
@@ -939,6 +1287,29 @@ func (s *Store) deleteSyntheticSnapshotSessionChecked(ctx context.Context, sessi
 	return s.deleteSession(ctx, sessionID, true)
 }
 
+// deleteDeltaSnapshotMetadataOnly reclaims immutable facts for an already
+// pruned raw delta after no canonical DeltaPlan names it as a predecessor.
+func (s *Store) deleteDeltaSnapshotMetadataOnly(ctx context.Context, sessionID string) error {
+	if !isValidUUID(sessionID) {
+		return nil
+	}
+	for _, table := range []string{
+		"crawl_quality_findings", "crawl_quality_evaluations", "crawl_quality_evaluation_findings",
+		"crawl_quality_promotion_events", "crawl_quality_action_events", "pagerank_evidence",
+	} {
+		if err := s.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE crawlobserver.%s DROP PARTITION ?", table), sessionID); err != nil {
+			return fmt.Errorf("deleting expired delta metadata from %s: %w", table, err)
+		}
+	}
+	if err := s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_quality_results DELETE WHERE session_id = ? SETTINGS mutations_sync = 1`, sessionID); err != nil {
+		return err
+	}
+	if err := s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_quality_current_pointers DELETE WHERE session_id = ? SETTINGS mutations_sync = 1`, sessionID); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Store) deleteDeltaSnapshotSession(ctx context.Context, sessionID string) {
 	if err := s.deleteDeltaSnapshotSessionChecked(ctx, sessionID); err != nil {
 		applog.Warnf("storage", "deleting retained snapshot delta session %s: %v", sessionID, err)
@@ -952,7 +1323,14 @@ func (s *Store) deleteDeltaSnapshotSessionChecked(ctx context.Context, sessionID
 	sess, err := s.GetSession(ctx, sessionID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil
+			protected, _, protectErr := s.isSessionSnapshotProtected(ctx, sessionID)
+			if protectErr != nil {
+				return protectErr
+			}
+			if protected {
+				return nil
+			}
+			return s.deleteDeltaSnapshotMetadataOnly(ctx, sessionID)
 		}
 		return err
 	}
@@ -960,5 +1338,59 @@ func (s *Store) deleteDeltaSnapshotSessionChecked(ctx context.Context, sessionID
 		applog.Warnf("storage", "not deleting retained snapshot delta %s: unexpected label %q", sessionID, sess.Label)
 		return nil
 	}
+	if sess.ProjectID != nil {
+		retain, err := s.currentSnapshotRetainsDeltaPlanPredecessor(ctx, *sess.ProjectID, sessionID)
+		if err != nil {
+			return err
+		}
+		if retain {
+			return s.pruneDeltaSnapshotHeavyContent(ctx, sessionID)
+		}
+	}
 	return s.deleteSession(ctx, sessionID, true)
+}
+
+// currentSnapshotRetainsDeltaPlanPredecessor identifies the exact predecessor
+// named by the live materialization's DeltaPlan. It is retained only as
+// immutable replay evidence, never as a scheduler-visible raw crawl.
+func (s *Store) currentSnapshotRetainsDeltaPlanPredecessor(ctx context.Context, projectID, sessionID string) (bool, error) {
+	snap, err := s.GetProjectCurrentSnapshot(ctx, projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	current, err := s.GetSession(ctx, snap.ContentWatermarkSessionID)
+	if err != nil {
+		return false, err
+	}
+	var cfg config.Config
+	if err := json.Unmarshal([]byte(current.Config), &cfg); err != nil {
+		return false, fmt.Errorf("decoding live delta plan retention lineage: %w", err)
+	}
+	if cfg.Crawler.DeltaPlan == nil {
+		return false, nil
+	}
+	return cfg.Crawler.DeltaPlan.BaselineContentWatermarkSessionID == sessionID, nil
+}
+
+func (s *Store) pruneDeltaSnapshotHeavyContent(ctx context.Context, sessionID string) error {
+	for _, table := range []string{
+		"pages", "links", "robots_txt", "sitemaps", "sitemap_urls", "external_link_checks",
+		"page_resource_checks", "page_resource_refs", "extractions", "near_duplicate_pairs",
+		"retry_attempts", "structured_data_items", "hreflang_issues", "interlinking_opportunities",
+		"interlinking_simulation_results", "interlinking_simulations", "page_embeddings",
+	} {
+		if err := s.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE crawlobserver.%s DROP PARTITION ?", table), sessionID); err != nil {
+			return fmt.Errorf("pruning retained delta content from %s: %w", table, err)
+		}
+	}
+	// Keep immutable quality/evidence and journal facts, but remove the crawl
+	// session itself so the scheduler and UI cannot revive this predecessor as
+	// a normal Daily Delta. Historical replay addresses its exact facts directly.
+	if err := s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_sessions DELETE WHERE id = ? SETTINGS mutations_sync = 1`, sessionID); err != nil {
+		return fmt.Errorf("removing retained delta raw session: %w", err)
+	}
+	return nil
 }

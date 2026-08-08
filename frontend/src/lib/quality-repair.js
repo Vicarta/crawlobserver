@@ -1,10 +1,10 @@
-const terminalPromotionStates = new Set(['failed', 'rejected', 'conflict']);
+const terminalPromotionStates = new Set(['failed', 'rejected', 'conflict', 'superseded']);
 
 export function qualityRepairOutcome(response = {}) {
   const promotionStatus = response.promotion?.status || '';
   if (terminalPromotionStates.has(promotionStatus)) {
     return {
-      state: promotionStatus === 'conflict' ? 'conflict' : 'error',
+      state: ['conflict', 'superseded'].includes(promotionStatus) ? 'conflict' : 'error',
       messageKey: `quality.promotion${promotionStatus[0].toUpperCase()}${promotionStatus.slice(1)}`,
     };
   }

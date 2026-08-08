@@ -87,6 +87,10 @@ ORDER BY (session_id, attempt_id, state, event_sequence);
 CREATE TABLE IF NOT EXISTS crawlobserver.project_current_snapshots (
     project_id String,
     snapshot_revision UInt64 DEFAULT 0,
+    source_session_id String DEFAULT '',
+    source_started_at DateTime64(3) DEFAULT toDateTime64(0, 3),
+    content_watermark_session_id String DEFAULT '',
+    content_watermark_started_at DateTime64(3) DEFAULT toDateTime64(0, 3),
     current_session_id UUID,
     baseline_session_id String,
     quality_baseline_session_id String DEFAULT '',
@@ -102,6 +106,54 @@ CREATE TABLE IF NOT EXISTS crawlobserver.project_current_snapshots (
     updated_at DateTime64(3)
 ) ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (project_id);
+
+-- Canonical promotion journal. One row per source crawl preserves the
+-- monotonic source order even when historical promotion attempts arrive late.
+CREATE TABLE IF NOT EXISTS crawlobserver.project_current_snapshot_promotions (
+    project_id String,
+    source_session_id UUID,
+    source_started_at DateTime64(3),
+    content_watermark_session_id UUID,
+    content_watermark_started_at DateTime64(3),
+    snapshot_revision UInt64 DEFAULT 0,
+    current_session_id UUID,
+    baseline_session_id String,
+    quality_baseline_session_id String DEFAULT '',
+    quality_evaluation_revision String DEFAULT '',
+    baseline_quality_evaluation_revision String DEFAULT '',
+    pagerank_evidence_revision String DEFAULT '',
+    quality_evaluator_revision String DEFAULT '',
+    quality_rules_revision String DEFAULT '',
+    quality_promotion_status LowCardinality(String) DEFAULT '',
+    baseline_created_at DateTime64(3),
+    last_delta_session_id String,
+    delta_count UInt32,
+    updated_at DateTime64(3)
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (project_id, content_watermark_session_id);
+
+CREATE TABLE IF NOT EXISTS crawlobserver.project_current_snapshot_promotions_v2 (
+    project_id String,
+    source_session_id UUID,
+    source_started_at DateTime64(3),
+    content_watermark_session_id UUID,
+    content_watermark_started_at DateTime64(3),
+    snapshot_revision UInt64 DEFAULT 0,
+    current_session_id UUID,
+    baseline_session_id String,
+    quality_baseline_session_id String DEFAULT '',
+    quality_evaluation_revision String DEFAULT '',
+    baseline_quality_evaluation_revision String DEFAULT '',
+    pagerank_evidence_revision String DEFAULT '',
+    quality_evaluator_revision String DEFAULT '',
+    quality_rules_revision String DEFAULT '',
+    quality_promotion_status LowCardinality(String) DEFAULT '',
+    baseline_created_at DateTime64(3),
+    last_delta_session_id String,
+    delta_count UInt32,
+    updated_at DateTime64(3)
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (project_id, content_watermark_session_id, snapshot_revision);
 
 CREATE TABLE IF NOT EXISTS crawlobserver.project_current_snapshot_deltas (
     project_id String,

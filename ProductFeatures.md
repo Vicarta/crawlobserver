@@ -441,9 +441,37 @@ shared rendered metadata shell diagnostics без site-specific правил.
 - Current Snapshot і Current Baseline Snapshot сумісні з session analytics API/UI.
 - Кожна promotion зберігає provenance binding до конкретних quality evaluation,
   PageRank evidence, rules/evaluator і baseline revisions та власний статус.
+- Full і Delta promotion мають монотонний authoritative content watermark
+  `(started_at, session_id)`: повторне оцінювання історичної сесії отримує
+  статус `superseded` і не може відкотити Current Snapshot до старішого crawl.
+- Кожен Delta plan незмінно фіксує materialized snapshot revision, raw full
+  source, content watermark та обидві quality evaluation revisions. Повторна
+  оцінка застосованого Delta перевіряє ці exact journal facts, а не поточні
+  quality pointers; відсутня або суперечлива lineage блокує promotion як
+  `stale_delta_baseline` і вимагає нового plan.
+- Delta preview/run тримає спільний per-project snapshot lock від canonical
+  lineage capture до завершення всіх candidate reads, тому concurrent promotion
+  не може змішати metadata однієї revision з content іншої. Admin PageRank,
+  orphan cleanup та project deletion використовують той самий mutation lock;
+  cleanup не відпускає його між graph delete і PageRank finalization.
+- Після Delta fold raw predecessor session і важкий crawl payload видаляються,
+  тому scheduler їх більше не переоцінює; exact immutable quality/PageRank
+  evidence, потрібні live DeltaPlan journal lineage, залишаються доступними.
+  Restart replay поточного Delta не змінює його evaluation revision або Current
+  Snapshot binding.
+- Unprovable pre-25.1 Current Snapshot лишається fail-closed для GET і Delta.
+  Admin re-evaluate новішого trusted full crawl може відновити його без ручної
+  зміни БД: storage приймає лише full self-baseline binding, залишає legacy row
+  audit-only і публікує повністю доказовий v2 pointer.
+- Якщо full snapshot pointer вже durable, але процес завершився до terminal
+  promotion audit, retry повертає той самий canonical pointer і дописує
+  `applied` для початкового promotion ID без нової evaluation чи повторного copy.
 - Promotion перевіряє binding перед публікацією, відхиляє missing/pending/failed
   або stale PageRank evidence і може безпечно повторити лише незавершений крок
   promotion без повторного quality evaluation.
+- `serve`, `gui`, `crawl` і `migrate` використовують process-lifetime OS lock у
+  спільному state-каталозі: другий writer завершується до будь-якої міграції чи
+  фонового job, а deploy/migrate спочатку проходить active-crawl safety gate.
 - Current Snapshot pointer має монотонну revision; publish/readback завершується
   до cleanup старого baseline/delta state, а незавершений cleanup безпечно
   відтворюється після restart без повторного накладання Delta content.

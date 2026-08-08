@@ -44,10 +44,12 @@ func init() {
 }
 
 func runCrawl(cmd *cobra.Command, args []string) error {
-	cfg, err := config.Load()
+	cfg, releaseWriterLock, err := loadWriterConfig()
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return err
 	}
+	defer releaseWriterLock()
+	initializeTelemetry(cmd, cfg)
 
 	config.ApplyResourceLimits(cfg)
 

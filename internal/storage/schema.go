@@ -816,6 +816,10 @@ var Migrations = []Migration{
 	{Name: "alter crawl quality action event sequence", DDL: AlterCrawlQualityActionEventsV2},
 	{Name: "alter project current snapshots quality provenance", DDL: AlterProjectCurrentSnapshotsQualityProvenance},
 	{Name: "alter project current snapshots revision", DDL: AlterProjectCurrentSnapshotsRevision},
+	{Name: "alter project current snapshots source lineage", DDL: AlterProjectCurrentSnapshotsSourceLineage},
+	{Name: "create project current snapshot promotions", DDL: CreateProjectCurrentSnapshotPromotions},
+	{Name: "create project current snapshot promotions v2", DDL: CreateProjectCurrentSnapshotPromotionsV2},
+	{Name: "migrate project current snapshot promotions to v2", Fn: MigrateProjectCurrentSnapshotPromotionsV2},
 }
 
 const AlterSessionsV3 = `
@@ -1122,10 +1126,25 @@ ALTER TABLE crawlobserver.project_current_snapshots
     ADD COLUMN IF NOT EXISTS snapshot_revision UInt64 DEFAULT 0 AFTER project_id
 `
 
+// Legacy pointers do not retain one row per raw source and therefore cannot
+// provide a durable cross-process monotonic promotion order. Keep their
+// lineage for explicit migration, while new code uses the promotion journal.
+const AlterProjectCurrentSnapshotsSourceLineage = `
+ALTER TABLE crawlobserver.project_current_snapshots
+    ADD COLUMN IF NOT EXISTS source_session_id String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS source_started_at DateTime64(3) DEFAULT toDateTime64(0, 3),
+    ADD COLUMN IF NOT EXISTS content_watermark_session_id String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS content_watermark_started_at DateTime64(3) DEFAULT toDateTime64(0, 3)
+`
+
 const CreateProjectCurrentSnapshots = `
 CREATE TABLE IF NOT EXISTS crawlobserver.project_current_snapshots (
     project_id String,
     snapshot_revision UInt64 DEFAULT 0,
+    source_session_id String DEFAULT '',
+    source_started_at DateTime64(3) DEFAULT toDateTime64(0, 3),
+    content_watermark_session_id String DEFAULT '',
+    content_watermark_started_at DateTime64(3) DEFAULT toDateTime64(0, 3),
     current_session_id UUID,
     baseline_session_id String,
     quality_baseline_session_id String DEFAULT '',
@@ -1136,6 +1155,80 @@ CREATE TABLE IF NOT EXISTS crawlobserver.project_current_snapshots (
 ) ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (project_id)
 `
+
+// One durable row per content watermark prevents a historical promotion from
+// replacing a newer source during ReplacingMergeTree compaction. Canonical
+// reads choose the greatest watermark tuple, rather
+// than the most recently written row.
+const CreateProjectCurrentSnapshotPromotions = `
+CREATE TABLE IF NOT EXISTS crawlobserver.project_current_snapshot_promotions (
+    project_id String,
+    source_session_id UUID,
+    source_started_at DateTime64(3),
+	content_watermark_session_id UUID,
+	content_watermark_started_at DateTime64(3),
+    snapshot_revision UInt64 DEFAULT 0,
+    current_session_id UUID,
+    baseline_session_id String,
+    quality_baseline_session_id String DEFAULT '',
+    quality_evaluation_revision String DEFAULT '',
+    baseline_quality_evaluation_revision String DEFAULT '',
+    pagerank_evidence_revision String DEFAULT '',
+    quality_evaluator_revision String DEFAULT '',
+    quality_rules_revision String DEFAULT '',
+    quality_promotion_status LowCardinality(String) DEFAULT '',
+    baseline_created_at DateTime64(3),
+    last_delta_session_id String,
+    delta_count UInt32,
+    updated_at DateTime64(3)
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (project_id, content_watermark_session_id)
+`
+
+// v2 is the canonical immutable journal. The predecessor table remains in
+// place as a migration source because its key can have compacted history.
+const CreateProjectCurrentSnapshotPromotionsV2 = `
+CREATE TABLE IF NOT EXISTS crawlobserver.project_current_snapshot_promotions_v2 (
+    project_id String,
+    source_session_id UUID,
+    source_started_at DateTime64(3),
+    content_watermark_session_id UUID,
+    content_watermark_started_at DateTime64(3),
+    snapshot_revision UInt64 DEFAULT 0,
+    current_session_id UUID,
+    baseline_session_id String,
+    quality_baseline_session_id String DEFAULT '',
+    quality_evaluation_revision String DEFAULT '',
+    baseline_quality_evaluation_revision String DEFAULT '',
+    pagerank_evidence_revision String DEFAULT '',
+    quality_evaluator_revision String DEFAULT '',
+    quality_rules_revision String DEFAULT '',
+    quality_promotion_status LowCardinality(String) DEFAULT '',
+    baseline_created_at DateTime64(3),
+    last_delta_session_id String,
+    delta_count UInt32,
+    updated_at DateTime64(3)
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (project_id, content_watermark_session_id, snapshot_revision)
+`
+
+func MigrateProjectCurrentSnapshotPromotionsV2(ctx context.Context, conn driver.Conn) error {
+	if err := conn.Exec(ctx, `
+		INSERT INTO crawlobserver.project_current_snapshot_promotions_v2
+		SELECT project_id, source_session_id, source_started_at, content_watermark_session_id, content_watermark_started_at,
+			snapshot_revision, current_session_id, baseline_session_id, quality_baseline_session_id,
+			quality_evaluation_revision, baseline_quality_evaluation_revision, pagerank_evidence_revision,
+			quality_evaluator_revision, quality_rules_revision, quality_promotion_status, baseline_created_at,
+			last_delta_session_id, delta_count, updated_at
+		FROM crawlobserver.project_current_snapshot_promotions
+		WHERE (project_id, content_watermark_session_id, snapshot_revision) NOT IN (
+			SELECT project_id, content_watermark_session_id, snapshot_revision
+			FROM crawlobserver.project_current_snapshot_promotions_v2
+		)`); err != nil {
+		return fmt.Errorf("copying current snapshot promotions to v2: %w", err)
+	}
+	return nil
+}
 
 const CreateProjectCurrentSnapshotDeltas = `
 CREATE TABLE IF NOT EXISTS crawlobserver.project_current_snapshot_deltas (

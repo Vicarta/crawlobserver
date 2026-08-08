@@ -448,6 +448,15 @@ func (s *Store) GetCrawlQualityResult(ctx context.Context, sessionID string) (*C
 	return s.getCrawlQualityEvaluationWithFindings(ctx, sessionID, pointer.EvaluationRevision)
 }
 
+// GetCrawlQualityEvaluation returns one complete immutable generation without
+// consulting or changing the session's current-pointer.
+func (s *Store) GetCrawlQualityEvaluation(ctx context.Context, sessionID, evaluationRevision string) (*CrawlQualityResult, error) {
+	if !isValidUUID(sessionID) || !isValidUUID(evaluationRevision) {
+		return nil, fmt.Errorf("valid session and evaluation revisions are required")
+	}
+	return s.getCrawlQualityEvaluationWithFindings(ctx, sessionID, evaluationRevision)
+}
+
 // ListCrawlQualityHistory returns immutable generations with their matching
 // findings. The current pointer is deliberately not used to discard history.
 func (s *Store) ListCrawlQualityHistory(ctx context.Context, sessionID string) ([]CrawlQualityResult, error) {
@@ -612,7 +621,19 @@ func (s *Store) CrawlQualityResultsForSessions(ctx context.Context, sessionIDs [
 }
 
 func (s *Store) LatestTrustedFullCrawlSession(ctx context.Context, projectID, excludeSessionID string) (*CrawlSession, error) {
-	session, err := s.latestTrustedFullCrawlSessionFromPointers(ctx, projectID, excludeSessionID)
+	var evaluated *CrawlSession
+	if excludeSessionID != "" {
+		var err error
+		evaluated, err = s.GetSession(ctx, excludeSessionID)
+		if err != nil {
+			return nil, fmt.Errorf("loading evaluated session for trusted baseline selection: %w", err)
+		}
+		if evaluated.ProjectID == nil || *evaluated.ProjectID != projectID {
+			return nil, fmt.Errorf("evaluated session %s does not belong to project %s", excludeSessionID, projectID)
+		}
+	}
+
+	session, err := s.latestTrustedFullCrawlSessionFromPointers(ctx, projectID, evaluated)
 	if err == nil || !errors.Is(err, sql.ErrNoRows) {
 		return session, err
 	}
@@ -620,10 +641,18 @@ func (s *Store) LatestTrustedFullCrawlSession(ctx context.Context, projectID, ex
 	// The first current-snapshot request after the format migration can precede
 	// the scheduler. Import matching legacy trusted results before retrying so a
 	// valid historical baseline is not hidden merely because it lacks a pointer.
-	rows, legacyErr := s.conn.Query(ctx, `
-		SELECT toString(session_id)
-		FROM crawlobserver.crawl_quality_results FINAL
-		WHERE project_id = ? AND trusted = true AND is_full_crawl = true AND session_id != ?`, projectID, excludeSessionID)
+	legacyQuery := `
+		SELECT toString(qr.session_id)
+		FROM crawlobserver.crawl_quality_results AS qr FINAL
+		INNER JOIN crawlobserver.crawl_sessions AS cs FINAL ON cs.id = qr.session_id
+		WHERE qr.project_id = ? AND cs.project_id = ? AND qr.trusted = true AND qr.is_full_crawl = true`
+	legacyArgs := []interface{}{projectID, projectID}
+	if evaluated != nil {
+		legacyQuery += `
+			AND (cs.started_at < ? OR (cs.started_at = ? AND toString(cs.id) < ?))`
+		legacyArgs = append(legacyArgs, evaluated.StartedAt, evaluated.StartedAt, evaluated.ID)
+	}
+	rows, legacyErr := s.conn.Query(ctx, legacyQuery, legacyArgs...)
 	if legacyErr != nil {
 		return nil, legacyErr
 	}
@@ -646,11 +675,11 @@ func (s *Store) LatestTrustedFullCrawlSession(ctx context.Context, projectID, ex
 			return nil, importErr
 		}
 	}
-	return s.latestTrustedFullCrawlSessionFromPointers(ctx, projectID, excludeSessionID)
+	return s.latestTrustedFullCrawlSessionFromPointers(ctx, projectID, evaluated)
 }
 
-func (s *Store) latestTrustedFullCrawlSessionFromPointers(ctx context.Context, projectID, excludeSessionID string) (*CrawlSession, error) {
-	row := s.conn.QueryRow(ctx, `
+func (s *Store) latestTrustedFullCrawlSessionFromPointers(ctx context.Context, projectID string, evaluated *CrawlSession) (*CrawlSession, error) {
+	query := `
 		SELECT cs.id, cs.started_at, cs.finished_at, cs.status, cs.seed_urls, cs.config,
 			cs.pages_crawled, cs.user_agent, cs.project_id, cs.label
 		FROM crawlobserver.crawl_sessions AS cs FINAL
@@ -658,9 +687,17 @@ func (s *Store) latestTrustedFullCrawlSessionFromPointers(ctx context.Context, p
 		INNER JOIN crawlobserver.crawl_quality_evaluations AS qr
 			ON qr.session_id = pointer.session_id AND qr.evaluation_revision = pointer.evaluation_revision
 		WHERE cs.project_id = ? AND qr.project_id = ? AND qr.trusted = true
-			AND qr.is_full_crawl = true AND cs.id != ?
-		ORDER BY cs.started_at DESC
-		LIMIT 1`, projectID, projectID, excludeSessionID)
+			AND qr.is_full_crawl = true`
+	args := []interface{}{projectID, projectID}
+	if evaluated != nil {
+		query += `
+			AND (cs.started_at < ? OR (cs.started_at = ? AND toString(cs.id) < ?))`
+		args = append(args, evaluated.StartedAt, evaluated.StartedAt, evaluated.ID)
+	}
+	query += `
+		ORDER BY cs.started_at DESC, toString(cs.id) DESC
+		LIMIT 1`
+	row := s.conn.QueryRow(ctx, query, args...)
 	var session CrawlSession
 	if err := row.Scan(&session.ID, &session.StartedAt, &session.FinishedAt, &session.Status,
 		&session.SeedURLs, &session.Config, &session.PagesCrawled, &session.UserAgent, &session.ProjectID, &session.Label); err != nil {

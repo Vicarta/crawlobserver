@@ -4,11 +4,15 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // testStore creates a Store connected to a local ClickHouse, runs migrations,
@@ -243,6 +247,7 @@ func TestCurrentSnapshotDeltaRetryFinalizesBindingWithoutReapplyingContent(t *te
 	currentID := "25100000-0000-4000-8000-000000000003"
 	foldedID := "25100000-0000-4000-8000-000000000004"
 	obsoleteID := "25100000-0000-4000-8000-000000000005"
+	newerFullID := "25100000-0000-4000-8000-000000000006"
 	baselineEval := "25100000-0000-4000-8000-000000000011"
 	deltaEval := "25100000-0000-4000-8000-000000000012"
 	baselinePR := "25100000-0000-4000-8000-000000000021"
@@ -250,15 +255,15 @@ func TestCurrentSnapshotDeltaRetryFinalizesBindingWithoutReapplyingContent(t *te
 	now := time.Now().UTC()
 
 	t.Cleanup(func() {
-		for _, table := range []string{"project_current_snapshot_deltas", "project_current_snapshots"} {
+		for _, table := range []string{"project_current_snapshot_deltas", "project_current_snapshots", "project_current_snapshot_promotions_v2"} {
 			_ = s.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE crawlobserver.%s DELETE WHERE project_id = ? SETTINGS mutations_sync = 1", table), projectID)
 		}
 		for _, table := range []string{"crawl_quality_current_pointers", "crawl_quality_evaluations", "pagerank_evidence"} {
-			_ = s.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE crawlobserver.%s DELETE WHERE session_id IN (?, ?, ?, ?, ?) SETTINGS mutations_sync = 1", table), baselineID, deltaID, currentID, foldedID, obsoleteID)
+			_ = s.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE crawlobserver.%s DELETE WHERE session_id IN (?, ?, ?, ?, ?, ?) SETTINGS mutations_sync = 1", table), baselineID, deltaID, currentID, foldedID, obsoleteID, newerFullID)
 		}
-		_ = s.conn.Exec(ctx, "ALTER TABLE crawlobserver.crawl_sessions DELETE WHERE id IN (?, ?, ?, ?, ?) SETTINGS mutations_sync = 1", baselineID, deltaID, currentID, foldedID, obsoleteID)
+		_ = s.conn.Exec(ctx, "ALTER TABLE crawlobserver.crawl_sessions DELETE WHERE id IN (?, ?, ?, ?, ?, ?) SETTINGS mutations_sync = 1", baselineID, deltaID, currentID, foldedID, obsoleteID, newerFullID)
 		for _, table := range []string{"pages", "links"} {
-			_ = s.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE crawlobserver.%s DELETE WHERE crawl_session_id IN (?, ?, ?, ?, ?) SETTINGS mutations_sync = 1", table), baselineID, deltaID, currentID, foldedID, obsoleteID)
+			_ = s.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE crawlobserver.%s DELETE WHERE crawl_session_id IN (?, ?, ?, ?, ?, ?) SETTINGS mutations_sync = 1", table), baselineID, deltaID, currentID, foldedID, obsoleteID, newerFullID)
 		}
 	})
 
@@ -289,6 +294,8 @@ func TestCurrentSnapshotDeltaRetryFinalizesBindingWithoutReapplyingContent(t *te
 	}
 	initial := ProjectCurrentSnapshot{
 		ProjectID: projectID, CurrentSessionID: currentID, BaselineSessionID: baselineID,
+		SourceSessionID: baselineID, SourceStartedAt: now.Add(-time.Hour),
+		ContentWatermarkSessionID: baselineID, ContentWatermarkStartedAt: now.Add(-time.Hour),
 		QualityBaselineSessionID:  baselineID,
 		QualityEvaluationRevision: baselineEval, BaselineQualityEvaluationRevision: baselineEval,
 		PageRankEvidenceRevision: baselinePR, QualityEvaluatorRevision: "eval-v2", QualityRulesRevision: "rules-v2",
@@ -326,6 +333,23 @@ func TestCurrentSnapshotDeltaRetryFinalizesBindingWithoutReapplyingContent(t *te
 	}
 	if _, _, err := s.ValidateProjectCurrentSnapshotBinding(ctx, *result); err != nil {
 		t.Fatalf("fresh delta baseline binding rejected: %v", err)
+	}
+	markerCount, err := s.countProjectCurrentSnapshotDeltas(ctx, projectID)
+	if err != nil {
+		t.Fatalf("count delta markers before baseline mismatch: %v", err)
+	}
+	emptyBaseline := binding
+	emptyBaseline.BaselineSessionID = ""
+	if _, err := s.PromoteDeltaToCurrentSnapshot(ctx, projectID, deltaID, baselineID, 14, 30, PageRankOptions{}, emptyBaseline); !errors.Is(err, ErrCurrentSnapshotBindingConflict) {
+		t.Fatalf("empty delta baseline err=%v, want binding conflict", err)
+	}
+	mismatchedBaseline := binding
+	mismatchedBaseline.BaselineSessionID = uuid.NewString()
+	if _, err := s.PromoteDeltaToCurrentSnapshot(ctx, projectID, deltaID, baselineID, 14, 30, PageRankOptions{}, mismatchedBaseline); !errors.Is(err, ErrCurrentSnapshotBindingConflict) {
+		t.Fatalf("mismatched delta binding baseline err=%v, want binding conflict", err)
+	}
+	if count, countErr := s.countProjectCurrentSnapshotDeltas(ctx, projectID); countErr != nil || count != markerCount {
+		t.Fatalf("baseline mismatch mutated delta markers before=%d after=%d err=%v", markerCount, count, countErr)
 	}
 	if err := s.appendPageRankEvidence(ctx, &PageRankEvidence{
 		SessionID: baselineID, AttemptID: baselinePR, State: PageRankEvidenceFinalized,
@@ -375,6 +399,30 @@ func TestCurrentSnapshotDeltaRetryFinalizesBindingWithoutReapplyingContent(t *te
 	if _, err := s.GetSession(ctx, obsoleteID); err == nil {
 		t.Fatal("obsolete synthetic baseline survived cleanup retry")
 	}
+	// The full-crawl promotion is newer than the folded delta chain. Replaying
+	// the old delta must fail before it can overlay content or recreate a marker.
+	if err := s.InsertSession(ctx, &CrawlSession{ID: newerFullID, StartedAt: now.Add(time.Hour), FinishedAt: now.Add(time.Hour), Status: "completed", ProjectID: &projectID, Label: "full"}); err != nil {
+		t.Fatalf("insert newer full crawl: %v", err)
+	}
+	newer := *result
+	newer.SourceSessionID, newer.SourceStartedAt = newerFullID, now.Add(time.Hour)
+	newer.ContentWatermarkSessionID, newer.ContentWatermarkStartedAt = newerFullID, now.Add(time.Hour)
+	newer.BaselineSessionID, newer.UpdatedAt = newerFullID, now.Add(time.Hour)
+	if err := s.upsertProjectCurrentSnapshot(ctx, &newer); err != nil {
+		t.Fatalf("publish newer full watermark: %v", err)
+	}
+	staleBinding := binding
+	staleBinding.BaselineSessionID = newerFullID
+	staleBinding.BaselineEvaluationRevision = uuid.NewString()
+	if _, err := s.PromoteDeltaToCurrentSnapshot(ctx, projectID, deltaID, newerFullID, 14, 30, PageRankOptions{}, staleBinding); !errors.Is(err, ErrCurrentSnapshotSourceSuperseded) {
+		t.Fatalf("old delta after newer full err=%v, want superseded", err)
+	}
+	if got, err := s.GetProjectCurrentSnapshot(ctx, projectID); err != nil || got.ContentWatermarkSessionID != newerFullID {
+		t.Fatalf("old delta changed authoritative watermark: snapshot=%#v err=%v", got, err)
+	}
+	if count, err := s.countProjectCurrentSnapshotDeltas(ctx, projectID); err != nil || count != 0 {
+		t.Fatalf("old delta recreated content marker count=%d err=%v", count, err)
+	}
 	if err := s.appendPageRankEvidence(ctx, &PageRankEvidence{
 		SessionID: baselineID, AttemptID: "25100000-0000-4000-8000-000000000023",
 		State: PageRankEvidenceFailed, Source: PageRankEvidenceComputed,
@@ -385,5 +433,224 @@ func TestCurrentSnapshotDeltaRetryFinalizesBindingWithoutReapplyingContent(t *te
 	}
 	if _, _, err := s.ValidateProjectCurrentSnapshotBinding(ctx, *result); !errors.Is(err, ErrCurrentSnapshotBindingConflict) {
 		t.Fatalf("newer failed baseline evidence did not invalidate snapshot binding: %v", err)
+	}
+	// A later evaluator generation changes the current pointer, but replay must
+	// still validate the exact immutable facts captured by the old journal row.
+	if _, _, err := s.ValidateProjectCurrentSnapshotHistoricalBinding(ctx, *result); err != nil {
+		t.Fatalf("historical binding rejected before quality pointer advance: %v", err)
+	}
+	_, advanced, err := s.PublishCrawlQualityEvaluation(ctx, CrawlQualityResult{
+		SessionID: deltaID, ProjectID: projectID, BaselineSessionID: baselineID, BaselineEvaluationRevision: baselineEval,
+		EvaluationRevision: uuid.NewString(), EvaluatorRevision: "eval-v2", RulesRevision: "rules-v2",
+		PageRankEvidenceRevision: deltaPR, PageRankEvidenceStatus: PageRankEvidenceFinalized,
+		PageRankPredicateVersion: PageRankEligiblePredicateVersion, Trusted: true, Status: "trusted", Score: 100, EvaluatedAt: now.Add(2 * time.Hour),
+	}, deltaEval)
+	if err != nil {
+		t.Fatalf("advance delta quality pointer: %v", err)
+	}
+	revised := *result
+	revised.QualityEvaluationRevision = advanced.EvaluationRevision
+	revised.UpdatedAt = now.Add(3 * time.Hour)
+	if err := s.upsertProjectCurrentSnapshot(ctx, &revised); err != nil {
+		t.Fatalf("publish same-watermark revised binding: %v", err)
+	}
+	if err := s.conn.Exec(ctx, `OPTIMIZE TABLE crawlobserver.project_current_snapshot_promotions_v2 FINAL`); err != nil {
+		t.Fatalf("compact same-watermark journal revisions: %v", err)
+	}
+	restarted := &Store{conn: s.conn}
+	if old, oldErr := restarted.GetProjectCurrentSnapshotRevision(ctx, projectID, result.SnapshotRevision); oldErr != nil || old.QualityEvaluationRevision != result.QualityEvaluationRevision {
+		t.Fatalf("historical journal revision readback=%#v err=%v", old, oldErr)
+	}
+	if current, currentErr := restarted.GetProjectCurrentSnapshotRevision(ctx, projectID, revised.SnapshotRevision); currentErr != nil || current.QualityEvaluationRevision != revised.QualityEvaluationRevision {
+		t.Fatalf("revised journal revision readback=%#v err=%v", current, currentErr)
+	}
+	if _, _, err := restarted.ValidateProjectCurrentSnapshotHistoricalBinding(ctx, *result); err != nil {
+		t.Fatalf("historical binding rejected after quality pointer advance: %v", err)
+	}
+}
+
+func TestFoldCleanupPrunesRawDeltaPredecessorButPreservesReplayFacts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := "snapshot-fold-replay-" + uuid.NewString()
+	f1, d1, d2, d3, d0, current := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	f1Eval, d1Eval, d2Eval, d3Eval, d0Eval := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	f1PR, d1PR, d2PR, d3PR, d0PR := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	t.Cleanup(func() {
+		_ = s.conn.Exec(ctx, `ALTER TABLE crawlobserver.project_current_snapshot_promotions_v2 DELETE WHERE project_id = ? SETTINGS mutations_sync = 1`, projectID)
+		_ = s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_sessions DELETE WHERE id IN (?, ?, ?, ?, ?, ?) SETTINGS mutations_sync = 1`, f1, d1, d2, d3, d0, current)
+	})
+	for id, spec := range map[string]struct {
+		started    time.Time
+		label, cfg string
+	}{
+		f1: {now.Add(-4 * time.Hour), "full", "{}"}, d1: {now.Add(-3 * time.Hour), "Daily Delta Crawl", "{}"},
+		d2: {now.Add(-2 * time.Hour), "Daily Delta Crawl", `{"Crawler":{"DeltaPlan":{"baseline_content_watermark_session_id":"` + d1 + `"}}}`},
+		d3: {now.Add(-time.Hour), "Daily Delta Crawl", `{"Crawler":{"DeltaPlan":{"baseline_content_watermark_session_id":"` + d2 + `"}}}`},
+		d0: {now.Add(-5 * time.Hour), "Daily Delta Crawl", "{}"}, current: {now.Add(-4 * time.Hour), CurrentSnapshotLabel, "{}"},
+	} {
+		if err := s.InsertSession(ctx, &CrawlSession{ID: id, StartedAt: spec.started, FinishedAt: spec.started, Status: "completed", ProjectID: &projectID, Label: spec.label, Config: spec.cfg}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.InsertPages(ctx, []PageRow{{CrawlSessionID: d1, URL: "https://example.test/d1", FinalURL: "https://example.test/d1", StatusCode: 200}}); err != nil {
+		t.Fatal(err)
+	}
+	quality := func(sessionID, evaluationID, evidenceID, baselineID, baselineEval string, full bool) {
+		if err := s.appendPageRankEvidence(ctx, &PageRankEvidence{SessionID: sessionID, AttemptID: evidenceID, State: PageRankEvidenceFinalized, Source: PageRankEvidenceComputed, AlgorithmVersion: PageRankAlgorithmVersion, PredicateVersion: PageRankEligiblePredicateVersion, OccurredAt: now}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.PublishCrawlQualityEvaluation(ctx, CrawlQualityResult{SessionID: sessionID, ProjectID: projectID, BaselineSessionID: baselineID, BaselineEvaluationRevision: baselineEval, EvaluationRevision: evaluationID, EvaluatorRevision: "eval", RulesRevision: "rules", PageRankEvidenceRevision: evidenceID, PageRankEvidenceStatus: PageRankEvidenceFinalized, PageRankPredicateVersion: PageRankEligiblePredicateVersion, Trusted: true, IsFullCrawl: full, Status: "trusted", Score: 100, EvaluatedAt: now}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quality(f1, f1Eval, f1PR, "", "", true)
+	quality(d1, d1Eval, d1PR, f1, f1Eval, false)
+	quality(d2, d2Eval, d2PR, f1, f1Eval, false)
+	quality(d3, d3Eval, d3PR, f1, f1Eval, false)
+	quality(d0, d0Eval, d0PR, f1, f1Eval, false)
+	base := ProjectCurrentSnapshot{ProjectID: projectID, SourceSessionID: f1, SourceStartedAt: now.Add(-4 * time.Hour), ContentWatermarkSessionID: d1, ContentWatermarkStartedAt: now.Add(-3 * time.Hour), CurrentSessionID: current, BaselineSessionID: f1, QualityBaselineSessionID: f1, QualityEvaluationRevision: d1Eval, BaselineQualityEvaluationRevision: f1Eval, PageRankEvidenceRevision: d1PR, QualityEvaluatorRevision: "eval", QualityRulesRevision: "rules", QualityPromotionStatus: "applied", BaselineCreatedAt: now, UpdatedAt: now}
+	if err := s.upsertProjectCurrentSnapshot(ctx, &base); err != nil {
+		t.Fatal(err)
+	}
+	live := base
+	live.ContentWatermarkSessionID, live.ContentWatermarkStartedAt, live.QualityEvaluationRevision, live.PageRankEvidenceRevision = d2, now.Add(-2*time.Hour), d2Eval, d2PR
+	live.UpdatedAt = now.Add(time.Second)
+	if err := s.upsertProjectCurrentSnapshot(ctx, &live); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.conn.Exec(ctx, `INSERT INTO crawlobserver.project_current_snapshot_deltas (project_id, delta_session_id, current_session_id, applied_at) VALUES (?, toUUID(?), toUUID(?), ?)`, projectID, d1, current, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.completeFoldedSnapshotCleanup(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := s.countProjectCurrentSnapshotDeltas(ctx, projectID); err != nil || count != 0 {
+		t.Fatalf("fold cleanup markers=%d err=%v", count, err)
+	}
+	if _, err := s.GetSession(ctx, d1); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("D1 raw session survived prune: %v", err)
+	}
+	if pages, err := s.CountPages(ctx, d1); err != nil || pages != 0 {
+		t.Fatalf("D1 heavy pages remain=%d err=%v", pages, err)
+	}
+	if _, err := s.GetCrawlQualityEvaluation(ctx, d1, d1Eval); err != nil {
+		t.Fatalf("D1 immutable quality lost: %v", err)
+	}
+	if _, err := s.GetPageRankEvidence(ctx, d1, d1PR); err != nil {
+		t.Fatalf("D1 immutable evidence lost: %v", err)
+	}
+	if err := s.DeleteSession(ctx, d1); err == nil || !strings.Contains(err.Error(), "current_snapshot_delta_plan_predecessor") {
+		t.Fatalf("D1 immutable facts unprotected err=%v", err)
+	}
+	restarted := &Store{conn: s.conn}
+	if _, _, err := restarted.ValidateProjectCurrentSnapshotHistoricalBinding(ctx, base); err != nil {
+		t.Fatalf("D1 historical replay invalid after restart: %v", err)
+	}
+	if _, _, err := restarted.ValidateProjectCurrentSnapshotHistoricalBinding(ctx, live); err != nil {
+		t.Fatalf("D2 historical replay invalid after restart: %v", err)
+	}
+	liveD3 := live
+	liveD3.ContentWatermarkSessionID, liveD3.ContentWatermarkStartedAt, liveD3.QualityEvaluationRevision, liveD3.PageRankEvidenceRevision = d3, now.Add(-time.Hour), d3Eval, d3PR
+	liveD3.UpdatedAt = now.Add(2 * time.Second)
+	if err := s.upsertProjectCurrentSnapshot(ctx, &liveD3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.cleanupSupersededDeltaPlanPredecessor(ctx, liveD3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetCrawlQualityEvaluation(ctx, d1, d1Eval); err == nil {
+		t.Fatal("D1 metadata survived after D3 advanced")
+	}
+	if _, err := s.GetPageRankEvidence(ctx, d1, d1PR); err == nil {
+		t.Fatal("D1 evidence survived after D3 advanced")
+	}
+	if _, err := s.GetCrawlQualityEvaluation(ctx, d2, d2Eval); err != nil {
+		t.Fatalf("D2 metadata was not retained for D3: %v", err)
+	}
+	if err := s.deleteDeltaSnapshotSessionChecked(ctx, d0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetCrawlQualityEvaluation(ctx, d0, d0Eval); err == nil {
+		t.Fatal("unrelated D0 immutable quality survived")
+	}
+}
+
+func TestTrustedFullInitializeRecoversUnprovableLegacySnapshotIntoV2(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID, fullID, deltaID := "snapshot-legacy-recovery-"+uuid.NewString(), uuid.NewString(), uuid.NewString()
+	fullEval, fullPR := uuid.NewString(), uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	t.Cleanup(func() {
+		for _, table := range []string{"project_current_snapshots", "project_current_snapshot_promotions", "project_current_snapshot_promotions_v2"} {
+			_ = s.conn.Exec(ctx, `ALTER TABLE crawlobserver.`+table+` DELETE WHERE project_id = ? SETTINGS mutations_sync = 1`, projectID)
+		}
+		_ = s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_sessions DELETE WHERE id IN (?, ?) SETTINGS mutations_sync = 1`, fullID, deltaID)
+	})
+	for id, spec := range map[string]struct {
+		started time.Time
+		label   string
+	}{fullID: {now, "full"}, deltaID: {now.Add(time.Minute), "Daily Delta Crawl"}} {
+		if err := s.InsertSession(ctx, &CrawlSession{ID: id, StartedAt: spec.started, FinishedAt: spec.started, Status: "completed", ProjectID: &projectID, Label: spec.label}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.conn.Exec(ctx, `INSERT INTO crawlobserver.project_current_snapshots (project_id, current_session_id, baseline_session_id, baseline_created_at, last_delta_session_id, delta_count, updated_at) VALUES (?, toUUID(?), '', ?, '', 0, ?)`, projectID, uuid.NewString(), now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetProjectCurrentSnapshot(ctx, projectID); !errors.Is(err, ErrCurrentSnapshotBindingConflict) {
+		t.Fatalf("legacy GET err=%v, want binding conflict", err)
+	}
+	if _, err := s.PromoteDeltaToCurrentSnapshot(ctx, projectID, deltaID, fullID, 14, 30, PageRankOptions{}, CrawlQualityPromotionEvent{}); err == nil {
+		t.Fatal("delta unexpectedly recovered unprovable legacy snapshot")
+	}
+	if err := s.appendPageRankEvidence(ctx, &PageRankEvidence{SessionID: fullID, AttemptID: fullPR, State: PageRankEvidenceFinalized, Source: PageRankEvidenceComputed, AlgorithmVersion: PageRankAlgorithmVersion, PredicateVersion: PageRankEligiblePredicateVersion, OccurredAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PublishCrawlQualityEvaluation(ctx, CrawlQualityResult{SessionID: fullID, ProjectID: projectID, EvaluationRevision: fullEval, EvaluatorRevision: "eval", RulesRevision: "rules", PageRankEvidenceRevision: fullPR, PageRankEvidenceStatus: PageRankEvidenceFinalized, PageRankPredicateVersion: PageRankEligiblePredicateVersion, Trusted: true, IsFullCrawl: true, Status: "trusted", Score: 100, EvaluatedAt: now}, ""); err != nil {
+		t.Fatal(err)
+	}
+	binding := CrawlQualityPromotionEvent{ProjectID: projectID, SessionID: fullID, EvaluationRevision: fullEval, PageRankEvidenceRevision: fullPR, BaselineSessionID: fullID, BaselineEvaluationRevision: fullEval, EvaluatorRevision: "eval", RulesRevision: "rules"}
+	badBinding := binding
+	badBinding.BaselineSessionID = deltaID
+	badBinding.BaselineEvaluationRevision = uuid.NewString()
+	if _, err := s.InitializeProjectCurrentSnapshot(ctx, projectID, fullID, badBinding); !errors.Is(err, ErrCurrentSnapshotBindingConflict) {
+		t.Fatalf("non-self full binding err=%v, want conflict", err)
+	}
+	var v2Before uint64
+	if err := s.conn.QueryRow(ctx, `SELECT count() FROM crawlobserver.project_current_snapshot_promotions_v2 WHERE project_id = ?`, projectID).Scan(&v2Before); err != nil || v2Before != 0 {
+		t.Fatalf("non-self binding published v2 count=%d err=%v", v2Before, err)
+	}
+	snap, err := s.InitializeProjectCurrentSnapshot(ctx, projectID, fullID, binding)
+	if err != nil {
+		t.Fatalf("trusted full recovery initialize: %v", err)
+	}
+	var journalBefore uint64
+	if err := s.conn.QueryRow(ctx, `SELECT count() FROM crawlobserver.project_current_snapshot_promotions_v2 WHERE project_id = ?`, projectID).Scan(&journalBefore); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := (&Store{conn: s.conn}).InitializeProjectCurrentSnapshot(ctx, projectID, fullID, binding)
+	if err != nil || retry.CurrentSessionID != snap.CurrentSessionID || retry.SnapshotRevision != snap.SnapshotRevision {
+		t.Fatalf("full initialize retry=%#v err=%v, want existing pointer", retry, err)
+	}
+	var journalAfter uint64
+	if err := s.conn.QueryRow(ctx, `SELECT count() FROM crawlobserver.project_current_snapshot_promotions_v2 WHERE project_id = ?`, projectID).Scan(&journalAfter); err != nil || journalAfter != journalBefore {
+		t.Fatalf("full initialize retry journal before=%d after=%d err=%v", journalBefore, journalAfter, err)
+	}
+	var syntheticCount uint64
+	if err := s.conn.QueryRow(ctx, `SELECT count() FROM crawlobserver.crawl_sessions FINAL WHERE project_id = ? AND label = ?`, projectID, CurrentSnapshotLabel).Scan(&syntheticCount); err != nil || syntheticCount != 1 {
+		t.Fatalf("full initialize retry synthetic session count=%d err=%v", syntheticCount, err)
+	}
+	if _, _, err := s.ValidateProjectCurrentSnapshotBinding(ctx, *snap); err != nil {
+		t.Fatalf("recovered v2 snapshot invalid: %v", err)
+	}
+	var legacyRows uint64
+	if err := s.conn.QueryRow(ctx, `SELECT count() FROM crawlobserver.project_current_snapshots WHERE project_id = ?`, projectID).Scan(&legacyRows); err != nil || legacyRows != 1 {
+		t.Fatalf("legacy audit row changed count=%d err=%v", legacyRows, err)
+	}
+	if got, err := s.GetProjectCurrentSnapshot(ctx, projectID); err != nil || got.SourceSessionID != fullID {
+		t.Fatalf("v2 canonical recovery=%#v err=%v", got, err)
 	}
 }

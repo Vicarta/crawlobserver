@@ -141,6 +141,180 @@ func TestEvaluateDeltaPromotionGateBlocksHigh5xxRate(t *testing.T) {
 	}
 }
 
+func TestDeltaQualityBindsImmutableSnapshotLineageAndRejectsStalePlan(t *testing.T) {
+	keyStore, err := apikeys.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keyStore.Close()
+
+	projectID := "project-delta-lineage"
+	fullID := "25100000-0000-4000-8000-000000000001"
+	deltaID := "25100000-0000-4000-8000-000000000002"
+	materializedID := "25100000-0000-4000-8000-000000000003"
+	watermarkID := "25100000-0000-4000-8000-000000000004"
+	fullEval := "25100000-0000-4000-8000-000000000011"
+	watermarkEval := "25100000-0000-4000-8000-000000000012"
+	fullEvidenceID := "25100000-0000-4000-8000-000000000021"
+	deltaEvidenceID := "25100000-0000-4000-8000-000000000022"
+
+	predecessor := &storage.ProjectCurrentSnapshot{
+		ProjectID: projectID, SnapshotRevision: 7, CurrentSessionID: materializedID,
+		SourceSessionID: fullID, ContentWatermarkSessionID: watermarkID,
+		QualityEvaluationRevision: watermarkEval, BaselineQualityEvaluationRevision: fullEval,
+		QualityBaselineSessionID: fullID, PageRankEvidenceRevision: deltaEvidenceID,
+		QualityPromotionStatus: "applied",
+	}
+	snapshot := *predecessor
+	currentQuality := &storage.CrawlQualityResult{SessionID: watermarkID, ProjectID: projectID, EvaluationRevision: watermarkEval, Trusted: true}
+	fullQuality := &storage.CrawlQualityResult{
+		SessionID: fullID, ProjectID: projectID, EvaluationRevision: fullEval,
+		EvaluatorRevision: qualityEvaluatorRevision, PageRankEvidenceRevision: fullEvidenceID,
+		PageRankPredicateVersion: storage.PageRankEligiblePredicateVersion,
+		Trusted:                  true, IsFullCrawl: true, Status: "trusted",
+	}
+	fullEvidence := &storage.PageRankEvidence{
+		SessionID: fullID, AttemptID: fullEvidenceID, State: storage.PageRankEvidenceFinalized,
+		PredicateVersion: storage.PageRankEligiblePredicateVersion,
+	}
+	deltaEvidence := &storage.PageRankEvidence{
+		SessionID: deltaID, AttemptID: deltaEvidenceID, State: storage.PageRankEvidenceFinalized,
+		PredicateVersion: storage.PageRankEligiblePredicateVersion,
+	}
+	currents := map[string]*storage.CrawlQualityResult{fullID: fullQuality}
+	promotions := []storage.CrawlQualityPromotionEvent{}
+	publishes := []string{}
+	supersededSessions := map[string]bool{}
+	deltaCalls := 0
+	var deltaBinding storage.CrawlQualityPromotionEvent
+	store := qualitySnapshotServerStore{
+		mockStore: &mockStore{getSessionByID: map[string]*storage.CrawlSession{
+			fullID: {ID: fullID, ProjectID: &projectID, Status: "completed", Label: "full crawl"},
+		}},
+		qualityGateMock: qualityGateMock{
+			metrics: &storage.CrawlQualityMetrics{HTMLPages: 10}, currents: currents, promotions: &promotions,
+			evidences: map[string]*storage.PageRankEvidence{fullID: fullEvidence, deltaID: deltaEvidence}, publishes: &publishes,
+		},
+		currentSnapshotGateMock: currentSnapshotGateMock{
+			snapshot: &snapshot, snapshotRevisions: map[uint64]*storage.ProjectCurrentSnapshot{7: predecessor},
+			quality: currentQuality, evidence: deltaEvidence,
+			historicalQuality: currentQuality, historicalEvidence: deltaEvidence, supersededSessions: supersededSessions,
+			deltaCalls: &deltaCalls, deltaBinding: &deltaBinding,
+		},
+	}
+	srv := &Server{store: store, keyStore: keyStore}
+	fullQuality.RulesRevision, err = srv.currentQualityRulesRevision(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planJSON := func(plan config.DeltaPlanConfig) string {
+		return fmt.Sprintf(`{"Crawler":{"DeltaPlan":{"baseline_session_id":%q,"baseline_source_session_id":%q,"baseline_evaluation_revision":%q,"baseline_source_evaluation_revision":%q,"baseline_snapshot_revision":%d,"baseline_content_watermark_session_id":%q}}}`,
+			plan.BaselineSessionID, plan.BaselineSourceSessionID, plan.BaselineEvaluationRevision,
+			plan.BaselineSourceEvaluationRevision, plan.BaselineSnapshotRevision, plan.BaselineContentWatermarkSessionID)
+	}
+	plan := config.DeltaPlanConfig{
+		BaselineSessionID: materializedID, BaselineSourceSessionID: fullID,
+		BaselineEvaluationRevision: watermarkEval, BaselineSourceEvaluationRevision: fullEval,
+		BaselineSnapshotRevision: 7, BaselineContentWatermarkSessionID: watermarkID,
+	}
+	sess := storage.CrawlSession{
+		ID: deltaID, ProjectID: &projectID, Status: "completed", Label: "Daily Delta Crawl",
+		PagesCrawled: 10, Config: planJSON(plan),
+	}
+
+	first, changed, promotionChanged, promotion, err := srv.evaluateAndPublishSessionQuality(
+		context.Background(), sess, deltaEvidence, "test", "", "delta lifecycle test",
+	)
+	if err != nil {
+		t.Fatalf("evaluate and promote current delta plan: %v", err)
+	}
+	if !changed || !promotionChanged || promotion == nil || promotion.Status != "applied" || deltaCalls != 1 ||
+		!first.Trusted || first.BaselineSessionID != fullID || first.BaselineEvaluationRevision != fullEval ||
+		deltaBinding.BaselineSessionID != fullID || deltaBinding.BaselineEvaluationRevision != fullEval ||
+		hasFinding(first.Findings, "stale_delta_baseline") {
+		t.Fatalf("current delta lineage was not bound to raw full source: %#v", first)
+	}
+	// A restarted scheduler resolves the immutable predecessor from journal
+	// history. The applied Delta remains trusted and its content is not overlaid.
+	restarted := &Server{store: store, keyStore: keyStore}
+	second, changed, promotionChanged, promotion, err := restarted.evaluateAndPublishSessionQuality(
+		context.Background(), sess, deltaEvidence, "scheduler", first.EvaluationRevision, "scheduler reconciliation",
+	)
+	if err != nil || changed || promotionChanged || promotion == nil || promotion.Status != "applied" ||
+		second.EvaluationRevision != first.EvaluationRevision || deltaCalls != 1 {
+		t.Fatalf("applied delta replay was not idempotent from durable predecessor: first=%#v second=%#v promotion=%#v calls=%d err=%v", first, second, promotion, deltaCalls, err)
+	}
+	// A fold replaces the materialized baseline and clears applied-delta markers,
+	// but the canonical source/watermark and immutable predecessor journal remain.
+	snapshot.SnapshotRevision = 9
+	snapshot.BaselineSessionID = "25100000-0000-4000-8000-000000000006"
+	snapshot.DeltaCount = 0
+	foldedRestart := &Server{store: store, keyStore: keyStore}
+	folded, changed, promotionChanged, promotion, err := foldedRestart.evaluateAndPublishSessionQuality(
+		context.Background(), sess, deltaEvidence, "scheduler", second.EvaluationRevision, "scheduler reconciliation",
+	)
+	if err != nil || changed || promotionChanged || promotion == nil || promotion.Status != "applied" ||
+		!folded.Trusted || folded.EvaluationRevision != first.EvaluationRevision || deltaCalls != 1 {
+		t.Fatalf("fold cleanup broke applied delta replay: result=%#v promotion=%#v calls=%d err=%v", folded, promotion, deltaCalls, err)
+	}
+	if snapshot.SnapshotRevision != 9 || snapshot.ContentWatermarkSessionID != deltaID ||
+		snapshot.QualityEvaluationRevision != first.EvaluationRevision {
+		t.Fatalf("fold replay mutated Current Snapshot binding: %#v", snapshot)
+	}
+	if _, err := store.GetSession(context.Background(), watermarkID); err == nil {
+		t.Fatal("folded D1 raw crawl session remained scheduler-visible")
+	}
+	for _, publishedSessionID := range publishes {
+		if publishedSessionID == watermarkID {
+			t.Fatalf("scheduler replay re-evaluated folded D1 raw session: publishes=%#v", publishes)
+		}
+	}
+	// Re-evaluating the source or predecessor can move their current pointers,
+	// but cannot invalidate the immutable facts captured by journal revision 7.
+	currents[fullID] = &storage.CrawlQualityResult{SessionID: fullID, EvaluationRevision: "25100000-0000-4000-8000-000000000099"}
+	store.currentSnapshotGateMock.quality = &storage.CrawlQualityResult{SessionID: watermarkID, EvaluationRevision: "25100000-0000-4000-8000-000000000098"}
+	pointerAdvanced, err := restarted.evaluateSessionQualityResult(context.Background(), sess, deltaEvidence, "test")
+	if err != nil || !pointerAdvanced.Trusted || pointerAdvanced.EvaluationRevision != first.EvaluationRevision ||
+		hasFinding(pointerAdvanced.Findings, "stale_delta_baseline") {
+		t.Fatalf("current-pointer changes invalidated immutable delta lineage: result=%#v err=%v", pointerAdvanced, err)
+	}
+
+	// F2 or a later Delta can supersede snapshot promotion without corrupting
+	// this crawl's immutable quality evaluation.
+	snapshot.SnapshotRevision = 10
+	snapshot.ContentWatermarkSessionID = "25100000-0000-4000-8000-000000000005"
+	historical, err := srv.evaluateSessionQualityResult(context.Background(), sess, deltaEvidence, "test")
+	if err != nil {
+		t.Fatalf("evaluate historical delta plan: %v", err)
+	}
+	if !historical.Trusted || historical.EvaluationRevision != first.EvaluationRevision {
+		t.Fatalf("newer snapshot corrupted historical delta quality: %#v", historical)
+	}
+	supersededSessions[deltaID] = true
+	supersededSrv := &Server{store: store, keyStore: keyStore}
+	historical, changed, promotionChanged, promotion, err = supersededSrv.evaluateAndPublishSessionQuality(
+		context.Background(), sess, deltaEvidence, "scheduler", second.EvaluationRevision, "scheduler reconciliation",
+	)
+	if err != nil || changed || !promotionChanged || promotion == nil || promotion.Status != "superseded" || len(promotions) != 3 {
+		t.Fatalf("historical delta promotion was not typed superseded: changed=%t promotion=%#v events=%#v err=%v", changed, promotion, promotions, err)
+	}
+
+	legacyPlan := plan
+	legacyPlan.BaselineSnapshotRevision = 0
+	sess.Config = planJSON(legacyPlan)
+	legacy, err := srv.evaluateSessionQualityResult(context.Background(), sess, deltaEvidence, "test")
+	if err != nil || legacy.Trusted || !hasFinding(legacy.Findings, "stale_delta_baseline") {
+		t.Fatalf("legacy delta plan did not fail closed: result=%#v err=%v", legacy, err)
+	}
+	missingHistoryPlan := plan
+	missingHistoryPlan.BaselineSnapshotRevision = 6
+	sess.Config = planJSON(missingHistoryPlan)
+	missingHistory, err := srv.evaluateSessionQualityResult(context.Background(), sess, deltaEvidence, "test")
+	if err != nil || missingHistory.Trusted || !hasFinding(missingHistory.Findings, "stale_delta_baseline") {
+		t.Fatalf("missing predecessor journal did not fail closed: result=%#v err=%v", missingHistory, err)
+	}
+}
+
 func TestCompareQualityMetricsBlocks5xxGrowth(t *testing.T) {
 	settings := apikeys.DefaultProjectQualitySettings("project-astro")
 	settings.Status5xxPercent = 5
@@ -524,6 +698,124 @@ func TestFullCrawlPromotionAttemptKeepsSelfBaselineLineage(t *testing.T) {
 	}
 }
 
+func TestLegacyCurrentSnapshotAllowsAuditedFullRecoveryButBlocksDelta(t *testing.T) {
+	projectID := "project-legacy-current-snapshot"
+	fullID := "25100000-0000-4000-8000-000000000301"
+	evidence := &storage.PageRankEvidence{
+		SessionID: fullID, AttemptID: "evidence", State: storage.PageRankEvidenceFinalized,
+		PredicateVersion: storage.PageRankEligiblePredicateVersion,
+	}
+	full := &storage.CrawlQualityResult{
+		SessionID: fullID, ProjectID: projectID, EvaluationRevision: "evaluation", PageRankEvidenceRevision: evidence.AttemptID,
+		EvaluatorRevision: qualityEvaluatorRevision, RulesRevision: "rules", Trusted: true, IsFullCrawl: true,
+	}
+	promotions := []storage.CrawlQualityPromotionEvent{}
+	initCalls := 0
+	store := qualitySnapshotServerStore{
+		mockStore:       &mockStore{},
+		qualityGateMock: qualityGateMock{current: full, evidence: evidence, promotions: &promotions},
+		currentSnapshotGateMock: currentSnapshotGateMock{
+			snapshot: &storage.ProjectCurrentSnapshot{ProjectID: projectID}, snapshotErr: storage.ErrCurrentSnapshotBindingConflict,
+			promotionGuardErr: storage.ErrCurrentSnapshotBindingConflict, initCalls: &initCalls,
+		},
+	}
+	legacyRead := httptest.NewRecorder()
+	legacyRequest := httptest.NewRequest(http.MethodGet, "/api/projects/"+projectID+"/current-snapshot", nil)
+	legacyRequest.SetPathValue("id", projectID)
+	(&Server{store: store}).handleProjectCurrentSnapshot(legacyRead, legacyRequest)
+	if legacyRead.Code != http.StatusConflict {
+		t.Fatalf("unprovable legacy snapshot GET = %d %s, want 409", legacyRead.Code, legacyRead.Body.String())
+	}
+	sess := storage.CrawlSession{ID: fullID, ProjectID: &projectID, Status: "completed"}
+	changed, terminal, err := (&Server{store: store}).reconcileCurrentSnapshotPromotion(context.Background(), store, sess, full, evidence, "admin legacy recovery")
+	if err != nil || !changed || terminal == nil || terminal.Status != "applied" || initCalls != 1 ||
+		len(promotions) != 2 || promotions[0].Status != "started" || promotions[1].Status != "applied" {
+		t.Fatalf("trusted full did not recover legacy snapshot: changed=%t terminal=%#v calls=%d events=%#v err=%v", changed, terminal, initCalls, promotions, err)
+	}
+	if store.snapshot.SourceSessionID != fullID || store.snapshot.ContentWatermarkSessionID != fullID ||
+		store.snapshot.QualityEvaluationRevision != full.EvaluationRevision ||
+		store.snapshot.PageRankEvidenceRevision != evidence.AttemptID ||
+		store.snapshot.QualityPromotionStatus != "applied" {
+		t.Fatalf("legacy recovery did not publish complete v2 provenance: %#v", store.snapshot)
+	}
+
+	deltaID := "25100000-0000-4000-8000-000000000302"
+	deltaEvidence := &storage.PageRankEvidence{
+		SessionID: deltaID, AttemptID: "delta-evidence", State: storage.PageRankEvidenceFinalized,
+		PredicateVersion: storage.PageRankEligiblePredicateVersion,
+	}
+	delta := &storage.CrawlQualityResult{
+		SessionID: deltaID, ProjectID: projectID, EvaluationRevision: "delta-evaluation", PageRankEvidenceRevision: deltaEvidence.AttemptID,
+		EvaluatorRevision: qualityEvaluatorRevision, RulesRevision: "rules", Trusted: true,
+		BaselineSessionID: fullID, BaselineEvaluationRevision: full.EvaluationRevision,
+	}
+	deltaEvents := []storage.CrawlQualityPromotionEvent{}
+	deltaCalls := 0
+	deltaStore := qualitySnapshotServerStore{
+		mockStore:       &mockStore{},
+		qualityGateMock: qualityGateMock{current: delta, evidence: deltaEvidence, promotions: &deltaEvents},
+		currentSnapshotGateMock: currentSnapshotGateMock{
+			snapshot:          &storage.ProjectCurrentSnapshot{ProjectID: projectID},
+			promotionGuardErr: storage.ErrCurrentSnapshotBindingConflict, deltaCalls: &deltaCalls,
+		},
+	}
+	deltaSession := storage.CrawlSession{ID: deltaID, ProjectID: &projectID, Status: "completed", Label: "Daily Delta Crawl"}
+	changed, terminal, err = (&Server{store: deltaStore}).reconcileCurrentSnapshotPromotion(context.Background(), deltaStore, deltaSession, delta, deltaEvidence, "delta recovery denied")
+	if err != nil || !changed || terminal == nil || terminal.Status != "conflict" || deltaCalls != 0 || len(deltaEvents) != 1 {
+		t.Fatalf("Delta recovered unprovable legacy snapshot: changed=%t terminal=%#v calls=%d events=%#v err=%v", changed, terminal, deltaCalls, deltaEvents, err)
+	}
+}
+
+func TestFullCrawlPromotionRetryCompletesPublishedPointerAuditAttempt(t *testing.T) {
+	projectID := "project-published-pointer-retry"
+	sessionID := "25100000-0000-4000-8000-000000000303"
+	promotionID := "25100000-0000-4000-8000-000000000304"
+	evidence := &storage.PageRankEvidence{
+		SessionID: sessionID, AttemptID: "evidence", State: storage.PageRankEvidenceFinalized,
+		PredicateVersion: storage.PageRankEligiblePredicateVersion,
+	}
+	result := &storage.CrawlQualityResult{
+		SessionID: sessionID, ProjectID: projectID, EvaluationRevision: "evaluation", PageRankEvidenceRevision: evidence.AttemptID,
+		EvaluatorRevision: qualityEvaluatorRevision, RulesRevision: "rules", Trusted: true, IsFullCrawl: true,
+	}
+	promotions := []storage.CrawlQualityPromotionEvent{{
+		ProjectID: projectID, SessionID: sessionID, PromotionID: promotionID,
+		EvaluationRevision: result.EvaluationRevision, PageRankEvidenceRevision: evidence.AttemptID,
+		BaselineSessionID: sessionID, BaselineEvaluationRevision: result.EvaluationRevision,
+		EvaluatorRevision: result.EvaluatorRevision, RulesRevision: result.RulesRevision,
+		Status: "started",
+	}}
+	initCalls := 0
+	snapshot := &storage.ProjectCurrentSnapshot{
+		ProjectID: projectID, SourceSessionID: sessionID, ContentWatermarkSessionID: sessionID,
+		QualityBaselineSessionID: sessionID, QualityEvaluationRevision: result.EvaluationRevision,
+		BaselineQualityEvaluationRevision: result.EvaluationRevision, PageRankEvidenceRevision: evidence.AttemptID,
+		QualityEvaluatorRevision: result.EvaluatorRevision, QualityRulesRevision: result.RulesRevision,
+		QualityPromotionStatus: "applied",
+	}
+	store := qualitySnapshotServerStore{
+		mockStore:       &mockStore{},
+		qualityGateMock: qualityGateMock{current: result, evidence: evidence, promotions: &promotions},
+		currentSnapshotGateMock: currentSnapshotGateMock{
+			snapshot: snapshot, initCalls: &initCalls,
+		},
+	}
+	sess := storage.CrawlSession{ID: sessionID, ProjectID: &projectID, Status: "completed"}
+	changed, terminal, err := (&Server{store: store}).reconcileCurrentSnapshotPromotion(context.Background(), store, sess, result, evidence, "retry published pointer")
+	if err != nil || !changed || terminal == nil || terminal.Status != "applied" || initCalls != 1 {
+		t.Fatalf("published-pointer retry failed: changed=%t terminal=%#v calls=%d err=%v", changed, terminal, initCalls, err)
+	}
+	if len(promotions) != 2 || promotions[0].Status != "started" || promotions[1].Status != "applied" {
+		t.Fatalf("retry did not complete one started attempt: %#v", promotions)
+	}
+	if promotions[0].PromotionID != promotionID || promotions[1].PromotionID != promotionID {
+		t.Fatalf("retry created a second promotion attempt: %#v", promotions)
+	}
+	if promotions[1].EvaluationRevision != result.EvaluationRevision {
+		t.Fatalf("retry changed evaluation revision: got %q want %q", promotions[1].EvaluationRevision, result.EvaluationRevision)
+	}
+}
+
 func TestPromotionStartAuditFailurePreventsSnapshotMutation(t *testing.T) {
 	projectID := "project-gerus"
 	sessionID := "cecabb70-b621-48a1-9dc4-1feb3c3757cb"
@@ -546,6 +838,143 @@ func TestPromotionStartAuditFailurePreventsSnapshotMutation(t *testing.T) {
 	}
 	if initCalls != 0 {
 		t.Fatalf("snapshot initialized before durable promotion start: calls=%d", initCalls)
+	}
+}
+
+func TestHistoricalFullCrawlPromotionIsSupersededBeforeMutation(t *testing.T) {
+	projectID := "project-gerus"
+	historicalID := "25100000-0000-4000-8000-000000000001"
+	newestID := "25100000-0000-4000-8000-000000000003"
+	result := &storage.CrawlQualityResult{
+		SessionID: historicalID, ProjectID: projectID, EvaluationRevision: "evaluation", PageRankEvidenceRevision: "evidence",
+		EvaluatorRevision: qualityEvaluatorRevision, RulesRevision: "rules", Trusted: true, IsFullCrawl: true,
+	}
+	evidence := &storage.PageRankEvidence{
+		SessionID: historicalID, AttemptID: "evidence", State: storage.PageRankEvidenceFinalized,
+		PredicateVersion: storage.PageRankEligiblePredicateVersion,
+	}
+	promotions := []storage.CrawlQualityPromotionEvent{}
+	initCalls := 0
+	guardCalls := []string{}
+	store := qualitySnapshotServerStore{
+		mockStore:       &mockStore{},
+		qualityGateMock: qualityGateMock{current: result, evidence: evidence, promotions: &promotions},
+		currentSnapshotGateMock: currentSnapshotGateMock{
+			snapshot:           &storage.ProjectCurrentSnapshot{ProjectID: projectID, CurrentSessionID: newestID},
+			supersededSessions: map[string]bool{historicalID: true}, promotionGuardCalls: &guardCalls,
+			initCalls: &initCalls,
+		},
+	}
+	sess := storage.CrawlSession{ID: historicalID, ProjectID: &projectID, Status: "completed"}
+	changed, terminal, err := (&Server{store: store}).reconcileCurrentSnapshotPromotion(context.Background(), store, sess, result, evidence, "scheduler reconciliation")
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !changed || terminal == nil || terminal.Status != "superseded" {
+		t.Fatalf("historical promotion = changed %t, event %#v", changed, terminal)
+	}
+	if initCalls != 0 || store.snapshot.CurrentSessionID != newestID {
+		t.Fatalf("historical promotion mutated current snapshot: calls=%d snapshot=%#v", initCalls, store.snapshot)
+	}
+	if len(guardCalls) != 1 || guardCalls[0] != historicalID || len(promotions) != 1 {
+		t.Fatalf("guard calls=%#v promotions=%#v", guardCalls, promotions)
+	}
+}
+
+func TestConcurrentNewerSnapshotMakesPromotionSuperseded(t *testing.T) {
+	projectID := "project-gerus"
+	sessionID := "25100000-0000-4000-8000-000000000001"
+	result := &storage.CrawlQualityResult{
+		SessionID: sessionID, ProjectID: projectID, EvaluationRevision: "evaluation", PageRankEvidenceRevision: "evidence",
+		EvaluatorRevision: qualityEvaluatorRevision, RulesRevision: "rules", Trusted: true, IsFullCrawl: true,
+	}
+	evidence := &storage.PageRankEvidence{
+		SessionID: sessionID, AttemptID: "evidence", State: storage.PageRankEvidenceFinalized,
+		PredicateVersion: storage.PageRankEligiblePredicateVersion,
+	}
+	promotions := []storage.CrawlQualityPromotionEvent{}
+	store := qualitySnapshotServerStore{
+		mockStore:       &mockStore{},
+		qualityGateMock: qualityGateMock{current: result, evidence: evidence, promotions: &promotions},
+		currentSnapshotGateMock: currentSnapshotGateMock{
+			snapshot: &storage.ProjectCurrentSnapshot{}, initErr: storage.ErrCurrentSnapshotSourceSuperseded,
+		},
+	}
+	sess := storage.CrawlSession{ID: sessionID, ProjectID: &projectID, Status: "completed"}
+	_, terminal, err := (&Server{store: store}).reconcileCurrentSnapshotPromotion(context.Background(), store, sess, result, evidence, "scheduler reconciliation")
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if terminal == nil || terminal.Status != "superseded" || len(promotions) != 2 || promotions[0].Status != "started" || promotions[1].Status != "superseded" {
+		t.Fatalf("concurrent supersession audit = terminal %#v, events %#v", terminal, promotions)
+	}
+	for _, event := range promotions {
+		if event.Status == "applied" || event.Status == "failed" {
+			t.Fatalf("concurrent supersession recorded invalid terminal state: %#v", promotions)
+		}
+	}
+}
+
+func TestQualitySchedulerHistoricalReplayConvergesAtNewestSnapshot(t *testing.T) {
+	keyStore, err := apikeys.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keyStore.Close()
+
+	projectID := "project-fixed-point"
+	startedAt := time.Now().UTC().Add(-time.Hour)
+	sessionA := storage.CrawlSession{ID: "25100000-0000-4000-8000-000000000001", ProjectID: &projectID, Status: "completed", StartedAt: startedAt, PagesCrawled: 1}
+	sessionB := storage.CrawlSession{ID: "25100000-0000-4000-8000-000000000002", ProjectID: &projectID, Status: "completed", StartedAt: startedAt.Add(time.Minute), PagesCrawled: 1}
+	sessionC := storage.CrawlSession{ID: "25100000-0000-4000-8000-000000000003", ProjectID: &projectID, Status: "completed", StartedAt: startedAt.Add(2 * time.Minute), PagesCrawled: 1}
+	sessions := []storage.CrawlSession{sessionB, sessionA, sessionC}
+	evidences := map[string]*storage.PageRankEvidence{}
+	for _, sess := range sessions {
+		evidences[sess.ID] = &storage.PageRankEvidence{
+			SessionID: sess.ID, AttemptID: sess.ID,
+			State: storage.PageRankEvidenceFinalized, PredicateVersion: storage.PageRankEligiblePredicateVersion,
+			EligiblePageCount: 1, PositivePageCount: 1,
+		}
+	}
+	currents := map[string]*storage.CrawlQualityResult{}
+	publishes := []string{}
+	promotions := []storage.CrawlQualityPromotionEvent{}
+	initCalls := 0
+	snapshot := &storage.ProjectCurrentSnapshot{ProjectID: projectID}
+	store := qualitySnapshotServerStore{
+		mockStore: &mockStore{sessions: sessions},
+		qualityGateMock: qualityGateMock{
+			metrics: &storage.CrawlQualityMetrics{HTMLPages: 1}, currents: currents, evidences: evidences,
+			publishes: &publishes, promotions: &promotions,
+			trustedBaselines: map[string]*storage.CrawlSession{sessionB.ID: &sessionA, sessionC.ID: &sessionB},
+		},
+		currentSnapshotGateMock: currentSnapshotGateMock{
+			snapshot: snapshot, supersededSessions: map[string]bool{sessionA.ID: true, sessionB.ID: true}, initCalls: &initCalls,
+		},
+	}
+
+	for minute := int64(0); minute < 2; minute++ {
+		srv := &Server{store: store, keyStore: keyStore, qualitySchedulerNow: func() time.Time { return time.Unix(minute*60, 0) }}
+		srv.evaluateMissingQuality(context.Background(), 20)
+	}
+	publicationsAtFixedPoint := len(publishes)
+	promotionsAtFixedPoint := len(promotions)
+	snapshotWritesAtFixedPoint := initCalls
+	srvAfterRestart := &Server{store: store, keyStore: keyStore, qualitySchedulerNow: func() time.Time { return time.Unix(120, 0) }}
+	srvAfterRestart.evaluateMissingQuality(context.Background(), 20)
+
+	if len(publishes) != publicationsAtFixedPoint || len(promotions) != promotionsAtFixedPoint || initCalls != snapshotWritesAtFixedPoint {
+		t.Fatalf("scheduler did not reach fixed point: publications %d->%d promotions %d->%d snapshot writes %d->%d",
+			publicationsAtFixedPoint, len(publishes), promotionsAtFixedPoint, len(promotions), snapshotWritesAtFixedPoint, initCalls)
+	}
+	if snapshot.CurrentSessionID != sessionC.ID {
+		t.Fatalf("historical replay moved current snapshot to %q, want newest %q", snapshot.CurrentSessionID, sessionC.ID)
+	}
+	if currents[sessionA.ID].BaselineSessionID != "" || currents[sessionB.ID].BaselineSessionID != sessionA.ID || currents[sessionC.ID].BaselineSessionID != sessionB.ID {
+		t.Fatalf("strict predecessor lineage: A=%#v B=%#v C=%#v", currents[sessionA.ID], currents[sessionB.ID], currents[sessionC.ID])
+	}
+	if initCalls != 2 {
+		t.Fatalf("newest snapshot should publish once per converging evaluation revision, calls=%d", initCalls)
 	}
 }
 
@@ -778,19 +1207,20 @@ func hasFinding(findings []storage.CrawlQualityFinding, findingType string) bool
 }
 
 type qualityGateMock struct {
-	matched         int
-	metrics         *storage.CrawlQualityMetrics
-	current         *storage.CrawlQualityResult
-	currents        map[string]*storage.CrawlQualityResult
-	actions         *[]storage.CrawlQualityActionEvent
-	actionErr       error
-	evidence        *storage.PageRankEvidence
-	evidences       map[string]*storage.PageRankEvidence
-	adoptCalls      *int
-	publishes       *[]string
-	promotions      *[]storage.CrawlQualityPromotionEvent
-	promotionErr    error
-	trustedBaseline *storage.CrawlSession
+	matched          int
+	metrics          *storage.CrawlQualityMetrics
+	current          *storage.CrawlQualityResult
+	currents         map[string]*storage.CrawlQualityResult
+	actions          *[]storage.CrawlQualityActionEvent
+	actionErr        error
+	evidence         *storage.PageRankEvidence
+	evidences        map[string]*storage.PageRankEvidence
+	adoptCalls       *int
+	publishes        *[]string
+	promotions       *[]storage.CrawlQualityPromotionEvent
+	promotionErr     error
+	trustedBaseline  *storage.CrawlSession
+	trustedBaselines map[string]*storage.CrawlSession
 }
 
 func (m qualityGateMock) UpsertCrawlQualityResult(context.Context, storage.CrawlQualityResult) error {
@@ -838,7 +1268,13 @@ func (m qualityGateMock) CrawlQualityResultsForSessions(context.Context, []strin
 	return nil, nil
 }
 
-func (m qualityGateMock) LatestTrustedFullCrawlSession(context.Context, string, string) (*storage.CrawlSession, error) {
+func (m qualityGateMock) LatestTrustedFullCrawlSession(_ context.Context, _ string, excludeSessionID string) (*storage.CrawlSession, error) {
+	if m.trustedBaselines != nil {
+		if baseline := m.trustedBaselines[excludeSessionID]; baseline != nil {
+			return baseline, nil
+		}
+		return nil, sql.ErrNoRows
+	}
 	if m.trustedBaseline != nil {
 		return m.trustedBaseline, nil
 	}
@@ -851,37 +1287,111 @@ type qualityServerStore struct {
 }
 
 type currentSnapshotGateMock struct {
-	snapshot    *storage.ProjectCurrentSnapshot
-	quality     *storage.CrawlQualityResult
-	evidence    *storage.PageRankEvidence
-	validateErr error
-	initBinding *storage.CrawlQualityPromotionEvent
-	initCalls   *int
-	initErr     error
+	snapshot            *storage.ProjectCurrentSnapshot
+	snapshotErr         error
+	snapshotRevisions   map[uint64]*storage.ProjectCurrentSnapshot
+	quality             *storage.CrawlQualityResult
+	evidence            *storage.PageRankEvidence
+	historicalQuality   *storage.CrawlQualityResult
+	historicalEvidence  *storage.PageRankEvidence
+	validateErr         error
+	promotionGuardErr   error
+	supersededSessions  map[string]bool
+	promotionGuardCalls *[]string
+	initBinding         *storage.CrawlQualityPromotionEvent
+	initCalls           *int
+	initErr             error
+	deltaCalls          *int
+	deltaBinding        *storage.CrawlQualityPromotionEvent
+	deltaErr            error
 }
 
 func (m currentSnapshotGateMock) GetProjectCurrentSnapshot(context.Context, string) (*storage.ProjectCurrentSnapshot, error) {
+	if m.snapshotErr != nil {
+		return nil, m.snapshotErr
+	}
 	if m.snapshot == nil {
 		return nil, sql.ErrNoRows
 	}
 	return m.snapshot, nil
 }
 
+func (m currentSnapshotGateMock) GetProjectCurrentSnapshotRevision(_ context.Context, _ string, snapshotRevision uint64) (*storage.ProjectCurrentSnapshot, error) {
+	if m.snapshotRevisions != nil {
+		if snap := m.snapshotRevisions[snapshotRevision]; snap != nil {
+			return snap, nil
+		}
+	}
+	if m.snapshot != nil && m.snapshot.SnapshotRevision == snapshotRevision {
+		return m.snapshot, nil
+	}
+	return nil, sql.ErrNoRows
+}
+
+func (m currentSnapshotGateMock) CanPromoteCurrentSnapshotSource(_ context.Context, _ string, candidateSessionID string) (bool, *storage.ProjectCurrentSnapshot, error) {
+	if m.promotionGuardCalls != nil {
+		*m.promotionGuardCalls = append(*m.promotionGuardCalls, candidateSessionID)
+	}
+	if m.promotionGuardErr != nil {
+		return false, m.snapshot, m.promotionGuardErr
+	}
+	if m.supersededSessions != nil && m.supersededSessions[candidateSessionID] {
+		return false, m.snapshot, storage.ErrCurrentSnapshotSourceSuperseded
+	}
+	return true, m.snapshot, nil
+}
+
 func (m currentSnapshotGateMock) ValidateProjectCurrentSnapshotBinding(context.Context, storage.ProjectCurrentSnapshot) (*storage.CrawlQualityResult, *storage.PageRankEvidence, error) {
 	return m.quality, m.evidence, m.validateErr
 }
 
-func (m currentSnapshotGateMock) InitializeProjectCurrentSnapshot(_ context.Context, _ string, _ string, binding storage.CrawlQualityPromotionEvent) (*storage.ProjectCurrentSnapshot, error) {
+func (m currentSnapshotGateMock) ValidateProjectCurrentSnapshotHistoricalBinding(context.Context, storage.ProjectCurrentSnapshot) (*storage.CrawlQualityResult, *storage.PageRankEvidence, error) {
+	if m.historicalQuality != nil || m.historicalEvidence != nil {
+		return m.historicalQuality, m.historicalEvidence, m.validateErr
+	}
+	return m.quality, m.evidence, m.validateErr
+}
+
+func (m currentSnapshotGateMock) InitializeProjectCurrentSnapshot(_ context.Context, _ string, baselineSessionID string, binding storage.CrawlQualityPromotionEvent) (*storage.ProjectCurrentSnapshot, error) {
 	if m.initCalls != nil {
 		*m.initCalls++
 	}
 	if m.initBinding != nil {
 		*m.initBinding = binding
 	}
+	if m.initErr == nil && m.snapshot != nil {
+		m.snapshot.CurrentSessionID = baselineSessionID
+		m.snapshot.SourceSessionID = baselineSessionID
+		m.snapshot.ContentWatermarkSessionID = baselineSessionID
+		m.snapshot.QualityBaselineSessionID = binding.BaselineSessionID
+		m.snapshot.QualityEvaluationRevision = binding.EvaluationRevision
+		m.snapshot.BaselineQualityEvaluationRevision = binding.BaselineEvaluationRevision
+		m.snapshot.PageRankEvidenceRevision = binding.PageRankEvidenceRevision
+		m.snapshot.QualityEvaluatorRevision = binding.EvaluatorRevision
+		m.snapshot.QualityRulesRevision = binding.RulesRevision
+		m.snapshot.QualityPromotionStatus = "applied"
+	}
 	return m.snapshot, m.initErr
 }
 
-func (m currentSnapshotGateMock) PromoteDeltaToCurrentSnapshot(context.Context, string, string, string, int, int, storage.PageRankOptions, storage.CrawlQualityPromotionEvent) (*storage.ProjectCurrentSnapshot, error) {
+func (m currentSnapshotGateMock) PromoteDeltaToCurrentSnapshot(_ context.Context, _ string, deltaSessionID, _ string, _ int, _ int, _ storage.PageRankOptions, binding storage.CrawlQualityPromotionEvent) (*storage.ProjectCurrentSnapshot, error) {
+	if m.deltaCalls != nil {
+		*m.deltaCalls++
+	}
+	if m.deltaBinding != nil {
+		*m.deltaBinding = binding
+	}
+	if m.deltaErr != nil {
+		return m.snapshot, m.deltaErr
+	}
+	if m.snapshot != nil {
+		m.snapshot.SnapshotRevision++
+		m.snapshot.ContentWatermarkSessionID = deltaSessionID
+		m.snapshot.QualityEvaluationRevision = binding.EvaluationRevision
+		m.snapshot.BaselineQualityEvaluationRevision = binding.BaselineEvaluationRevision
+		m.snapshot.QualityBaselineSessionID = binding.BaselineSessionID
+		m.snapshot.PageRankEvidenceRevision = binding.PageRankEvidenceRevision
+	}
 	return m.snapshot, nil
 }
 
@@ -935,13 +1445,32 @@ func (m qualityGateMock) RecordQualityPromotionEvent(_ context.Context, event st
 		return false, nil, m.promotionErr
 	}
 	if m.promotions != nil {
+		for i := len(*m.promotions) - 1; i >= 0; i-- {
+			existing := &(*m.promotions)[i]
+			if existing.ProjectID == event.ProjectID && existing.SessionID == event.SessionID {
+				if existing.EvaluationRevision == event.EvaluationRevision &&
+					existing.PageRankEvidenceRevision == event.PageRankEvidenceRevision &&
+					existing.Status == event.Status {
+					return false, existing, nil
+				}
+				break
+			}
+		}
 		*m.promotions = append(*m.promotions, event)
 	}
 	return true, &event, nil
 }
 
-func (m qualityGateMock) LatestQualityPromotionEvent(context.Context, string, string) (*storage.CrawlQualityPromotionEvent, error) {
-	return nil, nil
+func (m qualityGateMock) LatestQualityPromotionEvent(_ context.Context, projectID, sessionID string) (*storage.CrawlQualityPromotionEvent, error) {
+	if m.promotions != nil {
+		for i := len(*m.promotions) - 1; i >= 0; i-- {
+			event := &(*m.promotions)[i]
+			if event.ProjectID == projectID && event.SessionID == sessionID {
+				return event, nil
+			}
+		}
+	}
+	return nil, sql.ErrNoRows
 }
 
 func (m qualityGateMock) RecordQualityActionEvent(_ context.Context, event storage.CrawlQualityActionEvent) (*storage.CrawlQualityActionEvent, error) {

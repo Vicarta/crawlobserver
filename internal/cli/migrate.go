@@ -1,11 +1,6 @@
 package cli
 
-import (
-	"fmt"
-
-	"github.com/SEObserver/crawlobserver/internal/config"
-	"github.com/spf13/cobra"
-)
+import "github.com/spf13/cobra"
 
 var migrateCmd = &cobra.Command{
 	Use:   "migrate",
@@ -18,10 +13,12 @@ func init() {
 }
 
 func runMigrate(cmd *cobra.Command, args []string) error {
-	cfg, err := config.Load()
+	cfg, releaseWriterLock, err := loadWriterConfig()
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return err
 	}
+	defer releaseWriterLock()
+	initializeTelemetry(cmd, cfg)
 
 	store, cleanup, _, err := setupClickHouse(cfg, "default")
 	if err != nil {

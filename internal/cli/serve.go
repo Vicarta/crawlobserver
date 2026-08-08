@@ -38,10 +38,12 @@ func init() {
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	cfg, err := config.Load()
+	cfg, releaseWriterLock, err := loadWriterConfig()
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return err
 	}
+	defer releaseWriterLock()
+	initializeTelemetry(cmd, cfg)
 
 	if port, _ := cmd.Flags().GetInt("port"); port > 0 {
 		cfg.Server.Port = port

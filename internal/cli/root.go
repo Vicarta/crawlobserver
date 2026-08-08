@@ -22,37 +22,56 @@ var rootCmd = &cobra.Command{
 	Short: "SEO crawler — extract SEO signals at scale",
 	Long:  `CrawlObserver is an open-source SEO crawler that extracts SEO signals (title, canonical, headers, links) and stores them in ClickHouse.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		cfg, _ := config.Load()
-
-		// Skip interactive prompt for gui (has its own OnboardingWizard)
-		if cmd.Name() == "gui" {
+		// Default commands and GUI resolve their writable config path in their
+		// RunE function. Do not call config.Load here: it can write first-run
+		// state before those commands acquire their precise writer lock.
+		if cmd.Name() == "crawlobserver" || cmd.Name() == "gui" {
 			return nil
 		}
-
-		// If --telemetry flag was explicitly passed, apply it directly
-		if cmd.Flags().Changed("telemetry") {
-			val, _ := cmd.Flags().GetBool("telemetry")
-			viper.Set("telemetry.enabled", val)
-			if cfg.Telemetry.AskedAt == "" {
-				viper.Set("telemetry.asked_at", time.Now().UTC().Format(time.RFC3339))
+		if isWriterCommand(cmd) {
+			if _, err := acquireWriterLockBeforeConfig(); err != nil {
+				return err
 			}
-			_ = config.WriteConfig()
-			cfg.Telemetry.Enabled = val
-		} else if cfg.Telemetry.AskedAt == "" && isInteractive() {
-			// First launch: ask for telemetry consent
-			askTelemetryConsent()
-			// Reload config after consent
-			cfg, _ = config.Load()
+			return nil
 		}
-
-		// Init telemetry for all commands
-		telemetry.Init(cfg.Telemetry.Enabled, cfg.Telemetry.InstanceID, updater.Version)
+		cfg, _ := config.Load()
+		initializeTelemetry(cmd, cfg)
 		return nil
 	},
 }
 
+func initializeTelemetry(cmd *cobra.Command, cfg *config.Config) {
+	// If --telemetry flag was explicitly passed, apply it directly.
+	if cmd.Flags().Changed("telemetry") {
+		val, _ := cmd.Flags().GetBool("telemetry")
+		viper.Set("telemetry.enabled", val)
+		if cfg.Telemetry.AskedAt == "" {
+			viper.Set("telemetry.asked_at", time.Now().UTC().Format(time.RFC3339))
+		}
+		_ = config.WriteConfig()
+		cfg.Telemetry.Enabled = val
+	} else if cfg.Telemetry.AskedAt == "" && isInteractive() {
+		// First launch: ask for telemetry consent.
+		askTelemetryConsent()
+		// Reload config after consent.
+		cfg, _ = config.Load()
+	}
+
+	telemetry.Init(cfg.Telemetry.Enabled, cfg.Telemetry.InstanceID, updater.Version)
+}
+
 func Execute() error {
+	defer releaseAllWriterLocks()
 	return rootCmd.Execute()
+}
+
+func isWriterCommand(cmd *cobra.Command) bool {
+	switch cmd.Name() {
+	case "serve", "crawl", "migrate":
+		return true
+	default:
+		return false
+	}
 }
 
 func init() {

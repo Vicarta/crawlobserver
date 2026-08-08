@@ -36,7 +36,8 @@ See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 ## Next Action
 
-Execute urgent Phase 25.1 Plan 01 before the unstarted Phase 26 sitemap work.
+Complete Phase 25.1 fixed-point/monotonic-watermark regression gates, then run
+the second safe app-only production acceptance attempt. Phase 26 remains paused.
 
 ## Accumulated Context
 
@@ -50,6 +51,13 @@ Execute urgent Phase 25.1 Plan 01 before the unstarted Phase 26 sitemap work.
   - Phase 25.1 adds shared PageRank eligibility, durable evidence/evaluation
     revisions, fail-closed completion/promotion, deterministic replay, and a
     narrow admin quality re-evaluation/readback contract.
+  - First production rollout repaired the target quality result, but acceptance
+    failed because historical sessions selected future baselines and repeatedly
+    moved Current Snapshot backwards. The app was safely rolled back with no
+    crawl or ClickHouse restart.
+  - Attempt 2 requires strict historical predecessors, an authoritative
+    full-source/content watermark, typed `superseded` replay, scheduler fixed
+    point, and stable production pointer/revision counts across two intervals.
   - Strict Sol plan check passed on 2026-08-08 after append-only history,
     deterministic legacy adoption, independent promotion recovery,
     fail-on-unavailable ClickHouse tests, API provenance, and rollback

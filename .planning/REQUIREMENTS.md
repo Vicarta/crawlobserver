@@ -88,10 +88,11 @@
 - **QUAL-251-01**: Quality results and findings are isolated by a deterministic evaluation revision that references one exact PageRank evidence revision.
 - **QUAL-251-02**: Scheduler replay and restart recovery replace stale quality facts whenever evidence or rules change, including deterioration and improvement.
 - **SNAP-251-01**: Current Snapshot promotion requires trusted quality evaluated from the current finalized PageRank evidence revision.
+- **SNAP-251-02**: Quality baselines use only the strict historical predecessor by `(started_at, session_id)`, while Current Snapshot full/delta promotion advances a durable content watermark monotonically and returns typed `superseded` for historical replay.
 - **API-251-01**: Admins can idempotently re-evaluate an authorized terminal session without a new crawl or PageRank recompute, and GET returns durable provenance.
 - **UI-251-01**: Quality details show evaluation/evidence provenance, stale state, and an admin-only re-evaluate command.
 - **TEST-251-01**: Regression coverage spans ClickHouse visibility, lifecycle ordering, shared counts, JS/non-JS, concurrent evaluation, scheduler/restart, API, and UI.
-- **DEPLOY-251-01**: ProductFeatures and rollout evidence are updated; deployment is app-only and blocked by active crawls.
+- **DEPLOY-251-01**: ProductFeatures and rollout evidence are updated; deployment is app-only, blocked by active crawls, and enforces a process-lifetime single-writer lock so app and migration writers cannot overlap.
 
 ### Deferred Authorization And External API Hardening
 
@@ -162,6 +163,7 @@
 | QUAL-251-01 | Phase 25.1 | Planned |
 | QUAL-251-02 | Phase 25.1 | Planned |
 | SNAP-251-01 | Phase 25.1 | Planned |
+| SNAP-251-02 | Phase 25.1 | Planned |
 | API-251-01 | Phase 25.1 | Planned |
 | UI-251-01 | Phase 25.1 | Planned |
 | TEST-251-01 | Phase 25.1 | Planned |

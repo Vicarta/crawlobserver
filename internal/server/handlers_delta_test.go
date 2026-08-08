@@ -124,7 +124,12 @@ func TestDeltaCrawlRequestPreservesBaselineSeedURLs(t *testing.T) {
 			ID:       "baseline-session",
 			SeedURLs: baselineSeeds,
 		},
-		urls: deltaURLs,
+		baselineSourceID:         "raw-full-session",
+		baselineEvaluation:       "watermark-evaluation",
+		baselineSourceEvaluation: "raw-full-evaluation",
+		baselineSnapshotRev:      7,
+		baselineWatermarkID:      "latest-delta-session",
+		urls:                     deltaURLs,
 		preview: deltaPreview{
 			TotalCandidates: len(deltaURLs),
 			LaunchLimit:     len(deltaURLs),
@@ -154,12 +159,297 @@ func TestDeltaCrawlRequestPreservesBaselineSeedURLs(t *testing.T) {
 	if req.DeltaPlan.BaselineSessionID != "baseline-session" {
 		t.Fatalf("DeltaPlan.BaselineSessionID = %q", req.DeltaPlan.BaselineSessionID)
 	}
+	if req.DeltaPlan.BaselineSourceSessionID != "raw-full-session" ||
+		req.DeltaPlan.BaselineEvaluationRevision != "watermark-evaluation" ||
+		req.DeltaPlan.BaselineSourceEvaluationRevision != "raw-full-evaluation" ||
+		req.DeltaPlan.BaselineSnapshotRevision != 7 ||
+		req.DeltaPlan.BaselineContentWatermarkSessionID != "latest-delta-session" {
+		t.Fatalf("DeltaPlan lineage = %#v", req.DeltaPlan)
+	}
 	if req.DeltaPlan.BaselineSitemapURLCount != 42 {
 		t.Fatalf("DeltaPlan.BaselineSitemapURLCount = %d, want 42", req.DeltaPlan.BaselineSitemapURLCount)
 	}
 	if !reflect.DeepEqual(req.DeltaPlan.LaunchedURLs, deltaURLs) {
 		t.Fatalf("DeltaPlan.LaunchedURLs = %#v, want %#v", req.DeltaPlan.LaunchedURLs, deltaURLs)
 	}
+}
+
+func TestDeltaPlanLineageCapturesD1WatermarkAndRawF1Source(t *testing.T) {
+	keyStore, err := apikeys.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keyStore.Close()
+	projectID := "project-delta-plan-lineage"
+	fullID := "25100000-0000-4000-8000-000000000001"
+	deltaID := "25100000-0000-4000-8000-000000000002"
+	materializedID := "25100000-0000-4000-8000-000000000003"
+	fullEval := "25100000-0000-4000-8000-000000000011"
+	deltaEval := "25100000-0000-4000-8000-000000000012"
+	fullEvidenceID := "25100000-0000-4000-8000-000000000021"
+	snap := &storage.ProjectCurrentSnapshot{
+		ProjectID: projectID, SnapshotRevision: 8, CurrentSessionID: materializedID,
+		SourceSessionID: fullID, ContentWatermarkSessionID: deltaID,
+		QualityEvaluationRevision: deltaEval, BaselineQualityEvaluationRevision: fullEval,
+		QualityPromotionStatus: "applied",
+	}
+	deltaQuality := &storage.CrawlQualityResult{SessionID: deltaID, ProjectID: projectID, EvaluationRevision: deltaEval, Trusted: true}
+	fullQuality := &storage.CrawlQualityResult{
+		SessionID: fullID, ProjectID: projectID, EvaluationRevision: fullEval,
+		EvaluatorRevision: qualityEvaluatorRevision, PageRankEvidenceRevision: fullEvidenceID,
+		PageRankPredicateVersion: storage.PageRankEligiblePredicateVersion,
+		Trusted:                  true, IsFullCrawl: true,
+	}
+	fullEvidence := &storage.PageRankEvidence{
+		SessionID: fullID, AttemptID: fullEvidenceID, State: storage.PageRankEvidenceFinalized,
+		PredicateVersion: storage.PageRankEligiblePredicateVersion,
+	}
+	store := qualitySnapshotServerStore{
+		mockStore: &mockStore{getSessionByID: map[string]*storage.CrawlSession{
+			fullID: {ID: fullID, ProjectID: &projectID, Status: "completed", Label: "full crawl"},
+		}},
+		qualityGateMock: qualityGateMock{
+			currents:  map[string]*storage.CrawlQualityResult{fullID: fullQuality},
+			evidences: map[string]*storage.PageRankEvidence{fullID: fullEvidence},
+		},
+		currentSnapshotGateMock: currentSnapshotGateMock{snapshot: snap, quality: deltaQuality, evidence: fullEvidence},
+	}
+	srv := &Server{store: store, keyStore: keyStore, cfg: &config.Config{}}
+	fullQuality.RulesRevision, err = srv.currentQualityRulesRevision(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineage, err := srv.deltaPlanLineage(context.Background(), projectID, materializedID)
+	if err != nil {
+		t.Fatalf("deltaPlanLineage: %v", err)
+	}
+	if lineage.SnapshotRevision != 8 || lineage.CurrentSessionID != materializedID || lineage.SourceSessionID != fullID ||
+		lineage.ContentWatermarkSessionID != deltaID || lineage.QualityEvaluationRevision != deltaEval ||
+		lineage.BaselineQualityEvaluationRevision != fullEval {
+		t.Fatalf("D1 -> D2 plan lineage = %#v", lineage)
+	}
+	settings := apikeys.DefaultProjectDeltaSettings(projectID)
+	req, err := srv.deltaCrawlRequest(&deltaCandidateResult{
+		settings:                 &settings,
+		baseline:                 &storage.CrawlSession{ID: materializedID},
+		baselineSourceID:         lineage.SourceSessionID,
+		baselineEvaluation:       lineage.QualityEvaluationRevision,
+		baselineSourceEvaluation: lineage.BaselineQualityEvaluationRevision,
+		baselineSnapshotRev:      lineage.SnapshotRevision,
+		baselineWatermarkID:      lineage.ContentWatermarkSessionID,
+	})
+	if err != nil {
+		t.Fatalf("deltaCrawlRequest: %v", err)
+	}
+	if req.DeltaPlan == nil || req.DeltaPlan.BaselineSessionID != materializedID ||
+		req.DeltaPlan.BaselineSourceSessionID != fullID ||
+		req.DeltaPlan.BaselineContentWatermarkSessionID != deltaID ||
+		req.DeltaPlan.BaselineEvaluationRevision != deltaEval ||
+		req.DeltaPlan.BaselineSourceEvaluationRevision != fullEval ||
+		req.DeltaPlan.BaselineSnapshotRevision != 8 {
+		t.Fatalf("D1 -> D2 persisted DeltaPlan = %#v", req.DeltaPlan)
+	}
+}
+
+func TestDeltaPlanningSerializesLineageAndCandidateReadsAgainstPromotion(t *testing.T) {
+	keyStore, err := apikeys.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keyStore.Close()
+	project, err := keyStore.CreateProject("delta-planning-lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID := project.ID
+	fullID := "25100000-0000-4000-8000-000000000101"
+	watermarkID := "25100000-0000-4000-8000-000000000102"
+	materializedID := "25100000-0000-4000-8000-000000000103"
+	fullEval := "25100000-0000-4000-8000-000000000111"
+	watermarkEval := "25100000-0000-4000-8000-000000000112"
+	fullEvidenceID := "25100000-0000-4000-8000-000000000121"
+	problemEntered := make(chan struct{})
+	problemRelease := make(chan struct{})
+	snapshot := &storage.ProjectCurrentSnapshot{
+		ProjectID: projectID, SnapshotRevision: 7, CurrentSessionID: materializedID,
+		SourceSessionID: fullID, ContentWatermarkSessionID: watermarkID,
+		QualityEvaluationRevision: watermarkEval, BaselineQualityEvaluationRevision: fullEval,
+		QualityPromotionStatus: "applied",
+	}
+	fullQuality := &storage.CrawlQualityResult{
+		SessionID: fullID, ProjectID: projectID, EvaluationRevision: fullEval,
+		EvaluatorRevision: qualityEvaluatorRevision, PageRankEvidenceRevision: fullEvidenceID,
+		PageRankPredicateVersion: storage.PageRankEligiblePredicateVersion,
+		Trusted:                  true, IsFullCrawl: true,
+	}
+	fullEvidence := &storage.PageRankEvidence{
+		SessionID: fullID, AttemptID: fullEvidenceID, State: storage.PageRankEvidenceFinalized,
+		PredicateVersion: storage.PageRankEligiblePredicateVersion,
+	}
+	baseStore := &mockStore{
+		getSessionByID: map[string]*storage.CrawlSession{
+			materializedID: {
+				ID: materializedID, ProjectID: &projectID, Status: "completed", PagesCrawled: 2,
+				SeedURLs: []string{"https://example.com/"},
+			},
+			fullID: {ID: fullID, ProjectID: &projectID, Status: "completed", PagesCrawled: 1},
+		},
+		deltaProblemURLs:    []string{"https://example.com/problem"},
+		deltaProblemEntered: problemEntered,
+		deltaProblemRelease: problemRelease,
+	}
+	store := qualitySnapshotServerStore{
+		mockStore: baseStore,
+		qualityGateMock: qualityGateMock{
+			currents:  map[string]*storage.CrawlQualityResult{fullID: fullQuality},
+			evidences: map[string]*storage.PageRankEvidence{fullID: fullEvidence},
+		},
+		currentSnapshotGateMock: currentSnapshotGateMock{
+			snapshot: snapshot,
+			quality: &storage.CrawlQualityResult{
+				SessionID: watermarkID, ProjectID: projectID, EvaluationRevision: watermarkEval, Trusted: true,
+			},
+			evidence: fullEvidence,
+		},
+	}
+	srv := &Server{store: store, keyStore: keyStore, cfg: &config.Config{}}
+	fullQuality.RulesRevision, err = srv.currentQualityRulesRevision(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := apikeys.DefaultProjectDeltaSettings(projectID)
+	settings.SourceSitemap = false
+	settings.SourceGSC = false
+	settings.SourceProblemPages = true
+	settings.SourceStalePages = false
+	settings.SourceManualQueue = false
+	settings.MaxDiscoveredPagesPerRun = 0
+	if _, err := keyStore.SaveProjectDeltaSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	type planningResult struct {
+		result *deltaCandidateResult
+		err    error
+	}
+	planned := make(chan planningResult, 1)
+	go func() {
+		result, err := srv.buildDeltaCandidates(context.Background(), projectID)
+		planned <- planningResult{result: result, err: err}
+	}()
+	select {
+	case <-problemEntered:
+	case <-time.After(time.Second):
+		t.Fatal("Delta planning did not reach the candidate-read barrier")
+	}
+	projectLock := qualityPromotionLock(projectID)
+	if projectLock.TryLock() {
+		projectLock.Unlock()
+		close(problemRelease)
+		t.Fatal("Delta planning did not hold the shared project lock at the candidate-read barrier")
+	}
+
+	promotionAttempted := make(chan struct{})
+	promotionEntered := make(chan struct{})
+	promotionDone := make(chan struct{})
+	go func() {
+		close(promotionAttempted)
+		lock := qualityPromotionLock(projectID)
+		lock.Lock()
+		close(promotionEntered)
+		snapshot.SnapshotRevision = 8
+		snapshot.ContentWatermarkSessionID = "25100000-0000-4000-8000-000000000104"
+		lock.Unlock()
+		close(promotionDone)
+	}()
+	<-promotionAttempted
+	close(problemRelease)
+	got := <-planned
+	if got.err != nil {
+		t.Fatalf("buildDeltaCandidates: %v", got.err)
+	}
+	if got.result.baselineSnapshotRev != 7 || got.result.baselineWatermarkID != watermarkID ||
+		!reflect.DeepEqual(got.result.urls, []string{"https://example.com/problem"}) {
+		t.Fatalf("planning mixed snapshot revisions: %#v", got.result)
+	}
+	select {
+	case <-promotionEntered:
+	case <-time.After(time.Second):
+		t.Fatal("promotion did not resume after Delta planning released the lock")
+	}
+	<-promotionDone
+	if !projectLock.TryLock() {
+		t.Fatal("project lock remained held after planning and promotion completed")
+	}
+	projectLock.Unlock()
+}
+
+func TestOrphanCleanupKeepsPlanningLockedThroughPageRankFinalization(t *testing.T) {
+	keyStore, err := apikeys.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keyStore.Close()
+	project, err := keyStore.CreateProject("orphan-cleanup-lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID := project.ID
+	currentID := "25100000-0000-4000-8000-000000000201"
+	pagerankEntered := make(chan struct{})
+	pagerankRelease := make(chan struct{})
+	store := qualitySnapshotServerStore{
+		mockStore: &mockStore{
+			orphanCandidates: []storage.Orphan404CleanupCandidate{{URL: "https://example.com/missing"}},
+			pagerankEntered:  pagerankEntered, pagerankRelease: pagerankRelease,
+		},
+		currentSnapshotGateMock: currentSnapshotGateMock{snapshot: &storage.ProjectCurrentSnapshot{
+			ProjectID: projectID, CurrentSessionID: currentID,
+		}},
+	}
+	srv := &Server{store: store, keyStore: keyStore}
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+projectID+"/current-snapshot/orphan-404-cleanup", jsonBody(t, map[string]interface{}{
+		"confirm": true,
+		"limit":   10,
+	}))
+	req.SetPathValue("id", projectID)
+	rec := httptest.NewRecorder()
+	srv.handleProjectOrphan404Cleanup(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cleanup response = %d %s", rec.Code, rec.Body.String())
+	}
+	select {
+	case <-pagerankEntered:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup PageRank finalization did not start")
+	}
+	projectLock := qualityPromotionLock(projectID)
+	if projectLock.TryLock() {
+		projectLock.Unlock()
+		close(pagerankRelease)
+		t.Fatal("cleanup released the project lock before PageRank finalization")
+	}
+
+	planningAttempted := make(chan struct{})
+	planningEntered := make(chan struct{})
+	go func() {
+		close(planningAttempted)
+		lock := qualityPromotionLock(projectID)
+		lock.Lock()
+		close(planningEntered)
+		lock.Unlock()
+	}()
+	<-planningAttempted
+	close(pagerankRelease)
+	select {
+	case <-planningEntered:
+	case <-time.After(time.Second):
+		t.Fatal("planning did not resume after cleanup PageRank finalization")
+	}
+	if !projectLock.TryLock() {
+		t.Fatal("project lock remained held after cleanup PageRank finalization")
+	}
+	projectLock.Unlock()
 }
 
 func TestDeltaCandidateSourcesForLaunchedOrdersKnownSources(t *testing.T) {

@@ -33,16 +33,21 @@ type deltaPreview struct {
 }
 
 type deltaCandidateResult struct {
-	settings             *apikeys.ProjectDeltaSettings
-	baseline             *storage.CrawlSession
-	urls                 []string
-	manual               []string
-	candidateSources     map[string][]string
-	baselineSitemapCount int
-	sitemapRows          []storage.SitemapRow
-	sitemapURLRows       []storage.SitemapURLRow
-	sitemapRefresh       *config.DeltaSitemapRefresh
-	preview              deltaPreview
+	settings                 *apikeys.ProjectDeltaSettings
+	baseline                 *storage.CrawlSession
+	baselineSourceID         string
+	baselineEvaluation       string
+	baselineSourceEvaluation string
+	baselineSnapshotRev      uint64
+	baselineWatermarkID      string
+	urls                     []string
+	manual                   []string
+	candidateSources         map[string][]string
+	baselineSitemapCount     int
+	sitemapRows              []storage.SitemapRow
+	sitemapURLRows           []storage.SitemapURLRow
+	sitemapRefresh           *config.DeltaSitemapRefresh
+	preview                  deltaPreview
 }
 
 func (s *Server) handleProjectDeltaSettings(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +134,10 @@ func (s *Server) handleProjectOrphan404CleanupPreview(w http.ResponseWriter, r *
 	if !requireProjectAccess(w, r, projectID) {
 		return
 	}
+	lock := qualityPromotionLock(projectID)
+	lock.Lock()
 	result, err := s.projectOrphan404CleanupCandidates(r.Context(), projectID, queryInt(r, "limit", 5000))
+	lock.Unlock()
 	if err != nil {
 		internalError(w, r, err)
 		return
@@ -157,8 +165,11 @@ func (s *Server) handleProjectOrphan404Cleanup(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "confirm must be true")
 		return
 	}
+	lock := qualityPromotionLock(projectID)
+	lock.Lock()
 	result, err := s.projectOrphan404CleanupCandidates(r.Context(), projectID, body.Limit)
 	if err != nil {
+		lock.Unlock()
 		internalError(w, r, err)
 		return
 	}
@@ -168,6 +179,7 @@ func (s *Server) handleProjectOrphan404Cleanup(w http.ResponseWriter, r *http.Re
 	}
 	deleted, err := s.store.DeletePagesAndReferences(r.Context(), result.CurrentSessionID, urls)
 	if err != nil {
+		lock.Unlock()
 		internalError(w, r, err)
 		return
 	}
@@ -179,11 +191,14 @@ func (s *Server) handleProjectOrphan404Cleanup(w http.ResponseWriter, r *http.Re
 		} else {
 			applog.Warnf("server", "Orphan404Cleanup %s: using default PageRank options: %v", projectID, settingsErr)
 		}
-		go func(sessionID string) {
-			if err := s.store.ComputePageRankWithOptions(context.Background(), sessionID, opts); err != nil {
-				applog.Errorf("server", "Orphan404Cleanup PageRank recompute %s/%s: %v", projectID, sessionID, err)
-			}
-		}(result.CurrentSessionID)
+		// Transfer the held project lock to PageRank finalization so a Delta
+		// planner cannot observe deleted graph rows with pre-cleanup scores.
+		go func() {
+			defer lock.Unlock()
+			s.recomputeExpectedCurrentSnapshotPageRankLocked(context.Background(), projectID, result.CurrentSessionID, opts)
+		}()
+	} else {
+		lock.Unlock()
 	}
 	writeJSON(w, map[string]interface{}{
 		"status":                         "ok",
@@ -302,12 +317,35 @@ func (s *Server) recomputeProjectCurrentSnapshotPageRank(ctx context.Context, pr
 			return "", err
 		}
 	}
+	lock := qualityPromotionLock(projectID)
+	lock.Lock()
+	defer lock.Unlock()
+	snap, err = cs.GetProjectCurrentSnapshot(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
 	if err := s.store.ComputePageRankWithOptions(ctx, snap.CurrentSessionID, opts); err != nil {
 		applog.Errorf("server", "ProjectPageRankRecompute %s/%s: %v", projectID, snap.CurrentSessionID, err)
 		return snap.CurrentSessionID, err
 	}
 	applog.Infof("server", "ProjectPageRankRecompute %s/%s complete", projectID, snap.CurrentSessionID)
 	return snap.CurrentSessionID, nil
+}
+
+func (s *Server) recomputeExpectedCurrentSnapshotPageRankLocked(ctx context.Context, projectID, expectedSessionID string, opts storage.PageRankOptions) {
+	cs, ok := s.currentSnapshotStore()
+	if !ok {
+		applog.Warnf("server", "Orphan404Cleanup PageRank recompute %s: current snapshot storage unavailable", projectID)
+		return
+	}
+	snap, err := cs.GetProjectCurrentSnapshot(ctx, projectID)
+	if err != nil || snap.CurrentSessionID != expectedSessionID {
+		applog.Warnf("server", "Orphan404Cleanup PageRank recompute %s/%s skipped because Current Snapshot advanced", projectID, expectedSessionID)
+		return
+	}
+	if err := s.store.ComputePageRankWithOptions(ctx, expectedSessionID, opts); err != nil {
+		applog.Errorf("server", "Orphan404Cleanup PageRank recompute %s/%s: %v", projectID, expectedSessionID, err)
+	}
 }
 
 func (s *Server) handleProjectDeltaManualQueue(w http.ResponseWriter, r *http.Request) {
@@ -507,15 +545,35 @@ func parseScheduleTime(value string) (int, int) {
 }
 
 func (s *Server) buildDeltaCandidates(ctx context.Context, projectID string) (*deltaCandidateResult, error) {
+	// Lazy initialization owns this same project lock, so complete it before the
+	// planning transaction enters its critical section. The locked re-read below
+	// is authoritative; this result is only an initialization preflight.
+	if _, err := s.deltaBaselineSession(ctx, projectID); err != nil {
+		if strings.Contains(err.Error(), sql.ErrNoRows.Error()) {
+			return nil, fmt.Errorf("no baseline session found for project")
+		}
+		return nil, err
+	}
+	lock := qualityPromotionLock(projectID)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.buildDeltaCandidatesLocked(ctx, projectID)
+}
+
+func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID string) (*deltaCandidateResult, error) {
 	settings, err := s.keyStore.GetProjectDeltaSettings(projectID)
 	if err != nil {
 		return nil, err
 	}
-	baseline, err := s.deltaBaselineSession(ctx, projectID)
+	baseline, err := s.deltaBaselineSessionReadOnly(ctx, projectID)
 	if err != nil {
 		if strings.Contains(err.Error(), sql.ErrNoRows.Error()) {
 			return nil, fmt.Errorf("no baseline session found for project")
 		}
+		return nil, err
+	}
+	lineage, err := s.deltaPlanLineage(ctx, projectID, baseline.ID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -631,17 +689,87 @@ func (s *Server) buildDeltaCandidates(ctx context.Context, projectID string) (*d
 		SitemapRefresh:    cloneDeltaSitemapRefresh(sitemapRefresh),
 	}
 	return &deltaCandidateResult{
-		settings:             settings,
-		baseline:             baseline,
-		urls:                 filtered,
-		manual:               manual,
-		candidateSources:     candidateSources,
-		baselineSitemapCount: baselineSitemapCount,
-		sitemapRows:          sitemapRows,
-		sitemapURLRows:       sitemapURLRows,
-		sitemapRefresh:       cloneDeltaSitemapRefresh(sitemapRefresh),
-		preview:              preview,
+		settings:                 settings,
+		baseline:                 baseline,
+		baselineSourceID:         lineage.SourceSessionID,
+		baselineEvaluation:       lineage.QualityEvaluationRevision,
+		baselineSourceEvaluation: lineage.BaselineQualityEvaluationRevision,
+		baselineSnapshotRev:      lineage.SnapshotRevision,
+		baselineWatermarkID:      lineage.ContentWatermarkSessionID,
+		urls:                     filtered,
+		manual:                   manual,
+		candidateSources:         candidateSources,
+		baselineSitemapCount:     baselineSitemapCount,
+		sitemapRows:              sitemapRows,
+		sitemapURLRows:           sitemapURLRows,
+		sitemapRefresh:           cloneDeltaSitemapRefresh(sitemapRefresh),
+		preview:                  preview,
 	}, nil
+}
+
+// deltaBaselineSessionReadOnly resolves the canonical materialized session
+// while the caller holds qualityPromotionLock(projectID). It never performs
+// lazy initialization, which would recursively acquire that lock.
+func (s *Server) deltaBaselineSessionReadOnly(ctx context.Context, projectID string) (*storage.CrawlSession, error) {
+	cs, ok := s.currentSnapshotStore()
+	if !ok {
+		return nil, fmt.Errorf("current snapshot storage unavailable")
+	}
+	snap, err := cs.GetProjectCurrentSnapshot(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if snap == nil || snap.CurrentSessionID == "" {
+		return nil, fmt.Errorf("current snapshot baseline is unavailable")
+	}
+	current, err := s.store.GetSession(ctx, snap.CurrentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	if current.ProjectID == nil || *current.ProjectID != projectID || current.PagesCrawled <= 0 {
+		return nil, fmt.Errorf("current snapshot baseline is invalid")
+	}
+	return current, nil
+}
+
+func (s *Server) deltaPlanLineage(ctx context.Context, projectID, materializedSessionID string) (*storage.ProjectCurrentSnapshot, error) {
+	cs, ok := s.currentSnapshotStore()
+	if !ok {
+		return nil, fmt.Errorf("current snapshot storage unavailable for delta baseline lineage")
+	}
+	qs, ok := s.qualityStore()
+	if !ok {
+		return nil, fmt.Errorf("quality storage unavailable for delta baseline lineage")
+	}
+	snap, err := cs.GetProjectCurrentSnapshot(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("loading current snapshot delta baseline: %w", err)
+	}
+	if snap.CurrentSessionID != materializedSessionID || snap.SourceSessionID == "" ||
+		snap.ContentWatermarkSessionID == "" || snap.SnapshotRevision == 0 {
+		return nil, fmt.Errorf("current snapshot delta baseline lineage is incomplete or changed")
+	}
+	currentQuality, _, err := cs.ValidateProjectCurrentSnapshotBinding(ctx, *snap)
+	if err != nil {
+		return nil, fmt.Errorf("current snapshot delta baseline is stale: %w", err)
+	}
+	if currentQuality == nil || currentQuality.EvaluationRevision != snap.QualityEvaluationRevision {
+		return nil, fmt.Errorf("current snapshot delta baseline quality revision is stale")
+	}
+	source, err := s.store.GetSession(ctx, snap.SourceSessionID)
+	if err != nil || source.ProjectID == nil || *source.ProjectID != projectID || !isFullCrawlSession(*source) {
+		return nil, fmt.Errorf("current snapshot raw full-crawl source is unavailable")
+	}
+	quality, err := qs.GetCrawlQualityResult(ctx, snap.SourceSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("loading current snapshot source quality: %w", err)
+	}
+	quality = s.deriveCurrentQualityReadState(ctx, qs, quality)
+	if quality == nil || quality.Stale || !quality.Trusted || !quality.IsFullCrawl ||
+		quality.EvaluationRevision == "" || quality.EvaluationRevision != snap.BaselineQualityEvaluationRevision {
+		return nil, fmt.Errorf("current snapshot raw full-crawl source quality is stale")
+	}
+	return snap, nil
 }
 
 func (s *Server) deltaBaselineSession(ctx context.Context, projectID string) (*storage.CrawlSession, error) {
@@ -715,16 +843,21 @@ func (s *Server) deltaCrawlRequest(result *deltaCandidateResult) (crawler.CrawlR
 		Label:               "Daily Delta Crawl",
 		DeltaPlannedPages:   len(result.urls),
 		DeltaPlan: &config.DeltaPlanConfig{
-			BaselineSessionID:       result.baseline.ID,
-			TotalCandidates:         result.preview.TotalCandidates,
-			LaunchedCandidates:      len(result.urls),
-			DeferredCandidates:      result.preview.Deferred,
-			LaunchLimit:             result.preview.LaunchLimit,
-			SourceCounts:            copyStringIntMap(result.preview.BySource),
-			BaselineSitemapURLCount: result.baselineSitemapCount,
-			LaunchedURLs:            append([]string(nil), result.urls...),
-			CandidateSources:        copyStringSliceMap(result.candidateSources),
-			SitemapRefresh:          cloneDeltaSitemapRefresh(result.sitemapRefresh),
+			BaselineSessionID:                 result.baseline.ID,
+			BaselineSourceSessionID:           result.baselineSourceID,
+			BaselineEvaluationRevision:        result.baselineEvaluation,
+			BaselineSourceEvaluationRevision:  result.baselineSourceEvaluation,
+			BaselineSnapshotRevision:          result.baselineSnapshotRev,
+			BaselineContentWatermarkSessionID: result.baselineWatermarkID,
+			TotalCandidates:                   result.preview.TotalCandidates,
+			LaunchedCandidates:                len(result.urls),
+			DeferredCandidates:                result.preview.Deferred,
+			LaunchLimit:                       result.preview.LaunchLimit,
+			SourceCounts:                      copyStringIntMap(result.preview.BySource),
+			BaselineSitemapURLCount:           result.baselineSitemapCount,
+			LaunchedURLs:                      append([]string(nil), result.urls...),
+			CandidateSources:                  copyStringSliceMap(result.candidateSources),
+			SitemapRefresh:                    cloneDeltaSitemapRefresh(result.sitemapRefresh),
 		},
 		InitialSitemaps:              copySitemapRows(result.sitemapRows),
 		InitialSitemapURLs:           copySitemapURLRows(result.sitemapURLRows),
