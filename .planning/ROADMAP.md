@@ -363,9 +363,9 @@ SNAP-251-01, SNAP-251-02, API-251-01, UI-251-01, TEST-251-01, DEPLOY-251-01
 **Plans:** 3 plans
 
 Plans:
-- [ ] 25.1-01: Shared PageRank eligibility and durable evidence foundation
-- [ ] 25.1-02: Fail-closed lifecycle, versioned quality, promotion, and API
-- [ ] 25.1-03: Provenance UI, regression closure, and safe production rollout
+- [x] 25.1-01: Shared PageRank eligibility and durable evidence foundation
+- [x] 25.1-02: Fail-closed lifecycle, versioned quality, promotion, and API
+- [x] 25.1-03: Provenance UI, regression closure, and safe production rollout
 
 ### Phase 26: Trustworthy sitemap availability and lastmod validation
 
@@ -456,7 +456,7 @@ Plans:
   compatibility and contract tests.
 
 ---
-*Last updated: 2026-08-07 for trustworthy sitemap availability and lastmod validation planning*
+*Last updated: 2026-08-08 after Phase 25.1 production completion*
 
 ## Phase 13: PageRank Lab access, recalc, and page pruning
 

@@ -157,17 +157,17 @@
 | COMPAT-26-01 | Phase 26 | Planned |
 | TEST-26-01 | Phase 26 | Planned |
 | DEPLOY-26-01 | Phase 26 | Planned |
-| PRQ-251-01 | Phase 25.1 | Planned |
-| PRQ-251-02 | Phase 25.1 | Planned |
-| PRQ-251-03 | Phase 25.1 | Planned |
-| QUAL-251-01 | Phase 25.1 | Planned |
-| QUAL-251-02 | Phase 25.1 | Planned |
-| SNAP-251-01 | Phase 25.1 | Planned |
-| SNAP-251-02 | Phase 25.1 | Planned |
-| API-251-01 | Phase 25.1 | Planned |
-| UI-251-01 | Phase 25.1 | Planned |
-| TEST-251-01 | Phase 25.1 | Planned |
-| DEPLOY-251-01 | Phase 25.1 | Planned |
+| PRQ-251-01 | Phase 25.1 | Done |
+| PRQ-251-02 | Phase 25.1 | Done |
+| PRQ-251-03 | Phase 25.1 | Done |
+| QUAL-251-01 | Phase 25.1 | Done |
+| QUAL-251-02 | Phase 25.1 | Done |
+| SNAP-251-01 | Phase 25.1 | Done |
+| SNAP-251-02 | Phase 25.1 | Done |
+| API-251-01 | Phase 25.1 | Done |
+| UI-251-01 | Phase 25.1 | Done |
+| TEST-251-01 | Phase 25.1 | Done |
+| DEPLOY-251-01 | Phase 25.1 | Done |
 | AUTH-27-01 | Phase 27 | Deferred |
 | AUTH-27-02 | Phase 27 | Deferred |
 | AUTH-27-03 | Phase 27 | Deferred |
@@ -183,4 +183,4 @@
 
 ---
 *Requirements defined: 2026-05-29*
-*Last updated: 2026-08-08 for urgent PageRank quality evidence consistency planning*
+*Last updated: 2026-08-08 after Phase 25.1 production completion*

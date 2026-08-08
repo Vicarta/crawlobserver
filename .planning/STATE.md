@@ -5,7 +5,7 @@
 See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 **Core value:** A server operator can deploy, start, secure, verify, and recover CrawlObserver without guessing critical runtime steps.
-**Current focus:** Urgent Phase 25.1: PageRank quality evidence consistency
+**Current focus:** Phase 26: Trustworthy sitemap availability and lastmod validation
 
 ## Current Status
 
@@ -36,18 +36,17 @@ See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 ## Next Action
 
-Complete Phase 25.1 fixed-point/monotonic-watermark regression gates, then run
-the second safe app-only production acceptance attempt. Phase 26 remains paused.
+Execute the planned Phase 26 sitemap availability and lastmod validation work.
 
 ## Accumulated Context
 
 ### Roadmap Evolution
 
 - Phase 25.1 inserted after Phase 25: PageRank quality evidence consistency (URGENT).
-  - Production session `cecabb70-b621-48a1-9dc4-1feb3c3757cb` was marked
+  - At phase start, production session `cecabb70-b621-48a1-9dc4-1feb3c3757cb` was marked
     completed at 10:37:13 and quality-evaluated at 10:37:18 with 20 zero-PR
-    pages, while PageRank completed at 10:37:19; all 51 eligible pages now have
-    positive PR but the persisted quality result remains `untrusted · 65`.
+    pages, while PageRank completed at 10:37:19; all 51 eligible pages already
+    had positive PR but the persisted quality result still read `untrusted · 65`.
   - Phase 25.1 adds shared PageRank eligibility, durable evidence/evaluation
     revisions, fail-closed completion/promotion, deterministic replay, and a
     narrow admin quality re-evaluation/readback contract.
@@ -67,6 +66,12 @@ the second safe app-only production acceptance attempt. Phase 26 remains paused.
   - Phase 27 tracks authorization-scope hardening without changing the Growth
     Core agency-wide master key; Phase 28 tracks external OpenAPI/evidence
     projections.
+  - Completed and deployed on 2026-08-08. The exact Gerus session now has
+    finalized `observed_existing` evidence with 51 eligible / 51 positive / 0
+    zero pages, `trusted · 90` quality, and Current Snapshot revision 24.
+  - Legacy `untrusted · 65` remains immutable history. More than two scheduler
+    intervals produced no new evaluation, promotion, snapshot revision, or
+    crawl; ClickHouse was not restarted.
 
 - Phase 26 added and planned: trustworthy sitemap availability and lastmod
   validation.
@@ -168,7 +173,7 @@ the second safe app-only production acceptance attempt. Phase 26 remains paused.
 - Whether to build the Compose image on the server or push/pull a registry image later.
 
 ---
-*Last updated: 2026-06-25 during materialized current snapshot implementation and internal PageRank footer-exclusion work*
+*Last updated: 2026-08-08 after Phase 25.1 production acceptance*
 
 - Phase 13 added: PageRank Lab access, automatic PageRank recalculation after settings changes, and confirmed erroneous-page pruning.
 - Phase 14 added: structured crawl stop reasons plus deploy guard to prevent silent crawl interruption during app restarts.
