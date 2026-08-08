@@ -15,6 +15,7 @@ import (
 	"github.com/SEObserver/crawlobserver/internal/apikeys"
 	"github.com/SEObserver/crawlobserver/internal/config"
 	"github.com/SEObserver/crawlobserver/internal/storage"
+	"github.com/google/uuid"
 )
 
 func TestCrawlConfigDeltaPlannedPagesPrefersDeltaMetadata(t *testing.T) {
@@ -221,9 +222,25 @@ func TestDeltaQualityBindsImmutableSnapshotLineageAndRejectsStalePlan(t *testing
 		ID: deltaID, ProjectID: &projectID, Status: "completed", Label: "Daily Delta Crawl",
 		PagesCrawled: 10, Config: planJSON(plan),
 	}
+	validV3Preview, err := srv.evaluateSessionQualityResult(context.Background(), sess, deltaEvidence, "scheduler")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyV2Payload := strings.Join([]string{
+		qualityEvaluatorRevision, sess.ID, deltaEvidence.AttemptID,
+		validV3Preview.RulesRevision, validV3Preview.BaselineEvaluationRevision,
+	}, "\x00")
+	legacyV2Revision := uuid.NewSHA1(uuid.NameSpaceOID, []byte(legacyV2Payload)).String()
+	legacyV2Delta := *validV3Preview
+	legacyV2Delta.EvaluatorRevision = qualityEvaluatorRevision
+	legacyV2Delta.EvaluationRevision = legacyV2Revision
+	currents[deltaID] = &legacyV2Delta
+	if stale := deriveCurrentQualityReadState(context.Background(), store, &legacyV2Delta); stale == nil || !stale.Stale || stale.Trusted {
+		t.Fatalf("legacy valid Delta v2 did not become stale before migration: %#v", stale)
+	}
 
 	first, changed, promotionChanged, promotion, err := srv.evaluateAndPublishSessionQuality(
-		context.Background(), sess, deltaEvidence, "test", "", "delta lifecycle test",
+		context.Background(), sess, deltaEvidence, "test", legacyV2Revision, "delta lifecycle test",
 	)
 	if err != nil {
 		t.Fatalf("evaluate and promote current delta plan: %v", err)
@@ -233,6 +250,18 @@ func TestDeltaQualityBindsImmutableSnapshotLineageAndRejectsStalePlan(t *testing
 		deltaBinding.BaselineSessionID != fullID || deltaBinding.BaselineEvaluationRevision != fullEval ||
 		hasFinding(first.Findings, "stale_delta_baseline") {
 		t.Fatalf("current delta lineage was not bound to raw full source: %#v", first)
+	}
+	validV3Payload := strings.Join([]string{
+		qualityDeltaEvaluatorRevision, sess.ID, deltaEvidence.AttemptID,
+		first.RulesRevision, first.BaselineEvaluationRevision,
+	}, "\x00")
+	if expected := uuid.NewSHA1(uuid.NameSpaceOID, []byte(validV3Payload)).String(); first.EvaluationRevision != expected {
+		t.Fatalf("valid D1 did not publish its v3 evaluator revision: got %q want %q", first.EvaluationRevision, expected)
+	}
+	if currents[fullID].EvaluationRevision != fullEval || currents[fullID].EvaluatorRevision != qualityEvaluatorRevision ||
+		snapshot.QualityBaselineSessionID != fullID || snapshot.BaselineQualityEvaluationRevision != fullEval ||
+		snapshot.QualityEvaluationRevision != first.EvaluationRevision {
+		t.Fatalf("D1 v3 migration invalidated its F1 v2 binding: full=%#v snapshot=%#v", currents[fullID], snapshot)
 	}
 	// A restarted scheduler resolves the immutable predecessor from journal
 	// history. The applied Delta remains trusted and its content is not overlaid.
@@ -312,6 +341,88 @@ func TestDeltaQualityBindsImmutableSnapshotLineageAndRejectsStalePlan(t *testing
 	missingHistory, err := srv.evaluateSessionQualityResult(context.Background(), sess, deltaEvidence, "test")
 	if err != nil || missingHistory.Trusted || !hasFinding(missingHistory.Findings, "stale_delta_baseline") {
 		t.Fatalf("missing predecessor journal did not fail closed: result=%#v err=%v", missingHistory, err)
+	}
+}
+
+func TestLegacyDeltaEvaluatorV2PublishesDistinctV3ThenReachesFixedPoint(t *testing.T) {
+	keyStore, err := apikeys.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keyStore.Close()
+
+	projectID := "project-delta-evaluator-upgrade"
+	sessionID := "25100000-0000-4000-8000-000000000401"
+	evidence := &storage.PageRankEvidence{
+		SessionID: sessionID, AttemptID: "25100000-0000-4000-8000-000000000402",
+		State: storage.PageRankEvidenceFinalized, PredicateVersion: storage.PageRankEligiblePredicateVersion,
+	}
+	currents := map[string]*storage.CrawlQualityResult{}
+	publishes := []string{}
+	promotions := []storage.CrawlQualityPromotionEvent{}
+	store := qualityServerStore{
+		mockStore: &mockStore{},
+		qualityGateMock: qualityGateMock{
+			metrics: &storage.CrawlQualityMetrics{HTMLPages: 1}, currents: currents,
+			evidences: map[string]*storage.PageRankEvidence{sessionID: evidence},
+			publishes: &publishes, promotions: &promotions,
+		},
+	}
+	srv := &Server{store: store, keyStore: keyStore}
+	sess := storage.CrawlSession{
+		ID: sessionID, ProjectID: &projectID, Status: "completed", Label: "Daily Delta Crawl",
+		PagesCrawled: 1, Config: `{"Crawler":{"DeltaPlan":{}}}`,
+	}
+
+	repairedPreview, err := srv.evaluateSessionQualityResult(context.Background(), sess, evidence, "scheduler")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if qualityEvaluatorRevision != "quality-evaluator-v2" || qualityDeltaEvaluatorRevision != "quality-evaluator-v3" ||
+		repairedPreview.EvaluatorRevision != qualityDeltaEvaluatorRevision ||
+		!hasFinding(repairedPreview.Findings, "stale_delta_baseline") {
+		t.Fatalf("Delta v3 evaluator did not fail closed on incomplete lineage: %#v", repairedPreview)
+	}
+	legacyPayload := strings.Join([]string{
+		qualityEvaluatorRevision, sess.ID, evidence.AttemptID,
+		repairedPreview.RulesRevision, repairedPreview.BaselineEvaluationRevision,
+	}, "\x00")
+	legacyRevision := uuid.NewSHA1(uuid.NameSpaceOID, []byte(legacyPayload)).String()
+	if legacyRevision == repairedPreview.EvaluationRevision {
+		t.Fatalf("Delta v3 evaluator reused legacy v2 revision %q", legacyRevision)
+	}
+	legacy := *repairedPreview
+	legacy.EvaluatorRevision = qualityEvaluatorRevision
+	legacy.EvaluationRevision = legacyRevision
+	legacy.Trusted = true
+	legacy.Stale = false
+	legacy.Status = "trusted"
+	legacy.StaleReasons = nil
+	legacy.Findings = append([]storage.CrawlQualityFinding(nil), repairedPreview.Findings[1:]...)
+	legacy.FindingCount = uint32(len(legacy.Findings))
+	currents[sessionID] = &legacy
+
+	read := deriveCurrentQualityReadState(context.Background(), store, &legacy)
+	if read == nil || !read.Stale || read.Trusted || !strings.Contains(strings.Join(read.StaleReasons, ","), "evaluator_revision_changed") {
+		t.Fatalf("legacy Delta v2 read did not fail closed before repair: %#v", read)
+	}
+
+	first, changed, promotionChanged, promotion, err := srv.evaluateAndPublishSessionQuality(
+		context.Background(), sess, evidence, "scheduler", legacyRevision, "evaluator upgrade",
+	)
+	if err != nil || !changed || !promotionChanged || promotion == nil || promotion.Status != "rejected" ||
+		first.EvaluationRevision != repairedPreview.EvaluationRevision || first.Trusted ||
+		!hasFinding(first.Findings, "stale_delta_baseline") || len(publishes) != 1 {
+		t.Fatalf("legacy Delta v2 to v3 repair failed: result=%#v promotion=%#v publishes=%#v err=%v", first, promotion, publishes, err)
+	}
+
+	second, changed, promotionChanged, promotion, err := srv.evaluateAndPublishSessionQuality(
+		context.Background(), sess, evidence, "scheduler", first.EvaluationRevision, "evaluator replay",
+	)
+	if err != nil || changed || promotionChanged || promotion == nil || promotion.Status != "rejected" ||
+		second.EvaluationRevision != first.EvaluationRevision || len(publishes) != 1 || len(promotions) != 1 {
+		t.Fatalf("Delta v3 replay did not reach fixed point: result=%#v promotion=%#v publishes=%#v events=%#v err=%v",
+			second, promotion, publishes, promotions, err)
 	}
 }
 

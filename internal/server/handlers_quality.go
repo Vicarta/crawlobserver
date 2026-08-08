@@ -21,7 +21,10 @@ import (
 	"github.com/google/uuid"
 )
 
-const qualityEvaluatorRevision = "quality-evaluator-v2"
+const (
+	qualityEvaluatorRevision      = "quality-evaluator-v2"
+	qualityDeltaEvaluatorRevision = "quality-evaluator-v3"
+)
 
 type qualityStorage interface {
 	UpsertCrawlQualityResult(ctx context.Context, result storage.CrawlQualityResult) error
@@ -215,7 +218,7 @@ func deriveCurrentQualityReadState(ctx context.Context, qs qualityStorage, store
 	}
 	result := *stored
 	result.StaleReasons = append([]string(nil), stored.StaleReasons...)
-	if result.EvaluatorRevision != qualityEvaluatorRevision {
+	if result.EvaluatorRevision != expectedQualityEvaluatorRevision(result.IsFullCrawl) {
 		markQualityReadStale(&result, "evaluator_revision_changed")
 	}
 	if result.PageRankPredicateVersion != storage.PageRankEligiblePredicateVersion {
@@ -828,7 +831,7 @@ func (s *Server) evaluateSessionQualityResult(ctx context.Context, sess storage.
 		Summary:     "Crawl data is trusted.",
 		EvaluatedAt: now,
 		Metrics:     map[string]interface{}{},
-		Source:      source, EvaluatorRevision: qualityEvaluatorRevision,
+		Source:      source, EvaluatorRevision: expectedQualityEvaluatorRevision(isFull),
 	}
 	applyPageRankEvidence(&result, evidence)
 	if evidence == nil || evidence.State != storage.PageRankEvidenceFinalized || evidence.PredicateVersion != storage.PageRankEligiblePredicateVersion {
@@ -1008,7 +1011,7 @@ func (s *Server) finalizeQualityRevision(ctx context.Context, qs qualityStorage,
 		return nil, err
 	}
 	revisionPayload := strings.Join([]string{
-		qualityEvaluatorRevision, sess.ID, result.PageRankEvidenceRevision,
+		result.EvaluatorRevision, sess.ID, result.PageRankEvidenceRevision,
 		result.RulesRevision, result.BaselineEvaluationRevision,
 	}, "\x00")
 	result.EvaluationRevision = uuid.NewSHA1(uuid.NameSpaceOID, []byte(revisionPayload)).String()
@@ -1017,6 +1020,13 @@ func (s *Server) finalizeQualityRevision(ctx context.Context, qs qualityStorage,
 		result.Findings[i].FindingIndex = uint32(i)
 	}
 	return result, nil
+}
+
+func expectedQualityEvaluatorRevision(isFullCrawl bool) string {
+	if isFullCrawl {
+		return qualityEvaluatorRevision
+	}
+	return qualityDeltaEvaluatorRevision
 }
 
 func (s *Server) currentQualityRulesRevision(projectID string) (string, error) {

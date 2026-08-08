@@ -502,6 +502,11 @@ shared rendered metadata shell diagnostics без site-specific правил.
 - Evaluation revision детерміновано зв'язує session, PageRank evidence,
   eligibility predicate, evaluator/rules і baseline revisions; scheduler
   переоцінює при будь-якій зміні lineage, включно з покращенням або погіршенням.
+- Evaluator revision залежить від типу сесії: full crawl зберігає v2 identity,
+  а Daily Delta використовує v3 із fail-closed `stale_delta_baseline`. Тому
+  старі Delta v2 verdicts стають stale і переходять на окрему immutable v3
+  evaluation, не змінюючи full-baseline revisions; повторний scheduler replay
+  працює ідемпотентно без finding-count collision.
 - Scheduler використовує bounded fair scan, тому старі stale/missing сесії не
   блокуються новішими no-op результатами; restart змінює scan offset
   детерміновано і не порушує idempotency.

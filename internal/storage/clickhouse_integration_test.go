@@ -286,7 +286,7 @@ func TestCurrentSnapshotDeltaRetryFinalizesBindingWithoutReapplyingContent(t *te
 	}
 	for _, quality := range []CrawlQualityResult{
 		{SessionID: baselineID, ProjectID: projectID, EvaluationRevision: baselineEval, EvaluatorRevision: "eval-v2", RulesRevision: "rules-v2", PageRankEvidenceRevision: baselinePR, PageRankEvidenceStatus: PageRankEvidenceFinalized, PageRankPredicateVersion: PageRankEligiblePredicateVersion, Trusted: true, IsFullCrawl: true, Status: "trusted", Score: 100, EvaluatedAt: now},
-		{SessionID: deltaID, ProjectID: projectID, BaselineSessionID: baselineID, BaselineEvaluationRevision: baselineEval, EvaluationRevision: deltaEval, EvaluatorRevision: "eval-v2", RulesRevision: "rules-v2", PageRankEvidenceRevision: deltaPR, PageRankEvidenceStatus: PageRankEvidenceFinalized, PageRankPredicateVersion: PageRankEligiblePredicateVersion, Trusted: true, Status: "trusted", Score: 100, EvaluatedAt: now},
+		{SessionID: deltaID, ProjectID: projectID, BaselineSessionID: baselineID, BaselineEvaluationRevision: baselineEval, EvaluationRevision: deltaEval, EvaluatorRevision: "eval-v3", RulesRevision: "rules-v3", PageRankEvidenceRevision: deltaPR, PageRankEvidenceStatus: PageRankEvidenceFinalized, PageRankPredicateVersion: PageRankEligiblePredicateVersion, Trusted: true, Status: "trusted", Score: 100, EvaluatedAt: now},
 	} {
 		if _, _, err := s.PublishCrawlQualityEvaluation(ctx, quality, ""); err != nil {
 			t.Fatalf("publish quality: %v", err)
@@ -316,7 +316,7 @@ func TestCurrentSnapshotDeltaRetryFinalizesBindingWithoutReapplyingContent(t *te
 	}
 	binding := CrawlQualityPromotionEvent{
 		ProjectID: projectID, SessionID: deltaID, EvaluationRevision: deltaEval, PageRankEvidenceRevision: deltaPR,
-		BaselineSessionID: baselineID, BaselineEvaluationRevision: baselineEval, EvaluatorRevision: "eval-v2", RulesRevision: "rules-v2",
+		BaselineSessionID: baselineID, BaselineEvaluationRevision: baselineEval, EvaluatorRevision: "eval-v3", RulesRevision: "rules-v3",
 	}
 	result, err := s.PromoteDeltaToCurrentSnapshot(ctx, projectID, deltaID, baselineID, 14, 30, PageRankOptions{}, binding)
 	if err != nil {
@@ -333,6 +333,19 @@ func TestCurrentSnapshotDeltaRetryFinalizesBindingWithoutReapplyingContent(t *te
 	}
 	if _, _, err := s.ValidateProjectCurrentSnapshotBinding(ctx, *result); err != nil {
 		t.Fatalf("fresh delta baseline binding rejected: %v", err)
+	}
+	baselinePointer, err := s.getCrawlQualityCurrentPointer(ctx, baselineID)
+	if err != nil {
+		t.Fatalf("read F1 quality pointer: %v", err)
+	}
+	restartedStore := &Store{conn: s.conn}
+	replayed, err := restartedStore.PromoteDeltaToCurrentSnapshot(ctx, projectID, deltaID, baselineID, 14, 30, PageRankOptions{}, binding)
+	if err != nil || replayed.CurrentSessionID != result.CurrentSessionID || replayed.SnapshotRevision != result.SnapshotRevision {
+		t.Fatalf("restart mixed-evaluator replay=%#v err=%v", replayed, err)
+	}
+	baselineAfter, err := restartedStore.getCrawlQualityCurrentPointer(ctx, baselineID)
+	if err != nil || baselineAfter.EvaluationRevision != baselinePointer.EvaluationRevision {
+		t.Fatalf("restart replay advanced F1 quality pointer before=%#v after=%#v err=%v", baselinePointer, baselineAfter, err)
 	}
 	markerCount, err := s.countProjectCurrentSnapshotDeltas(ctx, projectID)
 	if err != nil {
