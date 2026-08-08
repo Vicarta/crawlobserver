@@ -9,6 +9,11 @@
   } from '../api.js';
   import { statusBadge, fmt, fmtSize, fmtN } from '../utils.js';
   import { t } from '../i18n/index.svelte.js';
+  import {
+    discoveryCandidateSources,
+    discoveryReferrerMeta,
+    discoverySourceTranslationKey,
+  } from '../pageDiscovery.js';
   import BacklinksView from './BacklinksView.svelte';
 
   let { sessionId, projectId = null, url, onerror, onnavigate, onopenhtml } = $props();
@@ -136,6 +141,36 @@
   let gscKeywordsLoading = $state(false);
   let gscKeywordsURL = $state('');
   const GSC_KEYWORDS_LIMIT = 10;
+  const HEADING_LEVELS = [1, 2, 3, 4, 5, 6];
+
+  function normalizeHeadingLevel(level) {
+    const numericLevel = Number(level);
+    return Number.isInteger(numericLevel) && numericLevel >= 1 && numericLevel <= 6
+      ? numericLevel
+      : 1;
+  }
+
+  function headingOutline(page) {
+    const stored = Array.isArray(page?.HeadingOutline) ? page.HeadingOutline : [];
+    const normalized = stored
+      .map((heading) => ({
+        level: normalizeHeadingLevel(heading?.Level ?? heading?.level),
+        text: String(heading?.Text ?? heading?.text ?? '').trim(),
+      }))
+      .filter((heading) => heading.text);
+
+    if (normalized.length > 0) return normalized;
+
+    return HEADING_LEVELS.flatMap((level) =>
+      (Array.isArray(page?.[`H${level}`]) ? page[`H${level}`] : [])
+        .map((text) => ({ level, text: String(text || '').trim() }))
+        .filter((heading) => heading.text),
+    );
+  }
+
+  function headingIndentStyle(level) {
+    return `--heading-depth: ${Math.max(0, normalizeHeadingLevel(level) - 1)}`;
+  }
 
   async function loadPageDetail(outOffset = 0, inOffset = 0) {
     pageDetailLoading = true;
@@ -286,10 +321,19 @@
   <p class="loading-msg">{t('common.loading')}</p>
 {:else if pageDetail?.page}
   {@const pg = pageDetail.page}
+  {@const headings = headingOutline(pg)}
   {@const outLinks = pageDetail.links?.out_links || []}
   {@const inLinks = pageDetail.links?.in_links || []}
   {@const outLinksCount = pageDetail.links?.out_links_count || 0}
   {@const inLinksCount = pageDetail.links?.in_links_count || 0}
+  {@const discovery = pageDetail.discovery || {
+    availability: 'unavailable',
+    primary_source: 'unknown',
+    detail: t('urlDetail.discoveryUnavailable'),
+    candidate_sources: [],
+    referrers: [],
+  }}
+  {@const discoveryCandidates = discoveryCandidateSources(discovery)}
 
   <!-- Header -->
   <div class="page-header detail-header-wrap">
@@ -368,6 +412,107 @@
       <div class="stat-value stat-value-xs">{new Date(pg.CrawledAt).toLocaleString()}</div>
       <div class="stat-label">{t('urlDetail.crawledAt')}</div>
     </div>
+  </div>
+
+  <!-- URL discovery provenance -->
+  <div class="card card-section discovery-section">
+    <div class="section-title-row discovery-title-row">
+      <h3 class="section-title">{t('urlDetail.discoveryTitle')}</h3>
+      <span
+        class="badge"
+        class:badge-info={discovery.availability !== 'unavailable'}
+        class:badge-warning={discovery.availability === 'unavailable'}
+        >{t(discoverySourceTranslationKey(discovery.primary_source))}</span
+      >
+    </div>
+
+    <p class="discovery-detail">{discovery.detail || t('urlDetail.discoveryUnavailable')}</p>
+
+    {#if discovery.referrers?.length > 0}
+      <div class="discovery-referrers">
+        {#each discovery.referrers as referrer}
+          <div class="discovery-referrer">
+            <div class="discovery-referrer-source">
+              <a
+                href={urlDetailHref(referrer.source_url)}
+                onclick={(e) => goToUrlDetail(e, referrer.source_url)}
+                title={referrer.source_url}>{referrer.source_url}</a
+              >
+              {#if referrer.anchor_text}
+                <span class="discovery-anchor">{referrer.anchor_text}</span>
+              {/if}
+            </div>
+            <div class="discovery-referrer-meta">
+              {#if referrer.via_redirect}
+                <span class="discovery-via">
+                  {t('urlDetail.discoveryViaRedirect')}
+                  <a
+                    href={urlDetailHref(referrer.redirect_url)}
+                    onclick={(e) => goToUrlDetail(e, referrer.redirect_url)}
+                    title={referrer.redirect_url}>{referrer.redirect_url}</a
+                  >
+                </span>
+              {/if}
+              {#each discoveryReferrerMeta(referrer) as item}
+                <span>{item}</span>
+              {/each}
+            </div>
+          </div>
+        {/each}
+      </div>
+      {#if discovery.referrers_count > discovery.referrers.length}
+        <p class="discovery-more">
+          {t('urlDetail.discoveryMoreReferrers', {
+            count: discovery.referrers_count - discovery.referrers.length,
+          })}
+        </p>
+      {/if}
+    {/if}
+
+    <dl class="discovery-evidence">
+      {#if discovery.found_on}
+        <div>
+          <dt>{t('urlDetail.discoveryFoundOn')}</dt>
+          <dd>
+            <a
+              href={urlDetailHref(discovery.found_on)}
+              onclick={(e) => goToUrlDetail(e, discovery.found_on)}>{discovery.found_on}</a
+            >
+          </dd>
+        </div>
+      {/if}
+      {#if discovery.is_in_sitemap}
+        <div>
+          <dt>{t('urlDetail.discoverySitemap')}</dt>
+          <dd>
+            {#if discovery.sitemap_source_url}
+              <a href={discovery.sitemap_source_url} target="_blank" rel="noopener"
+                >{discovery.sitemap_source_url}</a
+              >
+            {/if}
+            {#if discovery.sitemap_raw_loc}
+              <span class="discovery-raw-loc">{discovery.sitemap_raw_loc}</span>
+            {/if}
+          </dd>
+        </div>
+      {/if}
+      {#if discovery.is_seed}
+        <div>
+          <dt>{t('urlDetail.discoverySeed')}</dt>
+          <dd>{pg.URL}</dd>
+        </div>
+      {/if}
+      {#if discoveryCandidates.length > 0}
+        <div>
+          <dt>{t('urlDetail.discoveryCandidate')}</dt>
+          <dd class="discovery-candidates">
+            {#each discoveryCandidates as source}
+              <span class="badge badge-info">{source}</span>
+            {/each}
+          </dd>
+        </div>
+      {/if}
+    </dl>
   </div>
 
   {#if projectId}
@@ -556,20 +701,21 @@
   {/if}
 
   <!-- Headings -->
-  {#if pg.H1?.length || pg.H2?.length || pg.H3?.length || pg.H4?.length || pg.H5?.length || pg.H6?.length}
+  {#if headings.length > 0}
     <div class="card card-section">
       <h3 class="section-title">{t('urlDetail.headings')}</h3>
-      {#each [['H1', pg.H1], ['H2', pg.H2], ['H3', pg.H3], ['H4', pg.H4], ['H5', pg.H5], ['H6', pg.H6]] as [label, items]}
-        {#if items?.length}
-          <div class="mb-sm">
-            <strong class="text-detail">{label}</strong>
-            <span class="text-muted">({items.length})</span>
-            <ul class="heading-list">
-              {#each items as h}<li class="heading-item">{h}</li>{/each}
-            </ul>
+      <div class="heading-outline" role="list">
+        {#each headings as heading}
+          <div
+            class="heading-outline-row"
+            style={headingIndentStyle(heading.level)}
+            role="listitem"
+          >
+            <span class="heading-level-badge">H{heading.level}</span>
+            <span class="heading-outline-text">{heading.text}</span>
           </div>
-        {/if}
-      {/each}
+        {/each}
+      </div>
     </div>
   {/if}
 
@@ -862,7 +1008,7 @@
           <tbody>
             <tr>
               <td class="font-medium">{t('urlDetail.title')}</td>
-              <td class="cell-title">{pg.Title || '-'}</td>
+              <td class="cell-title">{pg.StaticTitle || '-'}</td>
               <td class="cell-title">{pg.RenderedTitle || '-'}</td>
               <td
                 >{#if pg.JSChangedTitle}<span class="badge badge-warning"
@@ -872,7 +1018,7 @@
             </tr>
             <tr>
               <td class="font-medium">H1</td>
-              <td class="cell-title">{pg.H1?.join(', ') || '-'}</td>
+              <td class="cell-title">{pg.StaticH1?.join(', ') || '-'}</td>
               <td class="cell-title">{pg.RenderedH1?.join(', ') || '-'}</td>
               <td
                 >{#if pg.JSChangedH1}<span class="badge badge-warning"
@@ -882,7 +1028,7 @@
             </tr>
             <tr>
               <td class="font-medium">{t('urlDetail.metaDescription')}</td>
-              <td class="cell-title">{pg.MetaDescription || '-'}</td>
+              <td class="cell-title">{pg.StaticMetaDescription || '-'}</td>
               <td class="cell-title">{pg.RenderedMetaDescription || '-'}</td>
               <td
                 >{#if pg.JSChangedDescription}<span class="badge badge-warning"
@@ -892,7 +1038,7 @@
             </tr>
             <tr>
               <td class="font-medium">{t('urlDetail.canonical')}</td>
-              <td class="cell-url">{pg.Canonical || '-'}</td>
+              <td class="cell-url">{pg.StaticCanonical || '-'}</td>
               <td class="cell-url">{pg.RenderedCanonical || '-'}</td>
               <td
                 >{#if pg.JSChangedCanonical}<span class="badge badge-warning"
@@ -904,7 +1050,7 @@
         </table>
         <div class="stats-grid" style="margin-top: 12px">
           <div class="stat-card">
-            <div class="stat-value">{pg.WordCount} → {pg.RenderedWordCount}</div>
+            <div class="stat-value">{pg.StaticWordCount} → {pg.RenderedWordCount}</div>
             <div class="stat-label">
               {t('urlDetail.words')}
               {#if pg.JSChangedContent}<span class="badge badge-warning badge-xs"
@@ -1241,16 +1387,126 @@
     font-weight: 500;
     width: 160px;
   }
-  .text-detail {
+  .discovery-section {
+    min-width: 0;
+  }
+  .discovery-title-row {
+    align-items: flex-start;
+  }
+  .discovery-detail {
+    margin: 0;
+    color: var(--text-secondary);
     font-size: 0.85rem;
   }
-  .heading-list {
-    margin: 4px 0 0 20px;
-    padding: 0;
+  .discovery-referrers {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
   }
-  .heading-item {
+  .discovery-referrer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(180px, auto);
+    gap: 12px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+  .discovery-referrer-source {
+    min-width: 0;
+  }
+  .discovery-referrer-source > a,
+  .discovery-via a,
+  .discovery-evidence a {
+    overflow-wrap: anywhere;
+  }
+  .discovery-anchor,
+  .discovery-raw-loc {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+  }
+  .discovery-referrer-meta {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+  }
+  .discovery-referrer-meta > span:not(.discovery-via) {
+    padding: 2px 5px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .discovery-via {
+    flex-basis: 100%;
+    text-align: right;
+  }
+  .discovery-more {
+    margin: 8px 0 0;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+  }
+  .discovery-evidence {
+    display: grid;
+    gap: 7px;
+    margin: 10px 0 0;
+  }
+  .discovery-evidence > div {
+    display: grid;
+    grid-template-columns: 150px minmax(0, 1fr);
+    gap: 10px;
+  }
+  .discovery-evidence dt {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+  .discovery-evidence dd {
+    min-width: 0;
+    margin: 0;
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+  }
+  .discovery-candidates {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .heading-outline {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .heading-outline-row {
+    --heading-depth: 0;
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    margin-left: calc(var(--heading-depth) * 18px);
+    padding: 7px 9px;
+    border-left: 2px solid var(--accent-light);
+    background: var(--bg-hover);
+    border-radius: var(--radius-sm);
+  }
+  .heading-level-badge {
+    display: inline-flex;
+    justify-content: center;
+    padding: 2px 4px;
+    border-radius: 4px;
+    background: var(--accent-light);
+    color: var(--accent);
+    font-size: 0.7rem;
+    font-weight: 700;
+    line-height: 1.25;
+  }
+  .heading-outline-text {
     font-size: 0.85rem;
     color: var(--text-secondary);
+    line-height: 1.4;
+    overflow-wrap: anywhere;
   }
   .og-preview {
     max-width: 300px;
@@ -1503,6 +1759,17 @@
     line-height: 1.5;
   }
   @media (max-width: 900px) {
+    .discovery-referrer,
+    .discovery-evidence > div {
+      grid-template-columns: 1fr;
+      gap: 4px;
+    }
+    .discovery-referrer-meta {
+      justify-content: flex-start;
+    }
+    .discovery-via {
+      text-align: left;
+    }
     .gsc-keywords-grid {
       grid-template-columns: 1fr;
     }
@@ -1512,6 +1779,9 @@
     .section-title-row {
       align-items: flex-start;
       flex-direction: column;
+    }
+    .heading-outline-row {
+      margin-left: calc(var(--heading-depth) * 10px);
     }
   }
 </style>

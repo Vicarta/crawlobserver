@@ -378,14 +378,19 @@ func (s *Store) GetSimulation(ctx context.Context, sessionID, simID string) (*Si
 }
 
 // ListSimulationResults returns paginated simulation results.
-func (s *Store) ListSimulationResults(ctx context.Context, sessionID, simID string, limit, offset int, filters []ParsedFilter, sort *SortParam) ([]SimulationResultRow, int, error) {
+func (s *Store) ListSimulationResults(ctx context.Context, sessionID, simID string, limit, offset int, filters []ParsedFilter, sort *SortParam, htmlOnly bool) ([]SimulationResultRow, int, error) {
 	whereExtra, args, err := BuildWhereClause(filters)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	where := "crawl_session_id = ? AND simulation_id = ?"
+	fromClause := "crawlobserver.interlinking_simulation_results AS r"
+	where := "r.crawl_session_id = ? AND r.simulation_id = ?"
 	baseArgs := []interface{}{sessionID, simID}
+	if htmlOnly {
+		fromClause += " INNER JOIN crawlobserver.pages AS p FINAL ON p.crawl_session_id = r.crawl_session_id AND p.url = r.url"
+		where += " AND " + PageTypeSQLExpression + " = 'html'"
+	}
 	if whereExtra != "" {
 		where += " AND " + whereExtra
 		baseArgs = append(baseArgs, args...)
@@ -395,7 +400,7 @@ func (s *Store) ListSimulationResults(ctx context.Context, sessionID, simID stri
 	countArgs := make([]interface{}, len(baseArgs))
 	copy(countArgs, baseArgs)
 	if err := s.conn.QueryRow(ctx,
-		`SELECT count() FROM crawlobserver.interlinking_simulation_results WHERE `+where,
+		`SELECT count() FROM `+fromClause+` WHERE `+where,
 		countArgs...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting simulation results: %w", err)
 	}
@@ -406,8 +411,8 @@ func (s *Store) ListSimulationResults(ctx context.Context, sessionID, simID stri
 	queryArgs = append(queryArgs, limit, offset)
 
 	rows, err := s.conn.Query(ctx,
-		`SELECT url, pagerank_before, pagerank_after, pagerank_diff
-		FROM crawlobserver.interlinking_simulation_results
+		`SELECT r.url, r.pagerank_before, r.pagerank_after, r.pagerank_diff
+		FROM `+fromClause+`
 		WHERE `+where+orderBy+` LIMIT ? OFFSET ?`,
 		queryArgs...)
 	if err != nil {

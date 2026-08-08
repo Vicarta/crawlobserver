@@ -266,6 +266,8 @@ func pageFromExport(sessionID string, p *exportPage) PageRow {
 		OGDescription:    p.OGDescription,
 		OGImage:          p.OGImage,
 		SchemaTypes:      schemaTypes,
+		PageCreatedAt:    p.PageCreatedAt,
+		PageModifiedAt:   p.PageModifiedAt,
 		Headers:          headers,
 		RedirectChain:    chain,
 		BodySize:         p.BodySize,
@@ -295,6 +297,7 @@ func linkFromExport(sessionID string, l *exportLink) LinkRow {
 		Rel:            l.Rel,
 		IsInternal:     l.IsInternal,
 		Tag:            l.Tag,
+		LinkLocation:   normalizeLinkLocation(l.LinkLocation),
 		CrawledAt:      crawledAt,
 	}
 }

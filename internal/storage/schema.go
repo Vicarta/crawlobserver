@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS crawlobserver.pages (
     og_description String,
     og_image String,
     schema_types Array(String),
+    page_created_at Nullable(DateTime64(3, 'UTC')),
+    page_modified_at Nullable(DateTime64(3, 'UTC')),
     headers Map(String, String),
     redirect_chain Array(Tuple(url String, status_code UInt16)),
     body_size UInt64,
@@ -93,9 +95,15 @@ CREATE TABLE IF NOT EXISTS crawlobserver.links (
     rel String,
     is_internal Bool,
     tag String,
+    link_location LowCardinality(String) DEFAULT 'body',
     crawled_at DateTime64(3)
 ) ENGINE = MergeTree()
 ORDER BY (crawl_session_id, source_url, target_url)
+`
+
+const AlterLinksV2 = `
+ALTER TABLE crawlobserver.links
+    ADD COLUMN IF NOT EXISTS link_location LowCardinality(String) DEFAULT 'body' AFTER tag
 `
 
 // AlterPagesV2 adds new columns to existing pages table.
@@ -208,6 +216,8 @@ CREATE TABLE IF NOT EXISTS crawlobserver.pages_v2 (
     og_description String,
     og_image String,
     schema_types Array(String),
+	page_created_at Nullable(DateTime64(3, 'UTC')),
+	page_modified_at Nullable(DateTime64(3, 'UTC')),
     headers Map(String, String),
     redirect_chain Array(Tuple(url String, status_code UInt16)),
     body_size UInt64,
@@ -235,6 +245,7 @@ CREATE TABLE IF NOT EXISTS crawlobserver.links_v2 (
     rel String,
     is_internal Bool,
     tag String,
+    link_location LowCardinality(String) DEFAULT 'body',
     crawled_at DateTime64(3)
 ) ENGINE = MergeTree()
 PARTITION BY crawl_session_id
@@ -742,6 +753,7 @@ var Migrations = []Migration{
 	{Name: "create crawl_sessions", DDL: CreateCrawlSessions},
 	{Name: "create pages", DDL: CreatePages},
 	{Name: "create links", DDL: CreateLinks},
+	{Name: "alter links v2 link location", DDL: AlterLinksV2},
 	{Name: "alter pages v2", DDL: AlterPagesV2},
 	{Name: "alter pages v3", DDL: AlterPagesV3},
 	{Name: "alter pages v4", DDL: AlterPagesV4},
@@ -749,6 +761,7 @@ var Migrations = []Migration{
 	{Name: "alter sessions v2", DDL: AlterSessionsV2},
 	{Name: "create sitemaps", DDL: CreateSitemaps},
 	{Name: "create sitemap_urls", DDL: CreateSitemapURLs},
+	{Name: "alter pages v9 page dates", DDL: AlterPagesV9PageDates},
 	{Name: "repartition by session_id", Fn: migrateRepartitionBySession},
 	{Name: "create gsc_analytics", DDL: CreateGSCAnalytics},
 	{Name: "create gsc_inspection", DDL: CreateGSCInspection},
@@ -783,6 +796,26 @@ var Migrations = []Migration{
 	{Name: "create hreflang_issues", DDL: CreateHreflangIssues},
 	{Name: "create crawl_quality_results", DDL: CreateCrawlQualityResults},
 	{Name: "create crawl_quality_findings", DDL: CreateCrawlQualityFindings},
+	{Name: "alter links v2 link location post-repartition", DDL: AlterLinksV2},
+	{Name: "create project_current_snapshots", DDL: CreateProjectCurrentSnapshots},
+	{Name: "create project_current_snapshot_deltas", DDL: CreateProjectCurrentSnapshotDeltas},
+	{Name: "alter pages v10 static render diagnostics", DDL: AlterPagesV10StaticRenderDiagnostics},
+	{Name: "alter pages v11 pagerank evidence", DDL: AlterPagesV11PageRankEvidence},
+	{Name: "create pagerank evidence", DDL: CreatePageRankEvidence},
+	{Name: "alter pagerank evidence v2 event sequence", DDL: AlterPageRankEvidenceV2EventSequence},
+	{Name: "alter pagerank evidence v3 event order", DDL: AlterPageRankEvidenceV3EventOrder},
+	{Name: "create crawl quality evaluations", DDL: CreateCrawlQualityEvaluations},
+	{Name: "alter crawl quality evaluation finding count", DDL: AlterCrawlQualityEvaluationsV2},
+	{Name: "create crawl quality evaluation findings", DDL: CreateCrawlQualityEvaluationFindings},
+	{Name: "create crawl quality current pointers", DDL: CreateCrawlQualityCurrentPointers},
+	{Name: "alter crawl quality current pointer sequence", DDL: AlterCrawlQualityCurrentPointersV2},
+	{Name: "create crawl quality promotion events", DDL: CreateCrawlQualityPromotionEvents},
+	{Name: "alter crawl quality promotion event identity", DDL: AlterCrawlQualityPromotionEventsV2},
+	{Name: "alter crawl quality promotion event sequence", DDL: AlterCrawlQualityPromotionEventsV3},
+	{Name: "create crawl quality action events", DDL: CreateCrawlQualityActionEvents},
+	{Name: "alter crawl quality action event sequence", DDL: AlterCrawlQualityActionEventsV2},
+	{Name: "alter project current snapshots quality provenance", DDL: AlterProjectCurrentSnapshotsQualityProvenance},
+	{Name: "alter project current snapshots revision", DDL: AlterProjectCurrentSnapshotsRevision},
 }
 
 const AlterSessionsV3 = `
@@ -825,6 +858,66 @@ ALTER TABLE crawlobserver.pages
     ADD COLUMN IF NOT EXISTS cwv_cls Float64 DEFAULT 0,
     ADD COLUMN IF NOT EXISTS cwv_ttfb_ms Float64 DEFAULT 0,
     ADD COLUMN IF NOT EXISTS cwv_measured Bool DEFAULT false
+`
+
+const AlterPagesV9PageDates = `
+ALTER TABLE crawlobserver.pages
+    ADD COLUMN IF NOT EXISTS page_created_at Nullable(DateTime64(3, 'UTC')) AFTER schema_types,
+    ADD COLUMN IF NOT EXISTS page_modified_at Nullable(DateTime64(3, 'UTC')) AFTER page_created_at
+`
+
+const AlterPagesV10StaticRenderDiagnostics = `
+ALTER TABLE crawlobserver.pages
+    ADD COLUMN IF NOT EXISTS static_title String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS static_meta_description String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS static_h1 Array(String) DEFAULT [],
+    ADD COLUMN IF NOT EXISTS static_word_count UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS static_canonical String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS static_meta_robots String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS static_links_count UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS static_images_count UInt16 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS static_content_hash UInt64 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS static_body_html String DEFAULT '' CODEC(ZSTD(3))
+`
+
+const AlterPagesV11PageRankEvidence = `
+ALTER TABLE crawlobserver.pages
+    ADD COLUMN IF NOT EXISTS pagerank_revision UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000') AFTER pagerank
+`
+
+const CreatePageRankEvidence = `
+CREATE TABLE IF NOT EXISTS crawlobserver.pagerank_evidence (
+    session_id UUID,
+    attempt_id UUID,
+    event_sequence UInt64 DEFAULT 0,
+    predecessor_attempt_id String,
+    state LowCardinality(String),
+    source LowCardinality(String),
+    algorithm_version LowCardinality(String),
+    predicate_version LowCardinality(String),
+    options_signature String,
+    graph_fingerprint String,
+    rank_fingerprint String,
+    graph_page_count UInt64,
+    eligible_page_count UInt64,
+    positive_page_count UInt64,
+    zero_page_count UInt64,
+    query_identity String,
+    occurred_at DateTime64(3, 'UTC'),
+    failure String
+) ENGINE = ReplacingMergeTree(occurred_at)
+PARTITION BY session_id
+ORDER BY (session_id, attempt_id, state, event_sequence)
+`
+
+const AlterPageRankEvidenceV2EventSequence = `
+ALTER TABLE crawlobserver.pagerank_evidence
+    ADD COLUMN IF NOT EXISTS event_sequence UInt64 DEFAULT 0 AFTER attempt_id
+`
+
+const AlterPageRankEvidenceV3EventOrder = `
+ALTER TABLE crawlobserver.pagerank_evidence
+    MODIFY ORDER BY (session_id, attempt_id, state, event_sequence)
 `
 
 const CreateHreflangIssues = `
@@ -874,4 +967,182 @@ CREATE TABLE IF NOT EXISTS crawlobserver.crawl_quality_findings (
 ) ENGINE = MergeTree()
 PARTITION BY session_id
 ORDER BY (session_id, severity, finding_type, created_at)
+`
+
+// CreateCrawlQualityEvaluations is append-only. The legacy
+// crawl_quality_results table is intentionally retained for backward reads and
+// migration; new quality decisions are never written there destructively.
+const CreateCrawlQualityEvaluations = `
+CREATE TABLE IF NOT EXISTS crawlobserver.crawl_quality_evaluations (
+    session_id UUID,
+    evaluation_revision UUID,
+    project_id String,
+    baseline_session_id String,
+    baseline_evaluation_revision String,
+    source LowCardinality(String),
+    evaluator_revision String,
+    rules_revision String,
+    pagerank_evidence_revision String,
+    pagerank_evidence_source LowCardinality(String),
+    pagerank_evidence_status LowCardinality(String),
+    pagerank_predicate_version String,
+    pagerank_eligible UInt64,
+    pagerank_positive UInt64,
+    pagerank_zero UInt64,
+    stale Bool,
+    stale_reasons Array(String),
+    finding_count UInt32,
+    promotion_status LowCardinality(String),
+    status LowCardinality(String),
+    score UInt8,
+    trusted Bool,
+    is_full_crawl Bool,
+    summary String,
+    metrics String CODEC(ZSTD(3)),
+    evaluated_at DateTime64(3, 'UTC')
+) ENGINE = MergeTree()
+PARTITION BY session_id
+ORDER BY (session_id, evaluation_revision)
+`
+
+const AlterCrawlQualityEvaluationsV2 = `
+ALTER TABLE crawlobserver.crawl_quality_evaluations
+    ADD COLUMN IF NOT EXISTS finding_count UInt32 DEFAULT 0
+`
+
+// Findings are keyed by a stable index as well as evaluation revision so an
+// evaluation and its explanation remain coherent forever.
+const CreateCrawlQualityEvaluationFindings = `
+CREATE TABLE IF NOT EXISTS crawlobserver.crawl_quality_evaluation_findings (
+    session_id UUID,
+    evaluation_revision UUID,
+    finding_index UInt32,
+    project_id String,
+    severity LowCardinality(String),
+    finding_type LowCardinality(String),
+    message String,
+    metric LowCardinality(String),
+    current_value Float64,
+    baseline_value Float64,
+    threshold_value Float64,
+    blocking Bool,
+    created_at DateTime64(3, 'UTC')
+) ENGINE = MergeTree()
+PARTITION BY session_id
+ORDER BY (session_id, evaluation_revision, finding_index)
+`
+
+// The pointer is a separate read model. Its ReplacingMergeTree version is
+// published only after the immutable evaluation and findings have read back.
+const CreateCrawlQualityCurrentPointers = `
+CREATE TABLE IF NOT EXISTS crawlobserver.crawl_quality_current_pointers (
+    session_id UUID,
+    evaluation_revision UUID,
+    pointer_sequence UInt64 DEFAULT 0,
+    published_at DateTime64(3, 'UTC')
+) ENGINE = ReplacingMergeTree(published_at)
+ORDER BY (session_id)
+`
+
+const AlterCrawlQualityCurrentPointersV2 = `
+ALTER TABLE crawlobserver.crawl_quality_current_pointers
+    ADD COLUMN IF NOT EXISTS pointer_sequence UInt64 DEFAULT 0 AFTER evaluation_revision
+`
+
+const CreateCrawlQualityPromotionEvents = `
+CREATE TABLE IF NOT EXISTS crawlobserver.crawl_quality_promotion_events (
+    project_id String,
+    session_id UUID,
+    promotion_id UUID,
+    event_sequence UInt64 DEFAULT 0,
+    evaluation_revision UUID,
+    pagerank_evidence_revision String,
+    baseline_session_id String,
+    baseline_evaluation_revision String,
+    evaluator_revision String,
+    rules_revision String,
+    status LowCardinality(String),
+    reason String,
+    detail String,
+    occurred_at DateTime64(3, 'UTC')
+) ENGINE = MergeTree()
+PARTITION BY session_id
+ORDER BY (session_id, evaluation_revision, occurred_at, promotion_id)
+`
+
+const AlterCrawlQualityPromotionEventsV2 = `
+ALTER TABLE crawlobserver.crawl_quality_promotion_events
+    ADD COLUMN IF NOT EXISTS promotion_id UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000')
+`
+
+const AlterCrawlQualityPromotionEventsV3 = `
+ALTER TABLE crawlobserver.crawl_quality_promotion_events
+    ADD COLUMN IF NOT EXISTS event_sequence UInt64 DEFAULT 0 AFTER promotion_id
+`
+
+const CreateCrawlQualityActionEvents = `
+CREATE TABLE IF NOT EXISTS crawlobserver.crawl_quality_action_events (
+    session_id UUID,
+    action_id UUID,
+    event_sequence UInt64 DEFAULT 0,
+    action LowCardinality(String),
+    source LowCardinality(String),
+    actor String,
+    reason String,
+    expected_evaluation_revision String,
+    previous_evaluation_revision String,
+    result_evaluation_revision String,
+    expected_pagerank_evidence_revision String,
+    pagerank_evidence_revision String,
+    status LowCardinality(String),
+    occurred_at DateTime64(3, 'UTC')
+) ENGINE = MergeTree()
+PARTITION BY session_id
+ORDER BY (session_id, occurred_at, action_id)
+`
+
+const AlterCrawlQualityActionEventsV2 = `
+ALTER TABLE crawlobserver.crawl_quality_action_events
+    ADD COLUMN IF NOT EXISTS event_sequence UInt64 DEFAULT 0 AFTER action_id
+`
+
+const AlterProjectCurrentSnapshotsQualityProvenance = `
+ALTER TABLE crawlobserver.project_current_snapshots
+    ADD COLUMN IF NOT EXISTS quality_baseline_session_id String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS quality_evaluation_revision String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS baseline_quality_evaluation_revision String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS pagerank_evidence_revision String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS quality_evaluator_revision String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS quality_rules_revision String DEFAULT '',
+    ADD COLUMN IF NOT EXISTS quality_promotion_status LowCardinality(String) DEFAULT ''
+`
+
+const AlterProjectCurrentSnapshotsRevision = `
+ALTER TABLE crawlobserver.project_current_snapshots
+    ADD COLUMN IF NOT EXISTS snapshot_revision UInt64 DEFAULT 0 AFTER project_id
+`
+
+const CreateProjectCurrentSnapshots = `
+CREATE TABLE IF NOT EXISTS crawlobserver.project_current_snapshots (
+    project_id String,
+    snapshot_revision UInt64 DEFAULT 0,
+    current_session_id UUID,
+    baseline_session_id String,
+    quality_baseline_session_id String DEFAULT '',
+    baseline_created_at DateTime64(3),
+    last_delta_session_id String,
+    delta_count UInt32,
+    updated_at DateTime64(3)
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (project_id)
+`
+
+const CreateProjectCurrentSnapshotDeltas = `
+CREATE TABLE IF NOT EXISTS crawlobserver.project_current_snapshot_deltas (
+    project_id String,
+    delta_session_id UUID,
+    current_session_id UUID,
+    applied_at DateTime64(3)
+) ENGINE = ReplacingMergeTree(applied_at)
+ORDER BY (project_id, delta_session_id)
 `

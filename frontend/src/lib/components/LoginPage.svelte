@@ -1,7 +1,7 @@
 <script>
   import { login } from '../api.js';
 
-  let { appName = 'CrawlObserver', onlogin } = $props();
+  let { appName = 'CrawlObserver', notice = '', onlogin } = $props();
 
   let username = $state('');
   let password = $state('');
@@ -78,6 +78,10 @@
         submit();
       }}
     >
+      {#if notice}
+        <div class="login-notice" role="status">{notice}</div>
+      {/if}
+
       <div class="field">
         <label for="login-username">Username</label>
         <input
@@ -239,6 +243,16 @@
     max-width: 760px;
     margin: 0;
     letter-spacing: 0;
+  }
+
+  .login-notice {
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg-card));
+    color: var(--text);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.35;
   }
 
   .product-copy p:not(.product-kicker) {

@@ -14,6 +14,7 @@
   import { onDestroy } from 'svelte';
   import {
     getSessions,
+    getSession,
     getStats,
     getProgress,
     stopCrawl,
@@ -30,7 +31,10 @@
     getSetupStatus,
     getTelemetry,
     getCurrentUser,
+    getProjectCurrentSnapshot,
     logout,
+    AUTH_EXPIRED_EVENT,
+    AuthError,
   } from './lib/api.js';
   import { initTelemetry, trackPageView, trackEvent, disableTelemetry } from './lib/telemetry.js';
   import { fmtSize } from './lib/utils.js';
@@ -42,6 +46,7 @@
   import GlobalStatsPage from './lib/components/GlobalStatsPage.svelte';
   import SettingsPage from './lib/components/SettingsPage.svelte';
   import APIManagementPage from './lib/components/APIManagementPage.svelte';
+  import PageRankLabPage from './lib/components/PageRankLabPage.svelte';
   import SessionsList from './lib/components/SessionsList.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
   import ComparePage from './lib/components/ComparePage.svelte';
@@ -88,7 +93,7 @@
     mode: 'light',
   });
   let darkMode = $state(false);
-  /** @type {'home'|'settings'|'stats'|'compare'|'logs'|'all-projects'|'api'|'new-crawl'|'project'|'session'} */
+  /** @type {'home'|'settings'|'stats'|'compare'|'logs'|'all-projects'|'api'|'pagerank-lab'|'new-crawl'|'project'|'session'} */
   let currentView = $state('home');
   let showResumeModal = $state(false);
   let resumeSessionId = $state(null);
@@ -107,6 +112,7 @@
   let storageStats = $state(null);
   let sessionRecordingActive = $state(false);
   let systemStats = $state(null);
+  let loginNotice = $state('');
 
   // --- Route-derived state (passed as initial props to page components) ---
   let routeTab = $state('reports');
@@ -114,6 +120,7 @@
   let routeOffset = $state(0);
   let routeDetailUrl = $state('');
   let routeSubView = $state(null);
+  let routeNestedSubView = $state(null);
   let routeProjectTab = $state('sessions');
   let routeGscSubView = $state('overview');
   let routeProviderSubView = $state('overview');
@@ -122,6 +129,7 @@
   // --- Project state ---
   let projects = $state([]);
   let selectedProject = $state(null);
+  let currentSnapshots = $state({});
 
   // --- Live progress ---
   let liveProgress = $state({});
@@ -129,6 +137,47 @@
   let statsVersion = $state(0);
   let updatePollTimer = null;
   let systemStatsInterval = null;
+
+  function stopSystemStatsPolling() {
+    if (systemStatsInterval) {
+      clearInterval(systemStatsInterval);
+      systemStatsInterval = null;
+    }
+  }
+
+  function stopUpdatePolling() {
+    if (updatePollTimer) {
+      clearInterval(updatePollTimer);
+      updatePollTimer = null;
+    }
+  }
+
+  function clearAuthenticatedState() {
+    currentUser = null;
+    sessions = [];
+    projects = [];
+    selectedSession = null;
+    selectedProject = null;
+    globalStats = null;
+    systemStats = null;
+    updateInfo = null;
+    stopSystemStatsPolling();
+    stopUpdatePolling();
+    sse.disconnectAll();
+  }
+
+  function handleAuthExpired() {
+    clearAuthenticatedState();
+    authChecked = true;
+    loading = false;
+    error = null;
+    loginNotice = 'Your session has expired. Sign in again to continue.';
+    pushURL('/');
+  }
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+  }
 
   // --- All Projects page ---
   function openAllProjects() {
@@ -324,18 +373,31 @@
       routeDetailUrl = route.detailUrl;
       routeFilters = {};
       routeSubView = null;
+      routeNestedSubView = null;
     } else {
       routeTab = route.tab;
       routeFilters = route.filters || {};
       routeOffset = route.offset || 0;
       routeSubView = route.subView || null;
+      routeNestedSubView = route.nestedSubView || null;
     }
 
     if (!selectedSession || selectedSession.ID !== route.sessionId) {
       if (sessions.length === 0) {
         await loadSessions();
       }
-      const found = sessions.find((s) => s.ID === route.sessionId);
+      let found = sessions.find((s) => s.ID === route.sessionId);
+      // Current/baseline snapshots are intentionally absent from the session
+      // list, so direct links must resolve them through the single-session API.
+      if (!found) {
+        try {
+          found = await getSession(route.sessionId);
+        } catch (e) {
+          error = e.message || 'Session not found';
+          currentView = 'home';
+          return;
+        }
+      }
       if (found) {
         try {
           stats = await getStats(found.ID);
@@ -361,6 +423,7 @@
     routeFilters = {};
     routeOffset = 0;
     routeSubView = null;
+    routeNestedSubView = null;
     routeVersion++;
     pushURL(`/sessions/${session.ID}/reports`);
     try {
@@ -424,6 +487,24 @@
     }
   }
 
+  async function loadCurrentSnapshots(projectList = projects) {
+    if (!projectList?.length) {
+      currentSnapshots = {};
+      return;
+    }
+    const pairs = await Promise.all(
+      projectList.map(async (project) => {
+        try {
+          const snapshot = await getProjectCurrentSnapshot(project.id);
+          return [project.id, snapshot];
+        } catch {
+          return [project.id, null];
+        }
+      }),
+    );
+    currentSnapshots = Object.fromEntries(pairs.filter(([, snapshot]) => snapshot));
+  }
+
   // --- Update check polling ---
   function startUpdatePoll() {
     if (updatePollTimer) return;
@@ -462,6 +543,7 @@
   async function handleLogin(user) {
     currentUser = user;
     authChecked = true;
+    loginNotice = '';
     error = null;
     await bootApp();
   }
@@ -472,22 +554,8 @@
     } catch {
       // Continue locally if the server session was already gone.
     }
-    currentUser = null;
-    sessions = [];
-    projects = [];
-    selectedSession = null;
-    selectedProject = null;
-    globalStats = null;
-    systemStats = null;
-    if (systemStatsInterval) {
-      clearInterval(systemStatsInterval);
-      systemStatsInterval = null;
-    }
-    if (updatePollTimer) {
-      clearInterval(updatePollTimer);
-      updatePollTimer = null;
-    }
-    sse.disconnectAll();
+    loginNotice = '';
+    clearAuthenticatedState();
     pushURL('/');
   }
 
@@ -633,6 +701,10 @@
     try {
       systemStats = await getSystemStats();
     } catch (e) {
+      if (e instanceof AuthError) {
+        stopSystemStatsPolling();
+        return;
+      }
       console.warn('Failed to load system stats:', e);
     }
   }
@@ -681,7 +753,10 @@
       startUpdatePoll();
     }
     getProjects()
-      .then((p) => (projects = p))
+      .then((p) => {
+        projects = p;
+        loadCurrentSnapshots(p);
+      })
       .catch(() => {});
     if (isAdmin && !globalStats)
       getGlobalStats()
@@ -711,8 +786,11 @@
 
   // Cleanup on destroy
   onDestroy(() => {
-    if (systemStatsInterval) clearInterval(systemStatsInterval);
-    if (updatePollTimer) clearInterval(updatePollTimer);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+    }
+    stopSystemStatsPolling();
+    stopUpdatePolling();
     sse.disconnectAll();
   });
 </script>
@@ -725,7 +803,7 @@
     <span>Loading {theme.app_name || 'CrawlObserver'}...</span>
   </main>
 {:else if !currentUser}
-  <LoginPage appName={theme.app_name} onlogin={handleLogin} />
+  <LoginPage appName={theme.app_name} notice={loginNotice} onlogin={handleLogin} />
 {:else}
   <a class="skip-link" href="#main-content">{t('app.skipToContent')}</a>
   <div class="layout">
@@ -832,6 +910,8 @@
             onerror={(msg) => (error = msg)}
             onprojectschanged={(p) => (projects = p)}
           />
+        {:else if currentView === 'pagerank-lab'}
+          <PageRankLabPage onerror={(msg) => (error = msg)} />
         {:else if currentView === 'new-crawl'}
           <CrawlForm
             mode="new"
@@ -873,6 +953,7 @@
           <SessionsList
             {sessions}
             {projects}
+            {currentSnapshots}
             {liveProgress}
             {sessionStorageMap}
             {loading}
@@ -897,6 +978,7 @@
               initialOffset={routeOffset}
               initialDetailUrl={routeDetailUrl}
               initialSubView={routeSubView}
+              initialNestedSubView={routeNestedSubView}
               onerror={(msg) => (error = msg)}
               onstop={isAdmin ? handleStop : undefined}
               onresume={isAdmin ? openResumeModal : undefined}
@@ -906,6 +988,7 @@
               oncompare={(id) => navigateTo(`/compare?a=${id}`)}
               onnavigate={navigateTo}
               ongohome={goHome}
+              {isAdmin}
             />
           {/key}
         {/if}

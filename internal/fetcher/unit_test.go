@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -470,6 +471,165 @@ func TestDiscoverSitemaps_CancelledContext(t *testing.T) {
 	// With a cancelled context, should return no entries or at most partial
 	if len(entries) > 1 {
 		t.Errorf("expected at most 1 entry with cancelled context, got %d", len(entries))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ObserveSitemaps: strict sitemap-refresh observations
+// ---------------------------------------------------------------------------
+
+func TestObserveSitemaps_CompleteTraversalPreservesRawLoc(t *testing.T) {
+	mux := http.NewServeMux()
+	var server *httptest.Server
+	mux.HandleFunc("/index.xml", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `<?xml version="1.0"?><sitemapindex><sitemap><loc>%s/pages.xml</loc></sitemap></sitemapindex>`, server.URL)
+	})
+	mux.HandleFunc("/pages.xml", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<?xml version="1.0"?><urlset><url><loc>https://example.com/nataliya -k-1758008510675</loc><lastmod> 2026-01-01 </lastmod></url></urlset>`)
+	})
+	server = httptest.NewServer(mux)
+	defer server.Close()
+
+	observation := ObserveSitemaps(context.Background(), server.Client(), "TestBot", []string{server.URL + "/index.xml"})
+	if !observation.Complete || observation.Failure != nil {
+		t.Fatalf("observation = %+v, want complete traversal", observation)
+	}
+	if observation.ValidEmpty {
+		t.Fatal("non-empty urlset was reported as valid empty")
+	}
+	if observation.URLCount != 1 || len(observation.Entries) != 2 {
+		t.Fatalf("URLCount=%d entries=%d, want 1 URL across 2 documents", observation.URLCount, len(observation.Entries))
+	}
+
+	got := observation.Entries[1].URLs[0]
+	wantRawLoc := "https://example.com/nataliya -k-1758008510675"
+	if got.Loc != wantRawLoc || got.RawLoc != wantRawLoc {
+		t.Fatalf("raw loc = Loc:%q RawLoc:%q, want %q", got.Loc, got.RawLoc, wantRawLoc)
+	}
+	if got.LastMod != "2026-01-01" {
+		t.Errorf("LastMod = %q, want formatting-only whitespace trimmed", got.LastMod)
+	}
+}
+
+func TestObserveSitemaps_ValidEmptyURLSet(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<?xml version="1.0"?><urlset></urlset>`)
+	}))
+	defer server.Close()
+
+	observation := ObserveSitemaps(context.Background(), server.Client(), "TestBot", []string{server.URL + "/empty.xml"})
+	if !observation.Complete || !observation.ValidEmpty || observation.Failure != nil {
+		t.Fatalf("observation = %+v, want a complete valid empty sitemap", observation)
+	}
+	if observation.URLCount != 0 {
+		t.Errorf("URLCount = %d, want 0", observation.URLCount)
+	}
+}
+
+func TestObserveSitemaps_ChildFailureIsIncomplete(t *testing.T) {
+	mux := http.NewServeMux()
+	var server *httptest.Server
+	mux.HandleFunc("/index.xml", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `<?xml version="1.0"?><sitemapindex><sitemap><loc>%s/missing.xml</loc></sitemap></sitemapindex>`, server.URL)
+	})
+	mux.HandleFunc("/missing.xml", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	server = httptest.NewServer(mux)
+	defer server.Close()
+
+	observation := ObserveSitemaps(context.Background(), server.Client(), "TestBot", []string{server.URL + "/index.xml"})
+	if observation.Complete {
+		t.Fatal("child HTTP failure must not produce a complete observation")
+	}
+	if observation.Failure == nil || observation.Failure.Kind != SitemapFailureChild {
+		t.Fatalf("Failure = %#v, want child failure", observation.Failure)
+	}
+	if observation.Failure.Cause == nil || observation.Failure.Cause.Kind != SitemapFailureHTTP {
+		t.Fatalf("Failure.Cause = %#v, want HTTP failure", observation.Failure.Cause)
+	}
+	if len(observation.Entries) != 2 {
+		t.Errorf("entries = %d, want parent and failed child", len(observation.Entries))
+	}
+}
+
+func TestObserveSitemaps_TypedRootFailures(t *testing.T) {
+	t.Run("http", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer server.Close()
+
+		observation := ObserveSitemaps(context.Background(), server.Client(), "TestBot", []string{server.URL + "/sitemap.xml"})
+		if observation.Failure == nil || observation.Failure.Kind != SitemapFailureHTTP {
+			t.Fatalf("Failure = %#v, want HTTP failure", observation.Failure)
+		}
+	})
+
+	t.Run("xml", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `<urlset><url><loc>https://example.com/unterminated</loc></url>`)
+		}))
+		defer server.Close()
+
+		observation := ObserveSitemaps(context.Background(), server.Client(), "TestBot", []string{server.URL + "/sitemap.xml"})
+		if observation.Failure == nil || observation.Failure.Kind != SitemapFailureXML {
+			t.Fatalf("Failure = %#v, want XML failure", observation.Failure)
+		}
+	})
+
+	t.Run("network", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		url := server.URL + "/sitemap.xml"
+		server.Close()
+
+		observation := ObserveSitemaps(context.Background(), http.DefaultClient, "TestBot", []string{url})
+		if observation.Failure == nil || observation.Failure.Kind != SitemapFailureNetwork {
+			t.Fatalf("Failure = %#v, want network failure", observation.Failure)
+		}
+	})
+
+	t.Run("context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		observation := ObserveSitemaps(ctx, http.DefaultClient, "TestBot", []string{"https://example.invalid/sitemap.xml"})
+		if observation.Failure == nil || observation.Failure.Kind != SitemapFailureContext {
+			t.Fatalf("Failure = %#v, want context failure", observation.Failure)
+		}
+		if len(observation.AttemptedURLs) != 0 {
+			t.Errorf("AttemptedURLs = %v, want no HTTP attempt after cancellation", observation.AttemptedURLs)
+		}
+	})
+}
+
+func TestObserveSitemaps_TraversalLimitIsFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	var server *httptest.Server
+	mux.HandleFunc("/index.xml", func(w http.ResponseWriter, r *http.Request) {
+		var body strings.Builder
+		body.WriteString(`<?xml version="1.0"?><sitemapindex>`)
+		for i := 0; i < maxTotalSitemaps; i++ {
+			fmt.Fprintf(&body, "<sitemap><loc>%s/child-%d.xml</loc></sitemap>", server.URL, i)
+		}
+		body.WriteString("</sitemapindex>")
+		fmt.Fprint(w, body.String())
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<?xml version="1.0"?><urlset></urlset>`)
+	})
+	server = httptest.NewServer(mux)
+	defer server.Close()
+
+	observation := ObserveSitemaps(context.Background(), server.Client(), "TestBot", []string{server.URL + "/index.xml"})
+	if observation.Complete {
+		t.Fatal("a traversal that exceeds the document cap must be incomplete")
+	}
+	if observation.Failure == nil || observation.Failure.Kind != SitemapFailureTruncated {
+		t.Fatalf("Failure = %#v, want truncation failure", observation.Failure)
+	}
+	if len(observation.Entries) != maxTotalSitemaps {
+		t.Errorf("entries = %d, want cap %d", len(observation.Entries), maxTotalSitemaps)
 	}
 }
 

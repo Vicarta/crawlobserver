@@ -38,8 +38,12 @@ func cleanupRedirectTestSession(t *testing.T, s *Store, sessionID string) {
 // redirectTestSessionID is a fixed UUID for redirect filter tests.
 const redirectTestSessionID = "11111111-2222-3333-4444-555555555555"
 
+const sitemapEvidenceTestSessionID = "12121212-3434-5656-7878-909090909090"
+
+const discoveryRedirectTestSessionID = "25252525-3434-5656-7878-909090909090"
+
 // setupRedirectTestData creates the standard test dataset:
-// - 3 normal pages (status 200, final_url = '' or = url, pagerank > 0)
+// - 3 normal pages (status 200, final_url = ” or = url, pagerank > 0)
 // - 2 followed redirects (status 200, final_url != url, pagerank > 0)
 // - 1 true 301 redirect (status 301)
 func setupRedirectTestData(t *testing.T, s *Store) {
@@ -104,6 +108,161 @@ func TestListPages_ExcludesRedirects(t *testing.T) {
 			t.Errorf("ListPages returned followed redirect: url=%s final_url=%s", p.URL, p.FinalURL)
 		}
 	}
+}
+
+func TestListPagesReturnsSitemapEvidenceWithoutDuplicatePages(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	t.Cleanup(func() { cleanupRedirectTestSession(t, s, sitemapEvidenceTestSessionID) })
+	cleanupRedirectTestSession(t, s, sitemapEvidenceTestSessionID)
+
+	now := time.Now()
+	if err := s.InsertSession(ctx, &CrawlSession{
+		ID:        sitemapEvidenceTestSessionID,
+		StartedAt: now,
+		Status:    "completed",
+	}); err != nil {
+		t.Fatalf("inserting session: %v", err)
+	}
+
+	const (
+		exactURL     = "https://example.com/a-exact%20loc"
+		decodedURL   = "https://example.com/b-raw%20loc"
+		unmatchedURL = "https://example.com/c-unmatched"
+	)
+	insertTestPages(t, s, sitemapEvidenceTestSessionID, []PageRow{
+		{CrawlSessionID: sitemapEvidenceTestSessionID, URL: exactURL, StatusCode: 200, ContentType: "text/html", CrawledAt: now},
+		{CrawlSessionID: sitemapEvidenceTestSessionID, URL: decodedURL, StatusCode: 200, ContentType: "text/html", CrawledAt: now},
+		{CrawlSessionID: sitemapEvidenceTestSessionID, URL: unmatchedURL, StatusCode: 200, ContentType: "text/html", CrawledAt: now},
+	})
+	if err := s.InsertSitemapURLs(ctx, []SitemapURLRow{
+		{CrawlSessionID: sitemapEvidenceTestSessionID, SitemapURL: "https://example.com/exact.xml", Loc: exactURL},
+		{CrawlSessionID: sitemapEvidenceTestSessionID, SitemapURL: "https://example.com/decoded-exact.xml", Loc: "https://example.com/a-exact loc"},
+		{CrawlSessionID: sitemapEvidenceTestSessionID, SitemapURL: "https://example.com/raw.xml", Loc: "https://example.com/b-raw loc"},
+		{CrawlSessionID: sitemapEvidenceTestSessionID, SitemapURL: "https://example.com/z-raw-duplicate.xml", Loc: "https://example.com/b-raw loc"},
+	}); err != nil {
+		t.Fatalf("inserting sitemap URLs: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	sortByURL := &SortParam{Column: "url", Order: "ASC"}
+	pages, err := s.ListPages(ctx, sitemapEvidenceTestSessionID, 100, 0, nil, sortByURL)
+	if err != nil {
+		t.Fatalf("ListPages: %v", err)
+	}
+	if len(pages) != 3 {
+		t.Fatalf("ListPages returned %d pages, want 3", len(pages))
+	}
+	if pages[0].URL != exactURL || pages[1].URL != decodedURL || pages[2].URL != unmatchedURL {
+		t.Fatalf("ListPages sorted URLs = [%q, %q, %q], want [%q, %q, %q]", pages[0].URL, pages[1].URL, pages[2].URL, exactURL, decodedURL, unmatchedURL)
+	}
+
+	if pages[0].SitemapSourceURL != "https://example.com/exact.xml" || pages[0].SitemapRawLoc != exactURL {
+		t.Errorf("exact evidence = (%q, %q), want (%q, %q)", pages[0].SitemapSourceURL, pages[0].SitemapRawLoc, "https://example.com/exact.xml", exactURL)
+	}
+	if pages[1].URL != decodedURL {
+		t.Errorf("decoded-match crawled URL = %q, want %q", pages[1].URL, decodedURL)
+	}
+	if pages[1].SitemapSourceURL != "https://example.com/raw.xml" || pages[1].SitemapRawLoc != "https://example.com/b-raw loc" {
+		t.Errorf("decoded evidence = (%q, %q), want (%q, %q)", pages[1].SitemapSourceURL, pages[1].SitemapRawLoc, "https://example.com/raw.xml", "https://example.com/b-raw loc")
+	}
+	if pages[2].SitemapSourceURL != "" || pages[2].SitemapRawLoc != "" {
+		t.Errorf("unmatched evidence = (%q, %q), want empty", pages[2].SitemapSourceURL, pages[2].SitemapRawLoc)
+	}
+
+	paged, err := s.ListPages(ctx, sitemapEvidenceTestSessionID, 1, 1, nil, sortByURL)
+	if err != nil {
+		t.Fatalf("ListPages paged: %v", err)
+	}
+	if len(paged) != 1 || paged[0].URL != decodedURL || paged[0].SitemapRawLoc != "https://example.com/b-raw loc" {
+		t.Fatalf("ListPages paged result = %#v, want decoded page with raw evidence", paged)
+	}
+
+	filtered, err := s.ListPages(ctx, sitemapEvidenceTestSessionID, 100, 0, []ParsedFilter{{Def: PageFilters["url"], Value: "a-exact"}}, sortByURL)
+	if err != nil {
+		t.Fatalf("ListPages filtered: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].URL != exactURL || filtered[0].SitemapSourceURL != "https://example.com/exact.xml" {
+		t.Fatalf("ListPages filtered result = %#v, want exact page with evidence", filtered)
+	}
+}
+
+func TestPageDiscoveryResolvesInternalReferrerThroughRedirectAlias(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	t.Cleanup(func() { cleanupRedirectTestSession(t, s, discoveryRedirectTestSessionID) })
+	cleanupRedirectTestSession(t, s, discoveryRedirectTestSessionID)
+
+	now := time.Now()
+	if err := s.InsertSession(ctx, &CrawlSession{
+		ID:        discoveryRedirectTestSessionID,
+		StartedAt: now,
+		Status:    "completed",
+		SeedURLs:  []string{"https://example.com/"},
+	}); err != nil {
+		t.Fatalf("inserting session: %v", err)
+	}
+
+	const (
+		sourceURL = "https://example.com/source"
+		aliasURL  = "https://example.com/old"
+		finalURL  = "https://example.com/final/"
+	)
+	insertTestPages(t, s, discoveryRedirectTestSessionID, []PageRow{
+		{CrawlSessionID: discoveryRedirectTestSessionID, URL: sourceURL, FinalURL: sourceURL, StatusCode: 200, ContentType: "text/html", Depth: 5, CrawledAt: now},
+		{CrawlSessionID: discoveryRedirectTestSessionID, URL: aliasURL, FinalURL: finalURL, StatusCode: 301, Depth: 6, FoundOn: sourceURL, CrawledAt: now},
+		{CrawlSessionID: discoveryRedirectTestSessionID, URL: finalURL, FinalURL: finalURL, StatusCode: 404, ContentType: "text/html", Depth: 6, CrawledAt: now},
+	})
+	duplicate := LinkRow{
+		CrawlSessionID: discoveryRedirectTestSessionID,
+		SourceURL:      sourceURL,
+		TargetURL:      aliasURL,
+		AnchorText:     "Old article",
+		IsInternal:     true,
+		Tag:            "a",
+		LinkLocation:   "body",
+		CrawledAt:      now,
+	}
+	if err := s.InsertLinks(ctx, []LinkRow{duplicate, duplicate}); err != nil {
+		t.Fatalf("inserting duplicate redirect links: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	evidence, err := s.GetPageDiscovery(ctx, discoveryRedirectTestSessionID, finalURL, 10)
+	if err != nil {
+		t.Fatalf("GetPageDiscovery: %v", err)
+	}
+	if evidence.PrimarySource != "redirect_internal_link" {
+		t.Fatalf("PrimarySource = %q, want redirect_internal_link", evidence.PrimarySource)
+	}
+	if evidence.ReferrersCount != 1 || evidence.RedirectReferrersCount != 1 {
+		t.Fatalf("referrer counts = total %d redirect %d, want 1 and 1", evidence.ReferrersCount, evidence.RedirectReferrersCount)
+	}
+	if len(evidence.Referrers) != 1 {
+		t.Fatalf("Referrers length = %d, want 1 deduplicated row", len(evidence.Referrers))
+	}
+	ref := evidence.Referrers[0]
+	if ref.SourceURL != sourceURL || ref.RedirectURL != aliasURL || !ref.ViaRedirect {
+		t.Fatalf("redirect referrer = %#v", ref)
+	}
+	if ref.AnchorText != "Old article" || ref.LinkLocation != "body" {
+		t.Fatalf("referrer content = %#v", ref)
+	}
+
+	pages, err := s.ListPages(ctx, discoveryRedirectTestSessionID, 100, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("ListPages: %v", err)
+	}
+	for _, page := range pages {
+		if page.URL != finalURL {
+			continue
+		}
+		if page.InternalLinksIn != 1 || page.DiscoverySource != "redirect_internal_link" || page.ProblemOrigin != "redirect_internal_link" {
+			t.Fatalf("final page discovery = inlinks %d source %q origin %q", page.InternalLinksIn, page.DiscoverySource, page.ProblemOrigin)
+		}
+		return
+	}
+	t.Fatalf("final page %s not found", finalURL)
 }
 
 func TestPageRankTop_ExcludesRedirects(t *testing.T) {
@@ -1087,7 +1246,7 @@ func TestSessionAudit_SitemapCoverage_ExcludesRedirects(t *testing.T) {
 		{CrawlSessionID: sid, SitemapURL: "https://example.com/sitemap.xml", Loc: "https://example.com/p1"},
 		{CrawlSessionID: sid, SitemapURL: "https://example.com/sitemap.xml", Loc: "https://example.com/p2"},
 		{CrawlSessionID: sid, SitemapURL: "https://example.com/sitemap.xml", Loc: "https://example.com/old"},      // redirect URL in sitemap
-		{CrawlSessionID: sid, SitemapURL: "https://example.com/sitemap.xml", Loc: "https://example.com/external"},  // not crawled
+		{CrawlSessionID: sid, SitemapURL: "https://example.com/sitemap.xml", Loc: "https://example.com/external"}, // not crawled
 	}
 	if err := s.InsertSitemapURLs(ctx, sitemapURLs); err != nil {
 		t.Fatalf("inserting sitemap URLs: %v", err)

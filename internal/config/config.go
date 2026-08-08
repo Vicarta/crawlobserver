@@ -49,6 +49,8 @@ type CrawlerConfig struct {
 	Workers               int              `mapstructure:"workers"`
 	Delay                 time.Duration    `mapstructure:"delay"`
 	MaxPages              int              `mapstructure:"max_pages"`
+	DeltaPlannedPages     int              `mapstructure:"delta_planned_pages"`
+	DeltaPlan             *DeltaPlanConfig `mapstructure:"delta_plan"`
 	MaxDepth              int              `mapstructure:"max_depth"`
 	Timeout               time.Duration    `mapstructure:"timeout"`
 	UserAgent             string           `mapstructure:"user_agent"`
@@ -71,11 +73,52 @@ type CrawlerConfig struct {
 	CheckPageResources    *bool            `mapstructure:"check_page_resources"`
 	ResourceWorkers       int              `mapstructure:"resource_workers"`
 	FollowJSLinks         bool             `mapstructure:"follow_js_links"`
+	SitemapURLs           []string         `json:"sitemap_urls,omitempty" mapstructure:"sitemap_urls"`
 	MeasureCWV            bool             `mapstructure:"measure_cwv"`
 	ExtractorSetID        string           `mapstructure:"extractor_set_id"`
 	Retry                 RetryConfig      `mapstructure:"retry"`
 	JSRender              JSRenderConfig   `mapstructure:"js_render"`
 	Cloudflare            CloudflareConfig `mapstructure:"cloudflare"`
+}
+
+type DeltaPlanConfig struct {
+	BaselineSessionID       string               `json:"baseline_session_id" mapstructure:"baseline_session_id"`
+	TotalCandidates         int                  `json:"total_candidates" mapstructure:"total_candidates"`
+	LaunchedCandidates      int                  `json:"launched_candidates" mapstructure:"launched_candidates"`
+	DeferredCandidates      int                  `json:"deferred_candidates" mapstructure:"deferred_candidates"`
+	LaunchLimit             int                  `json:"launch_limit" mapstructure:"launch_limit"`
+	SourceCounts            map[string]int       `json:"source_counts" mapstructure:"source_counts"`
+	BaselineSitemapURLCount int                  `json:"baseline_sitemap_url_count" mapstructure:"baseline_sitemap_url_count"`
+	LaunchedURLs            []string             `json:"launched_urls,omitempty" mapstructure:"launched_urls"`
+	CandidateSources        map[string][]string  `json:"candidate_sources,omitempty" mapstructure:"candidate_sources"`
+	SitemapRefresh          *DeltaSitemapRefresh `json:"sitemap_refresh,omitempty" mapstructure:"sitemap_refresh"`
+}
+
+// DeltaSitemapRefresh records the sitemap provenance used to build a Delta
+// plan. A nil SitemapRefresh keeps sessions created before sitemap refresh
+// support backward compatible.
+type DeltaSitemapRefresh struct {
+	Mode                string                    `json:"mode" mapstructure:"mode"`
+	FetchedAt           time.Time                 `json:"fetched_at" mapstructure:"fetched_at"`
+	DeclaredSitemapURLs []string                  `json:"declared_sitemap_urls,omitempty" mapstructure:"declared_sitemap_urls"`
+	FetchedSitemapURLs  []string                  `json:"fetched_sitemap_urls,omitempty" mapstructure:"fetched_sitemap_urls"`
+	FreshURLCount       int                       `json:"fresh_url_count" mapstructure:"fresh_url_count"`
+	SnapshotURLCount    int                       `json:"snapshot_url_count" mapstructure:"snapshot_url_count"`
+	AddedCount          int                       `json:"added_count" mapstructure:"added_count"`
+	RemovedCount        int                       `json:"removed_count" mapstructure:"removed_count"`
+	InvalidEntryCount   int                       `json:"invalid_entry_count" mapstructure:"invalid_entry_count"`
+	Warnings            []string                  `json:"warnings,omitempty" mapstructure:"warnings"`
+	RawEvidence         []DeltaSitemapEvidenceRef `json:"raw_evidence,omitempty" mapstructure:"raw_evidence"`
+}
+
+// DeltaSitemapEvidenceLimit bounds plan metadata. Full raw sitemap evidence
+// remains in sitemap rows; this list only keeps representative references.
+const DeltaSitemapEvidenceLimit = 100
+
+// DeltaSitemapEvidenceRef points from plan metadata to raw sitemap evidence.
+type DeltaSitemapEvidenceRef struct {
+	SitemapURL string `json:"sitemap_url" mapstructure:"sitemap_url"`
+	RawLoc     string `json:"raw_loc,omitempty" mapstructure:"raw_loc"`
 }
 
 type JSRenderConfig struct {

@@ -1,6 +1,11 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { getAnnouncements, updateAnnouncementsSettings } from '../api.js';
+  import {
+    getAnnouncements,
+    updateAnnouncementsSettings,
+    AUTH_EXPIRED_EVENT,
+    AuthError,
+  } from '../api.js';
   import { getLocale, t } from '../i18n/index.svelte.js';
 
   const POLL_MS = 10 * 60 * 1000;
@@ -19,6 +24,24 @@
   let pollTimer = null;
   let retryTimer = null;
   let fastRetryCount = 0;
+  let stoppedForAuth = false;
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  }
+
+  function handleAuthExpired() {
+    stoppedForAuth = true;
+    message = null;
+    stopPolling();
+  }
 
   function loadDismissed() {
     try {
@@ -60,6 +83,7 @@
   }
 
   async function fetchAnnouncement() {
+    if (stoppedForAuth) return;
     try {
       const data = await getAnnouncements();
       fastRetryCount = 0;
@@ -68,7 +92,11 @@
         return;
       }
       message = data.message || null;
-    } catch {
+    } catch (e) {
+      if (e instanceof AuthError) {
+        handleAuthExpired();
+        return;
+      }
       // Backend unreachable (network, 503 during setup mode, etc.). Retry
       // a few times quickly before falling back to the normal poll cadence,
       // so the banner appears shortly after the backend becomes ready
@@ -174,13 +202,14 @@
   }
 
   onMount(() => {
+    window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
     fetchAnnouncement();
     pollTimer = setInterval(fetchAnnouncement, POLL_MS);
   });
 
   onDestroy(() => {
-    if (pollTimer) clearInterval(pollTimer);
-    if (retryTimer) clearTimeout(retryTimer);
+    window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+    stopPolling();
   });
 
   let translation = $derived(resolveTranslation(message, getLocale()));

@@ -203,15 +203,21 @@ func TestProjectDeltaSettingsSaveAndManualQueue(t *testing.T) {
 	if defaults.ProjectID != p.ID || defaults.Enabled {
 		t.Fatalf("unexpected defaults: %+v", defaults)
 	}
+	if !defaults.IncludeFooterLinksInPageRank {
+		t.Fatal("expected footer links to be included in PageRank by default")
+	}
 
 	defaults.Enabled = true
 	defaults.ScheduleTime = "04:15"
+	defaults.IncludeFooterLinksInPageRank = false
+	defaults.CurrentSnapshotMaxDeltas = 7
+	defaults.CurrentSnapshotBaselineIntervalDays = 21
 	defaults.BlockedURLPatterns = []string{"/search", "utm_"}
 	saved, err := s.SaveProjectDeltaSettings(*defaults)
 	if err != nil {
 		t.Fatalf("SaveProjectDeltaSettings: %v", err)
 	}
-	if !saved.Enabled || saved.ScheduleTime != "04:15" || len(saved.BlockedURLPatterns) != 2 {
+	if !saved.Enabled || saved.ScheduleTime != "04:15" || saved.IncludeFooterLinksInPageRank || saved.CurrentSnapshotMaxDeltas != 7 || saved.CurrentSnapshotBaselineIntervalDays != 21 || len(saved.BlockedURLPatterns) != 2 {
 		t.Fatalf("unexpected saved settings: %+v", saved)
 	}
 
@@ -246,6 +252,84 @@ func TestProjectDeltaSettingsSaveAndManualQueue(t *testing.T) {
 	}
 	if len(remaining) != 1 {
 		t.Fatalf("expected 1 remaining URL, got %d", len(remaining))
+	}
+}
+
+func TestProjectDeltaSettingsSitemapRefreshFailureMode(t *testing.T) {
+	s := newTestStore(t)
+	p, err := s.CreateProject("sitemap-refresh-mode")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	settings, err := s.GetProjectDeltaSettings(p.ID)
+	if err != nil {
+		t.Fatalf("GetProjectDeltaSettings default: %v", err)
+	}
+	if settings.SitemapRefreshFailureMode != SitemapRefreshFailureModeSkip {
+		t.Fatalf("default sitemap refresh failure mode = %q, want %q", settings.SitemapRefreshFailureMode, SitemapRefreshFailureModeSkip)
+	}
+
+	settings.SitemapRefreshFailureMode = SitemapRefreshFailureModeSnapshotFallback
+	saved, err := s.SaveProjectDeltaSettings(*settings)
+	if err != nil {
+		t.Fatalf("SaveProjectDeltaSettings snapshot fallback: %v", err)
+	}
+	if saved.SitemapRefreshFailureMode != SitemapRefreshFailureModeSnapshotFallback {
+		t.Fatalf("saved sitemap refresh failure mode = %q, want %q", saved.SitemapRefreshFailureMode, SitemapRefreshFailureModeSnapshotFallback)
+	}
+
+	if _, err := s.db.Exec(`UPDATE project_delta_settings SET sitemap_refresh_failure_mode = ? WHERE project_id = ?`, "unknown_mode", p.ID); err != nil {
+		t.Fatalf("setting invalid persisted mode: %v", err)
+	}
+	sanitized, err := s.GetProjectDeltaSettings(p.ID)
+	if err != nil {
+		t.Fatalf("GetProjectDeltaSettings sanitized: %v", err)
+	}
+	if sanitized.SitemapRefreshFailureMode != SitemapRefreshFailureModeSkip {
+		t.Fatalf("sanitized sitemap refresh failure mode = %q, want %q", sanitized.SitemapRefreshFailureMode, SitemapRefreshFailureModeSkip)
+	}
+
+	settings.SitemapRefreshFailureMode = "historical_fallback"
+	if _, err := s.SaveProjectDeltaSettings(*settings); err == nil || !strings.Contains(err.Error(), "invalid sitemap_refresh_failure_mode") {
+		t.Fatalf("SaveProjectDeltaSettings invalid mode error = %v, want actionable validation error", err)
+	}
+}
+
+func TestProjectDeltaSettingsSitemapRefreshFailureModeMigrationIsIdempotent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "apikeys.db")
+
+	first, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("first NewStore: %v", err)
+	}
+	p, err := first.CreateProject("sitemap-refresh-migration")
+	if err != nil {
+		first.Close()
+		t.Fatal(err)
+	}
+	settings := DefaultProjectDeltaSettings(p.ID)
+	settings.SitemapRefreshFailureMode = SitemapRefreshFailureModeSnapshotFallback
+	if _, err := first.SaveProjectDeltaSettings(settings); err != nil {
+		first.Close()
+		t.Fatalf("first SaveProjectDeltaSettings: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("closing first store: %v", err)
+	}
+
+	second, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("second NewStore: %v", err)
+	}
+	defer second.Close()
+
+	got, err := second.GetProjectDeltaSettings(p.ID)
+	if err != nil {
+		t.Fatalf("GetProjectDeltaSettings after rerun: %v", err)
+	}
+	if got.SitemapRefreshFailureMode != SitemapRefreshFailureModeSnapshotFallback {
+		t.Fatalf("migrated sitemap refresh failure mode = %q, want %q", got.SitemapRefreshFailureMode, SitemapRefreshFailureModeSnapshotFallback)
 	}
 }
 

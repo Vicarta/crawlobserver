@@ -76,6 +76,8 @@ type exportPage struct {
 	OGDescription    string            `json:"og_description"`
 	OGImage          string            `json:"og_image"`
 	SchemaTypes      []string          `json:"schema_types,omitempty"`
+	PageCreatedAt    *time.Time        `json:"page_created_at,omitempty"`
+	PageModifiedAt   *time.Time        `json:"page_modified_at,omitempty"`
 	Headers          map[string]string `json:"headers,omitempty"`
 	RedirectChain    []RedirectHopRow  `json:"redirect_chain,omitempty"`
 	BodySize         uint64            `json:"body_size"`
@@ -92,13 +94,14 @@ type exportPage struct {
 }
 
 type exportLink struct {
-	SourceURL  string    `json:"source_url"`
-	TargetURL  string    `json:"target_url"`
-	AnchorText string    `json:"anchor_text"`
-	Rel        string    `json:"rel"`
-	IsInternal bool      `json:"is_internal"`
-	Tag        string    `json:"tag"`
-	CrawledAt  time.Time `json:"crawled_at"`
+	SourceURL    string    `json:"source_url"`
+	TargetURL    string    `json:"target_url"`
+	AnchorText   string    `json:"anchor_text"`
+	Rel          string    `json:"rel"`
+	IsInternal   bool      `json:"is_internal"`
+	Tag          string    `json:"tag"`
+	LinkLocation string    `json:"link_location,omitempty"`
+	CrawledAt    time.Time `json:"crawled_at"`
 }
 
 type exportRobots struct {
@@ -200,6 +203,7 @@ func (s *Store) exportPages(ctx context.Context, enc *json.Encoder, sessionID st
 			word_count, internal_links_out, external_links_out,
 			images_count, images_no_alt, hreflang,
 			lang, og_title, og_description, og_image, schema_types,
+			page_created_at, page_modified_at,
 			headers, redirect_chain, body_size, fetch_duration_ms,
 			content_encoding, x_robots_tag,
 			error, depth, found_on, pagerank, %s, body_truncated, crawled_at
@@ -228,6 +232,7 @@ func (s *Store) exportPages(ctx context.Context, enc *json.Encoder, sessionID st
 				&p.WordCount, &p.InternalLinksOut, &p.ExternalLinksOut,
 				&p.ImagesCount, &p.ImagesNoAlt, &hreflangRaw,
 				&p.Lang, &p.OGTitle, &p.OGDescription, &p.OGImage, &p.SchemaTypes,
+				&p.PageCreatedAt, &p.PageModifiedAt,
 				&p.Headers, &chainRaw, &p.BodySize, &p.FetchDurationMs,
 				&p.ContentEncoding, &p.XRobotsTag,
 				&p.Error, &p.Depth, &p.FoundOn, &p.PageRank, &p.BodyHTML, &p.BodyTruncated, &p.CrawledAt,
@@ -278,7 +283,7 @@ func (s *Store) exportPages(ctx context.Context, enc *json.Encoder, sessionID st
 
 func (s *Store) exportLinks(ctx context.Context, enc *json.Encoder, sessionID string) error {
 	query := `
-		SELECT source_url, target_url, anchor_text, rel, is_internal, tag, crawled_at
+		SELECT source_url, target_url, anchor_text, rel, is_internal, tag, link_location, crawled_at
 		FROM crawlobserver.links
 		WHERE crawl_session_id = ?
 		ORDER BY source_url, target_url
@@ -293,7 +298,7 @@ func (s *Store) exportLinks(ctx context.Context, enc *json.Encoder, sessionID st
 		count := 0
 		for rows.Next() {
 			var l exportLink
-			if err := rows.Scan(&l.SourceURL, &l.TargetURL, &l.AnchorText, &l.Rel, &l.IsInternal, &l.Tag, &l.CrawledAt); err != nil {
+			if err := rows.Scan(&l.SourceURL, &l.TargetURL, &l.AnchorText, &l.Rel, &l.IsInternal, &l.Tag, &l.LinkLocation, &l.CrawledAt); err != nil {
 				rows.Close()
 				return fmt.Errorf("scanning link: %w", err)
 			}

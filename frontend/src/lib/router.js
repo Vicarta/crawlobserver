@@ -27,6 +27,7 @@ export function parseRoute() {
   if (path === '/new-crawl') return { page: 'new-crawl' };
   if (path === '/settings') return { page: 'settings' };
   if (path === '/stats') return { page: 'stats' };
+  if (path === '/pagerank-lab') return { page: 'pagerank-lab' };
   if (path === '/api') return { page: 'api' };
   if (path === '/logs') return { page: 'logs' };
   if (path === '/compare') {
@@ -61,7 +62,7 @@ export function parseRoute() {
   }
 
   // Session detail
-  const m = path.match(/^\/sessions\/([^/]+)(?:\/([^/]+)(?:\/([^/]+))?)?/);
+  const m = path.match(/^\/sessions\/([^/]+)(?:\/([^/]+)(?:\/([^/]+)(?:\/([^/]+))?)?)?/);
   if (m) {
     const sp = new URLSearchParams(search);
     const routeFilters = {};
@@ -90,6 +91,7 @@ export function parseRoute() {
       sessionId: m[1],
       tab,
       subView,
+      ...(m[4] ? { nestedSubView: m[4] } : {}),
       filters: routeFilters,
       offset: routeOffset,
       redirectFrom,

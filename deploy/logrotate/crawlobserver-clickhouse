@@ -1,0 +1,17 @@
+/var/lib/docker/volumes/deploy_clickhouse_logs/_data/clickhouse-server.log
+/var/lib/docker/volumes/deploy_clickhouse_logs/_data/clickhouse-server.err.log {
+    daily
+    rotate 7
+    maxage 7
+    missingok
+    notifempty
+    compress
+    dateext
+    dateformat -%Y%m%d
+    copytruncate
+    su root root
+    sharedscripts
+    postrotate
+        /usr/local/sbin/crawlobserver-clickhouse-log-retention
+    endscript
+}

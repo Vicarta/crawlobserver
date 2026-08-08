@@ -8,14 +8,21 @@
     getProviderConnections,
     disassociateSession,
     getSessionQuality,
+    getSessionQualityHistory,
+    getSessionPageRankEvidence,
+    reevaluateSessionQuality,
+    getProjectCurrentSnapshot,
   } from '../api.js';
   import { fmtN, timeAgo } from '../utils.js';
   import { pushURL } from '../router.js';
   import { t } from '../i18n/index.svelte.js';
+  import { sessionStopLabel, sessionStopTitle } from '../sessionStop.js';
+  import { qualityRepairOutcome } from '../quality-repair.js';
   import GSCTab from './GSCTab.svelte';
   import ProvidersTab from './ProvidersTab.svelte';
   import DeltaCrawlTab from './DeltaCrawlTab.svelte';
   import QualitySettingsTab from './QualitySettingsTab.svelte';
+  import ProjectSettingsTab from './ProjectSettingsTab.svelte';
   import ConfirmModal from './ConfirmModal.svelte';
 
   const PROJ_SESSIONS_LIMIT = 30;
@@ -54,7 +61,15 @@
   let providerConnections = $state([]);
   let qualityDetailSession = $state(null);
   let qualityDetail = $state(null);
+  let qualityHistory = $state([]);
+  let qualityPageRankEvidence = $state(null);
   let qualityDetailLoading = $state(false);
+  let qualityRepairReason = $state('');
+  let qualityRepairConfirmed = $state(false);
+  let qualityRepairLoading = $state(false);
+  let qualityRepairMessage = $state('');
+  let qualityRepairState = $state('');
+  let currentSnapshot = $state(null);
 
   function showConfirm(message, onConfirm, opts = {}) {
     confirmState = { message, onConfirm, ...opts };
@@ -75,6 +90,15 @@
     }
   }
 
+  async function loadCurrentSnapshot() {
+    if (!project) return;
+    try {
+      currentSnapshot = await getProjectCurrentSnapshot(project.id);
+    } catch {
+      currentSnapshot = null;
+    }
+  }
+
   function switchProjectTab(tab) {
     if (!isAdmin && tab === 'providers') return;
     projectTab = tab;
@@ -84,6 +108,7 @@
   }
 
   function sessionTypeLabel(session) {
+    if (session?.Label === 'Current Snapshot') return 'Current Snapshot';
     return session?.quality?.is_full_crawl === false || session?.Label === 'Daily Delta Crawl'
       ? 'Daily Delta'
       : 'Full crawl';
@@ -98,14 +123,148 @@
   async function openQualityDetail(session) {
     qualityDetailSession = session;
     qualityDetail = null;
+    qualityHistory = [];
+    qualityPageRankEvidence = null;
+    qualityRepairReason = '';
+    qualityRepairConfirmed = false;
+    qualityRepairMessage = '';
+    qualityRepairState = '';
     qualityDetailLoading = true;
     try {
-      qualityDetail = await getSessionQuality(session.ID);
+      const [result, history, evidence] = await Promise.all([
+        getSessionQuality(session.ID),
+        getSessionQualityHistory(session.ID),
+        loadQualityPageRankEvidence(session.ID),
+      ]);
+      qualityDetail = result;
+      qualityHistory = history || [];
+      qualityPageRankEvidence = evidence;
     } catch (e) {
       onerror?.(e.message);
     } finally {
       qualityDetailLoading = false;
     }
+  }
+
+  function formatQualityDate(value) {
+    if (!value) return '-';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  }
+
+  function qualityRevision(value) {
+    return value || '-';
+  }
+
+  async function loadQualityPageRankEvidence(sessionId) {
+    try {
+      return await getSessionPageRankEvidence(sessionId);
+    } catch (e) {
+      // Quality history remains actionable for legacy sessions before evidence adoption.
+      if (e.status !== 404) throw e;
+      return null;
+    }
+  }
+
+  async function refreshQualityDetail() {
+    if (!qualityDetailSession) return;
+    const [result, history, evidence] = await Promise.all([
+      getSessionQuality(qualityDetailSession.ID),
+      getSessionQualityHistory(qualityDetailSession.ID),
+      loadQualityPageRankEvidence(qualityDetailSession.ID),
+    ]);
+    qualityDetail = result;
+    qualityHistory = history || [];
+    qualityPageRankEvidence = evidence;
+  }
+
+  function refreshQualityBadge(result) {
+    if (!result || !qualityDetailSession) return;
+    projSessions = projSessions.map((session) =>
+      session.ID === qualityDetailSession.ID ? { ...session, quality: result } : session,
+    );
+    qualityDetailSession = { ...qualityDetailSession, quality: result };
+  }
+
+  async function handleQualityReevaluation() {
+    if (
+      !isAdmin ||
+      !qualityDetailSession ||
+      !qualityRepairConfirmed ||
+      !qualityRepairReason.trim() ||
+      qualityRepairLoading
+    ) {
+      return;
+    }
+    qualityRepairLoading = true;
+    qualityRepairMessage = '';
+    qualityRepairState = '';
+    try {
+      const request = {
+        confirm: true,
+        reason: qualityRepairReason.trim(),
+      };
+      if (qualityDetail?.evaluation_revision) {
+        request.expected_evaluation_revision = qualityDetail.evaluation_revision;
+      }
+      const expectedEvidenceRevision =
+        qualityPageRankEvidence?.attempt_id || qualityDetail?.pagerank_evidence_revision;
+      if (expectedEvidenceRevision) {
+        request.expected_pagerank_evidence_revision = expectedEvidenceRevision;
+      }
+      const response = await reevaluateSessionQuality(qualityDetailSession.ID, request);
+      qualityDetail = response.result || qualityDetail;
+      qualityPageRankEvidence = response.evidence || qualityPageRankEvidence;
+      refreshQualityBadge(response.result);
+      qualityHistory = await getSessionQualityHistory(qualityDetailSession.ID);
+      await loadCurrentSnapshot();
+      const outcome = qualityRepairOutcome(response);
+      qualityRepairMessage = t(outcome.messageKey);
+      qualityRepairState = outcome.state;
+    } catch (e) {
+      if (e.status === 409) {
+        qualityRepairMessage = t('quality.repairConflict');
+        qualityRepairState = 'conflict';
+        try {
+          await refreshQualityDetail();
+          refreshQualityBadge(qualityDetail);
+        } catch (refreshError) {
+          onerror?.(refreshError.message);
+        }
+      } else {
+        qualityRepairMessage = e.message;
+        qualityRepairState = 'error';
+        onerror?.(e.message);
+      }
+    } finally {
+      qualityRepairLoading = false;
+    }
+  }
+
+  function openCurrentSnapshot() {
+    if (!currentSnapshot?.current_session_id) return;
+    onselectsession?.({
+      ID: currentSnapshot.current_session_id,
+      ProjectID: project.id,
+      Label: 'Current Snapshot',
+      Status: 'completed',
+      SeedURLs: ['Current Snapshot'],
+    });
+  }
+
+  function openBaselineSnapshot() {
+    if (!currentSnapshot?.baseline_session_id) return;
+    onselectsession?.({
+      ID: currentSnapshot.baseline_session_id,
+      ProjectID: project.id,
+      Label: 'Current Baseline Snapshot',
+      Status: 'completed',
+      SeedURLs: ['Current Baseline Snapshot'],
+    });
+  }
+
+  function snapshotDate(value) {
+    return value ? timeAgo(value) : '-';
   }
 
   // --- Rename ---
@@ -205,6 +364,7 @@
 
   onMount(() => {
     loadProjectSessions();
+    loadCurrentSnapshot();
     loadProviderConnections();
   });
 
@@ -276,6 +436,13 @@
     class:tab-active={projectTab === 'quality'}
     onclick={() => switchProjectTab('quality')}>Quality</button
   >
+  {#if isAdmin}
+    <button
+      class="tab"
+      class:tab-active={projectTab === 'settings'}
+      onclick={() => switchProjectTab('settings')}>Settings</button
+    >
+  {/if}
   {#each providerConnections as conn}
     {@const meta = providerMeta[conn.provider]}
     <button
@@ -300,6 +467,44 @@
 
 <div class="card card-flush card-tab-body">
   {#if projectTab === 'sessions'}
+    {#if currentSnapshot}
+      <div class="snapshot-panel">
+        <div class="snapshot-card snapshot-card-primary">
+          <div>
+            <span class="snapshot-kicker">Current site data</span>
+            <strong>Current Snapshot</strong>
+            <span title={currentSnapshot.current_session_id || ''}
+              >{currentSnapshot.current_session_id || '-'}</span
+            >
+          </div>
+          <button class="btn btn-sm btn-primary" onclick={openCurrentSnapshot}>
+            Open current snapshot
+          </button>
+        </div>
+        <div class="snapshot-card">
+          <div>
+            <span class="snapshot-kicker">Stable baseline</span>
+            <strong>Baseline Snapshot</strong>
+            <span title={currentSnapshot.baseline_session_id || ''}
+              >{currentSnapshot.baseline_session_id || '-'}</span
+            >
+            <em
+              >Created {snapshotDate(currentSnapshot.baseline_created_at)} · {fmtN(
+                currentSnapshot.delta_count || 0,
+              )}
+              promoted deltas</em
+            >
+          </div>
+          <button
+            class="btn btn-sm"
+            onclick={openBaselineSnapshot}
+            disabled={!currentSnapshot.baseline_session_id}
+          >
+            Open baseline snapshot
+          </button>
+        </div>
+      </div>
+    {/if}
     {#if projSessions.length > 0}
       <table>
         <thead>
@@ -335,6 +540,9 @@
                   <span class="badge badge-error">{s.Status}</span>
                 {:else}
                   <span class="badge">{s.Status || t('common.unknown')}</span>
+                {/if}
+                {#if sessionStopLabel(s)}
+                  <span class="stop-reason" title={sessionStopTitle(s)}>{sessionStopLabel(s)}</span>
                 {/if}
               </td>
               <td>
@@ -458,12 +666,15 @@
       onerror={(msg) => onerror?.(msg)}
       onopensessions={async () => {
         await loadProjectSessions();
+        await loadCurrentSnapshot();
         switchProjectTab('sessions');
       }}
       {isAdmin}
     />
   {:else if projectTab === 'quality'}
     <QualitySettingsTab projectId={project.id} {isAdmin} onerror={(msg) => onerror?.(msg)} />
+  {:else if projectTab === 'settings' && isAdmin}
+    <ProjectSettingsTab projectId={project.id} {isAdmin} onerror={(msg) => onerror?.(msg)} />
   {:else if projectTab.startsWith('provider:')}
     <ProvidersTab
       projectId={project.id}
@@ -580,8 +791,162 @@
             <span>Baseline</span>
             <strong>{qualityDetail.baseline_session_id || '-'}</strong>
           </div>
+          <div>
+            <span>{t('quality.evaluated')}</span>
+            <strong>{formatQualityDate(qualityDetail.evaluated_at)}</strong>
+          </div>
+          <div>
+            <span>{t('quality.evaluationRevision')}</span>
+            <code>{qualityRevision(qualityDetail.evaluation_revision)}</code>
+          </div>
+          <div>
+            <span>{t('quality.evaluationSource')}</span>
+            <strong>{qualityRevision(qualityDetail.source)}</strong>
+          </div>
+          <div>
+            <span>{t('quality.evaluatorRevision')}</span>
+            <code>{qualityRevision(qualityDetail.evaluator_revision)}</code>
+          </div>
+          <div>
+            <span>{t('quality.rulesRevision')}</span>
+            <code>{qualityRevision(qualityDetail.rules_revision)}</code>
+          </div>
+          <div>
+            <span>{t('quality.baselineEvaluation')}</span>
+            <code>{qualityRevision(qualityDetail.baseline_evaluation_revision)}</code>
+          </div>
+          <div>
+            <span>{t('quality.promotion')}</span>
+            <strong>{qualityRevision(qualityDetail.promotion_status)}</strong>
+          </div>
         </div>
         <p class="quality-summary-text">{qualityDetail.summary}</p>
+
+        {#if qualityDetail.stale}
+          <div class="quality-stale-warning" role="status">
+            <strong>{t('quality.staleEvidence')}</strong>
+            <span
+              >{qualityDetail.stale_reasons?.join(', ') || t('quality.staleEvidenceFallback')}</span
+            >
+          </div>
+        {/if}
+
+        <section class="quality-evidence" aria-label={t('quality.pageRankEvidence')}>
+          <div class="quality-evidence-heading">
+            <h3>{t('quality.pageRankEvidence')}</h3>
+            <span
+              class="badge"
+              class:badge-success={qualityPageRankEvidence?.state === 'finalized'}
+              class:badge-warning={qualityPageRankEvidence?.state === 'started'}
+              class:badge-error={qualityPageRankEvidence?.state === 'failed'}
+              >{qualityPageRankEvidence?.state ||
+                qualityDetail.pagerank_evidence_status ||
+                'unavailable'}</span
+            >
+          </div>
+          <div class="quality-evidence-grid">
+            <div>
+              <span>{t('pagerank.evidenceRevision')}</span>
+              <code
+                >{qualityRevision(
+                  qualityPageRankEvidence?.attempt_id || qualityDetail.pagerank_evidence_revision,
+                )}</code
+              >
+            </div>
+            <div>
+              <span>{t('pagerank.evidenceSource')}</span>
+              <strong
+                >{qualityRevision(
+                  qualityPageRankEvidence?.source || qualityDetail.pagerank_evidence_source,
+                )}</strong
+              >
+            </div>
+            <div>
+              <span>{t('pagerank.evidencePredicate')}</span>
+              <code
+                >{qualityRevision(
+                  qualityPageRankEvidence?.predicate_version ||
+                    qualityDetail.pagerank_predicate_version,
+                )}</code
+              >
+            </div>
+            <div>
+              <span>{t('quality.eligiblePages')}</span>
+              <strong
+                >{fmtN(
+                  qualityPageRankEvidence?.eligible_page_count ??
+                    qualityDetail.pagerank_eligible_pages ??
+                    0,
+                )}</strong
+              >
+            </div>
+            <div>
+              <span>{t('quality.positivePages')}</span>
+              <strong
+                >{fmtN(
+                  qualityPageRankEvidence?.positive_page_count ??
+                    qualityDetail.pagerank_positive_pages ??
+                    0,
+                )}</strong
+              >
+            </div>
+            <div>
+              <span>{t('quality.zeroPages')}</span>
+              <strong
+                >{fmtN(
+                  qualityPageRankEvidence?.zero_page_count ??
+                    qualityDetail.pagerank_zero_pages ??
+                    0,
+                )}</strong
+              >
+            </div>
+          </div>
+        </section>
+
+        {#if isAdmin}
+          <section class="quality-repair" aria-label={t('quality.reevaluate')}>
+            <div>
+              <h3>{t('quality.reevaluate')}</h3>
+              <p>{t('quality.repairDescription')}</p>
+            </div>
+            <label>
+              <span>{t('quality.auditReason')}</span>
+              <textarea
+                rows="2"
+                bind:value={qualityRepairReason}
+                placeholder={t('quality.auditReasonPlaceholder')}
+                disabled={qualityRepairLoading}
+              ></textarea>
+            </label>
+            <label class="quality-confirmation">
+              <input
+                type="checkbox"
+                bind:checked={qualityRepairConfirmed}
+                disabled={qualityRepairLoading}
+              />
+              <span>{t('quality.repairConfirmation')}</span>
+            </label>
+            <div class="quality-repair-actions">
+              <button
+                class="btn btn-primary"
+                onclick={handleQualityReevaluation}
+                disabled={!qualityRepairConfirmed ||
+                  !qualityRepairReason.trim() ||
+                  qualityRepairLoading}
+                >{qualityRepairLoading
+                  ? t('quality.reevaluating')
+                  : t('quality.reevaluate')}</button
+              >
+              {#if qualityRepairMessage}
+                <span
+                  class:quality-repair-conflict={qualityRepairState === 'conflict'}
+                  class:quality-repair-error={qualityRepairState === 'error'}
+                  >{qualityRepairMessage}</span
+                >
+              {/if}
+            </div>
+          </section>
+        {/if}
 
         {#if qualityDetail.metrics}
           <div class="quality-metrics">
@@ -603,12 +968,35 @@
                   <strong>{f.finding_type}</strong>
                   <p>{f.message}</p>
                 </div>
-                <span class="badge" class:badge-error={f.severity === 'error'} class:badge-warning={f.severity === 'warning'}>{f.severity}</span>
+                <span
+                  class="badge"
+                  class:badge-error={f.severity === 'error'}
+                  class:badge-warning={f.severity === 'warning'}>{f.severity}</span
+                >
               </div>
             {/each}
           </div>
         {:else}
           <p class="text-muted">No findings recorded.</p>
+        {/if}
+
+        {#if qualityHistory.length > 1}
+          <details class="quality-history">
+            <summary>{t('quality.history', { count: qualityHistory.length })}</summary>
+            <div class="quality-history-list">
+              {#each qualityHistory as evaluation}
+                <div
+                  class:quality-history-current={evaluation.evaluation_revision ===
+                    qualityDetail.evaluation_revision}
+                >
+                  <code>{qualityRevision(evaluation.evaluation_revision)}</code>
+                  <span>{formatQualityDate(evaluation.evaluated_at)}</span>
+                  <strong>{qualityBadgeLabel(evaluation)}</strong>
+                  <span>{evaluation.pagerank_evidence_revision || '-'}</span>
+                </div>
+              {/each}
+            </div>
+          </details>
         {/if}
       {/if}
     </div>
@@ -646,6 +1034,62 @@
     justify-content: center;
     gap: 12px;
     padding: 12px 0;
+  }
+  .snapshot-panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 12px;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface) 92%, var(--accent-light, transparent));
+    padding: 14px 16px;
+  }
+  .snapshot-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 12px 14px;
+  }
+  .snapshot-card-primary {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  }
+  .snapshot-card > div {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+  }
+  .snapshot-kicker {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  .snapshot-card strong {
+    color: var(--text);
+    font-size: 14px;
+  }
+  .snapshot-card span,
+  .snapshot-card em {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-style: normal;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  @media (max-width: 900px) {
+    .snapshot-panel {
+      grid-template-columns: 1fr;
+    }
+    .snapshot-card {
+      align-items: stretch;
+      flex-direction: column;
+    }
   }
   .danger-zone {
     margin-top: 32px;
@@ -695,6 +1139,14 @@
   }
   .badge {
     border: 0;
+  }
+
+  .stop-reason {
+    display: block;
+    margin-top: 4px;
+    color: var(--warning);
+    font-size: 12px;
+    font-weight: 600;
   }
   button.badge {
     cursor: pointer;
@@ -765,9 +1217,143 @@
     margin-top: 4px;
     font-size: 16px;
   }
+  .quality-summary-grid code,
+  .quality-evidence-grid code,
+  .quality-history-list code {
+    display: block;
+    margin-top: 4px;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+  }
   .quality-summary-text {
     color: var(--text);
     margin: 0 0 18px;
+  }
+  .quality-stale-warning {
+    display: grid;
+    gap: 3px;
+    border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--warning) 9%, var(--bg-card));
+    color: var(--text);
+    padding: 11px 12px;
+    margin: 0 0 14px;
+    font-size: 13px;
+  }
+  .quality-evidence,
+  .quality-repair {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    margin: 0 0 16px;
+  }
+  .quality-evidence h3,
+  .quality-repair h3 {
+    margin: 0;
+    font-size: 14px;
+  }
+  .quality-evidence-heading,
+  .quality-repair-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .quality-evidence-heading {
+    margin-bottom: 10px;
+  }
+  .quality-evidence-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(125px, 1fr));
+    gap: 10px;
+  }
+  .quality-evidence-grid span,
+  .quality-repair label > span,
+  .quality-history-list span {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .quality-evidence-grid strong {
+    display: block;
+    margin-top: 4px;
+    font-size: 14px;
+  }
+  .quality-repair {
+    display: grid;
+    gap: 12px;
+  }
+  .quality-repair p {
+    margin: 4px 0 0;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+  .quality-repair label:not(.quality-confirmation) {
+    display: grid;
+    gap: 5px;
+  }
+  .quality-repair textarea {
+    width: 100%;
+    resize: vertical;
+    box-sizing: border-box;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-input, var(--bg-card));
+    color: var(--text);
+    font: inherit;
+    padding: 8px;
+  }
+  .quality-confirmation {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 13px;
+  }
+  .quality-repair-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+  .quality-repair-actions > span {
+    color: var(--success, #15803d);
+    font-size: 12px;
+  }
+  .quality-repair-actions > span.quality-repair-error {
+    color: var(--danger, #dc2626);
+  }
+  .quality-repair-actions > span.quality-repair-conflict {
+    color: var(--warning, #b45309);
+  }
+  .quality-history {
+    margin-top: 16px;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+  .quality-history summary {
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .quality-history-list {
+    display: grid;
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .quality-history-list > div {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(120px, 0.8fr) minmax(110px, 0.7fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px;
+    font-size: 12px;
+  }
+  .quality-history-list > div.quality-history-current {
+    border-color: var(--accent);
+  }
+  @media (max-width: 700px) {
+    .quality-history-list > div {
+      grid-template-columns: 1fr;
+    }
   }
   .quality-findings {
     display: grid;

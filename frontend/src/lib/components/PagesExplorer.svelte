@@ -1,13 +1,22 @@
 <script>
   import { onMount } from 'svelte';
-  import { getPages, getPageIssues, getRedirectPages, buildApiPath, rescanPages } from '../api.js';
+  import {
+    getPages,
+    getPageIssues,
+    getRedirectPages,
+    buildApiPath,
+    rescanPages,
+    deletePages,
+  } from '../api.js';
   import { statusBadge, fmt, fmtSize, fmtN, trunc, fetchAll, downloadCSV } from '../utils.js';
+  import { exportSelectedCSV } from '../selectedCsv.js';
   import { PAGE_SIZE, TAB_FILTERS } from '../tabColumns.js';
   import { t } from '../i18n/index.svelte.js';
   import DataTable from './DataTable.svelte';
   import UrlActions from './UrlActions.svelte';
   import OverflowText from './OverflowText.svelte';
   import ExportDropdown from './ExportDropdown.svelte';
+  import ExportSelectedButton from './ExportSelectedButton.svelte';
   import NearDuplicatesTab from './NearDuplicatesTab.svelte';
   import HreflangValidationTab from './HreflangValidationTab.svelte';
   import URLPatternsTab from './URLPatternsTab.svelte';
@@ -21,6 +30,7 @@
     onnavigate,
     onerror,
     onopenhtml,
+    isAdmin = false,
   } = $props();
 
   const SUB_VIEWS = [
@@ -66,9 +76,11 @@
   let redirectPages = $state([]);
   let redirectPagesOffset = $state(0);
   let hasMoreRedirectPages = $state(false);
-  let selectedURLs = $state({});
+  let selectedPages = $state({});
   let rescanning = $state(false);
-  let selectedList = $derived(Object.keys(selectedURLs).filter((u) => selectedURLs[u]));
+  let deleting = $state(false);
+  let selectedList = $derived(Object.keys(selectedPages));
+  let selectedRows = $derived(Object.values(selectedPages));
 
   function basePath() {
     return `/sessions/${sessionId}/pages`;
@@ -93,9 +105,17 @@
   }
 
   function overviewFilterKeys() {
-    const keys = [null, ...TAB_FILTERS.overview];
-    if (subView === 'html') keys[3] = null; // page_type is enforced by the tab.
+    const keys = [...TAB_FILTERS.overview];
+    if (subView === 'html') keys[2] = null; // page_type is enforced by the tab.
+    if (isAdmin) keys.unshift(null);
     return keys;
+  }
+
+  function formatPageDate(value, fallback = '-') {
+    if (!value) return fallback;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return fallback;
+    return date.toISOString().slice(0, 10);
   }
 
   function pageTypeLabel(type) {
@@ -110,6 +130,77 @@
       other: 'Other',
     };
     return labels[type] || 'Other';
+  }
+
+  function discoverySourceLabel(source) {
+    const labels = {
+      internal_link: 'Internal link',
+      redirect_internal_link: 'Internal link via redirect',
+      sitemap: 'Sitemap',
+      sitemap_fresh: 'Fresh sitemap',
+      sitemap_snapshot_fallback: 'Sitemap fallback',
+      seed: 'Seed',
+      found_on: 'Discovered',
+      candidate: 'Candidate',
+      unknown: 'Unknown',
+    };
+    return labels[source] || 'Unknown';
+  }
+
+  function candidateSourceLabel(source) {
+    const labels = {
+      sitemap: 'Sitemap',
+      sitemap_fresh: 'Fresh sitemap',
+      sitemap_snapshot_fallback: 'Sitemap fallback',
+      problem_pages: 'Problem',
+      stale_pages: 'Stale',
+      manual_queue: 'Manual',
+      discovered: 'Discovered',
+      gsc: 'GSC',
+    };
+    return labels[source] || source || '';
+  }
+
+  function pageSourceLabel(page) {
+    if (page.ProblemOrigin === 'orphan_problem_candidate') return 'Orphan 404';
+    if (page.CandidateSources?.length) {
+      return page.CandidateSources.map(candidateSourceLabel).join(', ');
+    }
+    return discoverySourceLabel(page.DiscoverySource);
+  }
+
+  function pageSourceDetail(page) {
+    const candidateSources = page.CandidateSources?.length
+      ? `Candidate source: ${page.CandidateSources.map(candidateSourceLabel).join(', ')}.`
+      : '';
+    if (page.ProblemOrigin === 'orphan_problem_candidate') {
+      return `404, no internal inlinks, not in sitemap. ${candidateSources}`.trim();
+    }
+    const sitemapEvidence = page.SitemapSourceURL
+      ? `Sitemap source: ${page.SitemapSourceURL}.${page.SitemapRawLoc ? ` Raw <loc>: ${page.SitemapRawLoc}.` : ''}`
+      : '';
+    return [
+      candidateSources,
+      sitemapEvidence,
+      page.DiscoveryDetail || discoverySourceLabel(page.DiscoverySource),
+    ]
+      .filter(Boolean)
+      .join(' ');
+  }
+
+  function pageSourceTone(page) {
+    if (page.ProblemOrigin === 'orphan_problem_candidate') return 'warn';
+    if (page.CandidateSources?.includes('problem_pages')) return 'warn';
+    if (page.CandidateSources?.includes('manual_queue')) return 'info';
+    return discoverySourceTone(page.DiscoverySource, page.InternalLinksIn);
+  }
+
+  function discoverySourceTone(source, internalLinksIn) {
+    if (internalLinksIn > 0 || source === 'internal_link' || source === 'redirect_internal_link')
+      return 'good';
+    if (source === 'sitemap' || source === 'seed') return 'info';
+    if (source === 'found_on') return 'muted';
+    return 'warn';
   }
 
   async function loadData() {
@@ -153,7 +244,7 @@
     redirectPagesOffset = 0;
     sortColumn = '';
     sortOrder = '';
-    selectedURLs = {};
+    selectedPages = {};
     pushFilters(sv, {}, 0);
     if (!DELEGATED_VIEWS.has(sv)) {
       loadData();
@@ -198,7 +289,7 @@
   function clearFilters() {
     filters = {};
     pagesOffset = 0;
-    selectedURLs = {};
+    selectedPages = {};
     pushFilters(null, {}, 0);
     loadData();
   }
@@ -219,8 +310,12 @@
         'Status',
         'Type',
         'Title',
+        'Modified',
+        'Created',
         'Words',
         'Internal Links In',
+        'Source',
+        'Source Detail',
         'Internal Links Out',
         'External Links Out',
         'Size',
@@ -233,8 +328,12 @@
         'StatusCode',
         'PageType',
         'Title',
+        'PageModifiedAt',
+        'PageCreatedAt',
         'WordCount',
         'InternalLinksIn',
+        'DiscoverySource',
+        'DiscoveryDetail',
         'InternalLinksOut',
         'ExternalLinksOut',
         'BodySize',
@@ -242,6 +341,11 @@
         'Depth',
         'PageRank',
       ],
+      transform: (row) => ({
+        ...row,
+        PageModifiedAt: formatPageDate(row.PageModifiedAt, ''),
+        PageCreatedAt: formatPageDate(row.PageCreatedAt, ''),
+      }),
     },
     html: {
       headers: [
@@ -249,8 +353,12 @@
         'Status',
         'Type',
         'Title',
+        'Modified',
+        'Created',
         'Words',
         'Internal Links In',
+        'Source',
+        'Source Detail',
         'Internal Links Out',
         'External Links Out',
         'Size',
@@ -263,8 +371,12 @@
         'StatusCode',
         'PageType',
         'Title',
+        'PageModifiedAt',
+        'PageCreatedAt',
         'WordCount',
         'InternalLinksIn',
+        'DiscoverySource',
+        'DiscoveryDetail',
         'InternalLinksOut',
         'ExternalLinksOut',
         'BodySize',
@@ -272,6 +384,11 @@
         'Depth',
         'PageRank',
       ],
+      transform: (row) => ({
+        ...row,
+        PageModifiedAt: formatPageDate(row.PageModifiedAt, ''),
+        PageCreatedAt: formatPageDate(row.PageCreatedAt, ''),
+      }),
     },
     titles: {
       headers: ['URL', 'Title', 'Title Length', 'H1'],
@@ -305,7 +422,8 @@
         'Issue Type',
         'Detail',
         'Status',
-        'Title',
+        'Server HTML Title',
+        'Server HTML Description',
         'Rendered Title',
         'Rendered H1',
         'Rendered Words',
@@ -317,7 +435,8 @@
         'issue_type',
         'issue_detail',
         'status_code',
-        'title',
+        'static_title',
+        'static_meta_description',
         'rendered_title',
         'rendered_h1_text',
         'rendered_word_count',
@@ -367,7 +486,7 @@
         ? (limit, offset) => getRedirectPages(sessionId, limit, offset, filters)
         : subView === 'issues'
           ? (limit, offset) => getPageIssues(sessionId, limit, offset, filters)
-        : (limit, offset) => getPages(sessionId, limit, offset, pageFilters());
+          : (limit, offset) => getPages(sessionId, limit, offset, pageFilters());
     const allData = await fetchAll(fetcher);
     const keys = cfg.customKeys || cfg.keys;
     let rows = allData;
@@ -379,6 +498,12 @@
       return;
     }
     downloadCSV(`pages-${subView}.csv`, cfg.headers, keys, rows);
+  }
+
+  function handleExportSelected() {
+    const cfg = CSV_CONFIGS[subView];
+    if (!cfg || selectedRows.length === 0) return;
+    exportSelectedCSV(`pages-${subView}-selected.csv`, cfg, selectedRows);
   }
 
   function urlDetailHref(url) {
@@ -398,6 +523,8 @@
         return t('issues.genericRenderedTitle');
       case 'generic_static_metadata':
         return t('issues.genericStaticMetadata');
+      case 'shared_rendered_metadata_shell':
+        return t('issues.sharedRenderedMetadataShell');
       default:
         return type || '-';
     }
@@ -407,12 +534,15 @@
     return severity === 'error' ? t('issues.error') : t('issues.warning');
   }
 
-  function toggleSelected(url, checked) {
-    selectedURLs = { ...selectedURLs, [url]: checked };
+  function toggleSelected(page, checked) {
+    const next = { ...selectedPages };
+    if (checked) next[page.URL] = page;
+    else delete next[page.URL];
+    selectedPages = next;
   }
 
   function clearSelection() {
-    selectedURLs = {};
+    selectedPages = {};
   }
 
   async function handleRescanSelected() {
@@ -434,13 +564,32 @@
     }
   }
 
+  async function handleDeleteSelected() {
+    if (deleting || selectedList.length === 0) return;
+    const ok = window.confirm(
+      `Delete ${selectedList.length} selected page(s) from this crawl dataset?\n\nThis removes the selected pages and their graph references from CrawlObserver data, then starts Internal PageRank recalculation. It does not change the website itself and cannot be undone from this screen.`,
+    );
+    if (!ok) return;
+
+    deleting = true;
+    try {
+      await deletePages(sessionId, selectedList);
+      clearSelection();
+      await loadData();
+    } catch (e) {
+      onerror?.(e.message);
+    } finally {
+      deleting = false;
+    }
+  }
+
   let apiPath = $derived.by(() => {
     const endpoint =
       subView === 'redirects'
         ? `/sessions/${sessionId}/redirect-pages`
         : subView === 'issues'
           ? `/sessions/${sessionId}/page-issues`
-        : `/sessions/${sessionId}/pages`;
+          : `/sessions/${sessionId}/pages`;
     const activeF = subView === 'redirects' || subView === 'issues' ? filters : pageFilters();
     return buildApiPath(endpoint, {
       limit: PAGE_SIZE,
@@ -474,27 +623,66 @@
   </div>
 
   {#if subView === 'all' || subView === 'html'}
-    {#if selectedList.length > 0}
+    {#if isAdmin && selectedList.length > 0}
       <div class="bulk-action-bar">
         <span>{selectedList.length} selected</span>
-        <button class="btn btn-sm btn-primary" onclick={handleRescanSelected} disabled={rescanning}>
+        <button
+          class="btn btn-sm btn-primary"
+          onclick={handleRescanSelected}
+          disabled={rescanning || deleting}
+        >
           {rescanning ? 'Rescanning...' : 'Rescan selected'}
         </button>
-        <button class="btn btn-sm" onclick={clearSelection} disabled={rescanning}>Clear</button>
+        <button
+          class="btn btn-sm btn-danger"
+          onclick={handleDeleteSelected}
+          disabled={rescanning || deleting}
+        >
+          {deleting ? 'Deleting...' : 'Delete selected'}
+        </button>
+        <button class="btn btn-sm" onclick={clearSelection} disabled={rescanning || deleting}
+          >Clear</button
+        >
+        <ExportSelectedButton onclick={handleExportSelected} disabled={rescanning || deleting} />
       </div>
     {/if}
     <DataTable
       tableId={subView === 'html' ? 'pages-html' : 'pages-all'}
       columns={[
-        { label: '', defaultWidth: 42, minWidth: 42, resizable: false, class: 'select-col' },
+        ...(isAdmin
+          ? [{ label: '', defaultWidth: 42, minWidth: 42, resizable: false, class: 'select-col' }]
+          : []),
         { label: t('session.url'), sortKey: 'url', defaultWidth: 380, minWidth: 180 },
         { label: t('session.status'), sortKey: 'status_code', defaultWidth: 92, minWidth: 76 },
         { label: t('session.type'), sortKey: 'page_type', defaultWidth: 96, minWidth: 78 },
         { label: t('session.title'), sortKey: 'title', defaultWidth: 300, minWidth: 160 },
+        {
+          label: t('session.modified'),
+          sortKey: 'page_modified_at',
+          defaultWidth: 122,
+          minWidth: 108,
+        },
+        {
+          label: t('session.created'),
+          sortKey: 'page_created_at',
+          defaultWidth: 122,
+          minWidth: 108,
+        },
         { label: t('session.words'), sortKey: 'word_count', defaultWidth: 92, minWidth: 74 },
         { label: t('session.intIn'), sortKey: 'internal_links_in', defaultWidth: 98, minWidth: 78 },
-        { label: t('session.intOut'), sortKey: 'internal_links_out', defaultWidth: 108, minWidth: 84 },
-        { label: t('session.extOut'), sortKey: 'external_links_out', defaultWidth: 108, minWidth: 84 },
+        { label: 'Source', sortKey: 'discovery_source', defaultWidth: 148, minWidth: 110 },
+        {
+          label: t('session.intOut'),
+          sortKey: 'internal_links_out',
+          defaultWidth: 108,
+          minWidth: 84,
+        },
+        {
+          label: t('session.extOut'),
+          sortKey: 'external_links_out',
+          defaultWidth: 108,
+          minWidth: 84,
+        },
         { label: t('common.size'), sortKey: 'body_size', defaultWidth: 92, minWidth: 74 },
         { label: t('session.time'), sortKey: 'fetch_duration_ms', defaultWidth: 92, minWidth: 74 },
         { label: t('session.depth'), sortKey: 'depth', defaultWidth: 80, minWidth: 64 },
@@ -519,15 +707,17 @@
     >
       {#snippet row(p)}
         <tr>
-          <td class="cell-select">
-            <input
-              type="checkbox"
-              checked={!!selectedURLs[p.URL]}
-              aria-label="Select {p.URL}"
-              onchange={(e) => toggleSelected(p.URL, e.target.checked)}
-              onclick={(e) => e.stopPropagation()}
-            />
-          </td>
+          {#if isAdmin}
+            <td class="cell-select">
+              <input
+                type="checkbox"
+                checked={!!selectedPages[p.URL]}
+                aria-label="Select {p.URL}"
+                onchange={(e) => toggleSelected(p, e.target.checked)}
+                onclick={(e) => e.stopPropagation()}
+              />
+            </td>
+          {/if}
           <td class="cell-url"
             ><span class="cell-url-inner"
               ><OverflowText
@@ -539,10 +729,20 @@
             ></td
           >
           <td><span class="badge {statusBadge(p.StatusCode)}">{p.StatusCode}</span></td>
-          <td><span class="type-badge type-{p.PageType || 'other'}">{pageTypeLabel(p.PageType)}</span></td>
+          <td
+            ><span class="type-badge type-{p.PageType || 'other'}">{pageTypeLabel(p.PageType)}</span
+            ></td
+          >
           <td class="cell-title"><OverflowText text={p.Title || '-'} /></td>
+          <td title={p.PageModifiedAt || ''}>{formatPageDate(p.PageModifiedAt)}</td>
+          <td title={p.PageCreatedAt || ''}>{formatPageDate(p.PageCreatedAt)}</td>
           <td>{fmtN(p.WordCount)}</td>
           <td>{fmtN(p.InternalLinksIn)}</td>
+          <td>
+            <span class={`source-badge source-${pageSourceTone(p)}`} title={pageSourceDetail(p)}
+              >{pageSourceLabel(p)}</span
+            >
+          </td>
           <td>{fmtN(p.InternalLinksOut)}</td>
           <td>{fmtN(p.ExternalLinksOut)}</td>
           <td>{fmtSize(p.BodySize)}</td>
@@ -749,8 +949,10 @@
         { label: t('session.url'), defaultWidth: 360, minWidth: 180 },
         { label: t('issues.detail'), defaultWidth: 300, minWidth: 180 },
         { label: t('session.status'), defaultWidth: 86, minWidth: 72 },
-        { label: t('session.title'), defaultWidth: 260, minWidth: 150 },
+        { label: t('issues.serverHtmlTitle'), defaultWidth: 260, minWidth: 150 },
+        { label: t('issues.serverHtmlDescription'), defaultWidth: 300, minWidth: 180 },
         { label: t('issues.renderedTitle'), defaultWidth: 260, minWidth: 150 },
+        { label: t('issues.renderedDescription'), defaultWidth: 300, minWidth: 180 },
         { label: t('issues.renderedH1'), defaultWidth: 180, minWidth: 120 },
         { label: t('issues.renderedWords'), defaultWidth: 110, minWidth: 90 },
         { label: t('issues.renderedImages'), defaultWidth: 120, minWidth: 96 },
@@ -794,8 +996,10 @@
           >
           <td class="cell-title"><OverflowText text={issue.issue_detail || '-'} /></td>
           <td><span class="badge {statusBadge(issue.status_code)}">{issue.status_code}</span></td>
-          <td class="cell-title"><OverflowText text={issue.title || '-'} /></td>
+          <td class="cell-title"><OverflowText text={issue.static_title || '-'} /></td>
+          <td class="cell-title"><OverflowText text={issue.static_meta_description || '-'} /></td>
           <td class="cell-title"><OverflowText text={issue.rendered_title || '-'} /></td>
+          <td class="cell-title"><OverflowText text={issue.rendered_meta_description || '-'} /></td>
           <td class="cell-title"><OverflowText text={issue.rendered_h1?.join(' | ') || '-'} /></td>
           <td>{fmtN(issue.rendered_word_count)}</td>
           <td>{fmtN(issue.rendered_images_count)}</td>
@@ -1037,5 +1241,39 @@
   .type-redirect {
     background: rgba(234, 179, 8, 0.16);
     color: #ca8a04;
+  }
+
+  .source-badge {
+    display: inline-flex;
+    align-items: center;
+    max-width: 126px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .source-good {
+    background: rgba(16, 185, 129, 0.12);
+    color: #059669;
+  }
+
+  .source-info {
+    background: rgba(99, 102, 241, 0.12);
+    color: var(--info);
+  }
+
+  .source-muted {
+    background: color-mix(in srgb, var(--bg-hover) 80%, transparent);
+    color: var(--text-muted);
+  }
+
+  .source-warn {
+    background: var(--warning-bg);
+    color: var(--warning);
   }
 </style>

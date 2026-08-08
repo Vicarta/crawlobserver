@@ -54,6 +54,9 @@ type PageRow struct {
 	OGDescription    string
 	OGImage          string
 	SchemaTypes      []string
+	HeadingOutline   []HeadingRow
+	PageCreatedAt    *time.Time
+	PageModifiedAt   *time.Time
 	Headers          map[string]string
 	RedirectChain    []RedirectHopRow
 	BodySize         uint64
@@ -63,6 +66,13 @@ type PageRow struct {
 	Error            string
 	Depth            uint16
 	FoundOn          string
+	SitemapSourceURL string
+	SitemapRawLoc    string
+	DiscoverySource  string
+	DiscoveryDetail  string
+	CandidateSources []string
+	IsInSitemap      bool
+	ProblemOrigin    string
 	PageRank         float64
 	ContentHash      uint64
 	BodyHTML         string
@@ -86,6 +96,18 @@ type PageRow struct {
 	RenderedSchemaTypes     []string
 	RenderedBodyHTML        string
 
+	// Static response data retained when rendered DOM becomes authoritative.
+	StaticTitle           string
+	StaticMetaDescription string
+	StaticH1              []string
+	StaticWordCount       uint32
+	StaticCanonical       string
+	StaticMetaRobots      string
+	StaticLinksCount      uint32
+	StaticImagesCount     uint16
+	StaticContentHash     uint64
+	StaticBodyHTML        string
+
 	// Diff flags (static vs rendered)
 	JSChangedTitle       bool
 	JSChangedDescription bool
@@ -108,50 +130,198 @@ type PageRow struct {
 	CWVTTFB     float64 // Time to First Byte (ms)
 }
 
+type Orphan404CleanupCandidate struct {
+	URL             string    `json:"url"`
+	Title           string    `json:"title"`
+	StatusCode      uint16    `json:"status_code"`
+	CrawledAt       time.Time `json:"crawled_at"`
+	InternalLinksIn uint32    `json:"internal_links_in"`
+	IsInSitemap     bool      `json:"is_in_sitemap"`
+}
+
 // PageIssue is a generic SEO/technical issue derived from stored crawl signals.
 type PageIssue struct {
-	URL                 string   `json:"url"`
-	Severity            string   `json:"severity"`   // "error" or "warning"
-	IssueType           string   `json:"issue_type"` // "soft_404", "generic_rendered_title", ...
-	IssueDetail         string   `json:"issue_detail"`
-	StatusCode          uint16   `json:"status_code"`
-	Title               string   `json:"title"`
-	RenderedTitle       string   `json:"rendered_title"`
-	RenderedH1          []string `json:"rendered_h1"`
-	WordCount           uint32   `json:"word_count"`
-	RenderedWordCount   uint32   `json:"rendered_word_count"`
-	ImagesCount         uint16   `json:"images_count"`
-	RenderedImagesCount uint16   `json:"rendered_images_count"`
+	URL                     string   `json:"url"`
+	Severity                string   `json:"severity"`   // "error" or "warning"
+	IssueType               string   `json:"issue_type"` // "soft_404", "generic_rendered_title", ...
+	IssueDetail             string   `json:"issue_detail"`
+	StatusCode              uint16   `json:"status_code"`
+	Title                   string   `json:"title"`
+	StaticTitle             string   `json:"static_title"`
+	StaticMetaDescription   string   `json:"static_meta_description"`
+	RenderedTitle           string   `json:"rendered_title"`
+	RenderedMetaDescription string   `json:"rendered_meta_description"`
+	RenderedH1              []string `json:"rendered_h1"`
+	WordCount               uint32   `json:"word_count"`
+	RenderedWordCount       uint32   `json:"rendered_word_count"`
+	ImagesCount             uint16   `json:"images_count"`
+	RenderedImagesCount     uint16   `json:"rendered_images_count"`
+}
+
+// CoreWebVitalsSummary aggregates lab measurements for eligible HTML pages.
+type CoreWebVitalsSummary struct {
+	EligiblePages    uint64 `json:"eligible_pages"`
+	MeasuredPages    uint64 `json:"measured_pages"`
+	Good             uint64 `json:"good"`
+	NeedsImprovement uint64 `json:"needs_improvement"`
+	Poor             uint64 `json:"poor"`
+	UnmeasuredPages  uint64 `json:"unmeasured_pages"`
+}
+
+// CoreWebVitalsPage is a page-level Core Web Vitals lab result.
+type CoreWebVitalsPage struct {
+	URL           string  `json:"url"`
+	LCPMs         float64 `json:"lcp_ms"`
+	CLS           float64 `json:"cls"`
+	TTFBMs        float64 `json:"ttfb_ms"`
+	LCPRating     string  `json:"lcp_rating"`
+	CLSRating     string  `json:"cls_rating"`
+	TTFBRating    string  `json:"ttfb_rating"`
+	OverallRating string  `json:"overall_rating"`
+}
+
+// CoreWebVitalsReport contains a summary and one filtered page of lab results.
+type CoreWebVitalsReport struct {
+	Summary CoreWebVitalsSummary `json:"summary"`
+	Pages   []CoreWebVitalsPage  `json:"pages"`
+	Total   uint64               `json:"total"`
 }
 
 // CrawlQualityResult is the trust gate outcome for a crawl session.
 type CrawlQualityResult struct {
-	SessionID         string                 `json:"session_id"`
-	ProjectID         string                 `json:"project_id"`
-	BaselineSessionID string                 `json:"baseline_session_id"`
-	Status            string                 `json:"status"` // trusted, warning, untrusted
-	Score             uint8                  `json:"score"`
-	Trusted           bool                   `json:"trusted"`
-	IsFullCrawl       bool                   `json:"is_full_crawl"`
-	Summary           string                 `json:"summary"`
-	Metrics           map[string]interface{} `json:"metrics,omitempty"`
-	EvaluatedAt       time.Time              `json:"evaluated_at"`
-	Findings          []CrawlQualityFinding  `json:"findings,omitempty"`
+	SessionID         string `json:"session_id"`
+	ProjectID         string `json:"project_id"`
+	BaselineSessionID string `json:"baseline_session_id"`
+	// EvaluationRevision identifies this immutable quality evaluation. It is a
+	// deterministic UUID derived from the evaluated inputs, not a wall-clock ID.
+	EvaluationRevision         string                 `json:"evaluation_revision"`
+	Source                     string                 `json:"source"`
+	EvaluatorRevision          string                 `json:"evaluator_revision"`
+	RulesRevision              string                 `json:"rules_revision"`
+	BaselineEvaluationRevision string                 `json:"baseline_evaluation_revision,omitempty"`
+	PageRankEvidenceRevision   string                 `json:"pagerank_evidence_revision,omitempty"`
+	PageRankEvidenceSource     string                 `json:"pagerank_evidence_source,omitempty"`
+	PageRankEvidenceStatus     string                 `json:"pagerank_evidence_status,omitempty"`
+	PageRankPredicateVersion   string                 `json:"pagerank_predicate_version,omitempty"`
+	PageRankEligible           uint64                 `json:"pagerank_eligible_pages"`
+	PageRankPositive           uint64                 `json:"pagerank_positive_pages"`
+	PageRankZero               uint64                 `json:"pagerank_zero_pages"`
+	Stale                      bool                   `json:"stale"`
+	StaleReasons               []string               `json:"stale_reasons,omitempty"`
+	FindingCount               uint32                 `json:"finding_count"`
+	PromotionStatus            string                 `json:"promotion_status,omitempty"`
+	Status                     string                 `json:"status"` // trusted, warning, untrusted
+	Score                      uint8                  `json:"score"`
+	Trusted                    bool                   `json:"trusted"`
+	IsFullCrawl                bool                   `json:"is_full_crawl"`
+	Summary                    string                 `json:"summary"`
+	Metrics                    map[string]interface{} `json:"metrics,omitempty"`
+	EvaluatedAt                time.Time              `json:"evaluated_at"`
+	Findings                   []CrawlQualityFinding  `json:"findings,omitempty"`
 }
 
 // CrawlQualityFinding is a single data-quality signal for a crawl session.
 type CrawlQualityFinding struct {
-	SessionID      string    `json:"session_id"`
-	ProjectID      string    `json:"project_id"`
-	Severity       string    `json:"severity"` // info, warning, error
-	FindingType    string    `json:"finding_type"`
-	Message        string    `json:"message"`
-	Metric         string    `json:"metric"`
-	CurrentValue   float64   `json:"current_value"`
-	BaselineValue  float64   `json:"baseline_value"`
-	ThresholdValue float64   `json:"threshold_value"`
-	Blocking       bool      `json:"blocking"`
-	CreatedAt      time.Time `json:"created_at"`
+	SessionID          string    `json:"session_id"`
+	EvaluationRevision string    `json:"evaluation_revision,omitempty"`
+	FindingIndex       uint32    `json:"finding_index,omitempty"`
+	ProjectID          string    `json:"project_id"`
+	Severity           string    `json:"severity"` // info, warning, error
+	FindingType        string    `json:"finding_type"`
+	Message            string    `json:"message"`
+	Metric             string    `json:"metric"`
+	CurrentValue       float64   `json:"current_value"`
+	BaselineValue      float64   `json:"baseline_value"`
+	ThresholdValue     float64   `json:"threshold_value"`
+	Blocking           bool      `json:"blocking"`
+	CreatedAt          time.Time `json:"created_at"`
+}
+
+// CrawlQualityCurrentPointer is the separately-published current revision for
+// a session. A pointer is written only after the evaluation and every finding
+// have been inserted and read back.
+type CrawlQualityCurrentPointer struct {
+	SessionID          string    `json:"session_id"`
+	EvaluationRevision string    `json:"evaluation_revision"`
+	PointerSequence    uint64    `json:"pointer_sequence"`
+	PublishedAt        time.Time `json:"published_at"`
+}
+
+// CrawlQualityPromotionEvent records an append-only decision to promote (or
+// reject) a quality evaluation into a project current snapshot.
+type CrawlQualityPromotionEvent struct {
+	ProjectID                  string    `json:"project_id"`
+	SessionID                  string    `json:"session_id"`
+	PromotionID                string    `json:"promotion_id"`
+	EventSequence              uint64    `json:"event_sequence"`
+	EvaluationRevision         string    `json:"evaluation_revision"`
+	PageRankEvidenceRevision   string    `json:"pagerank_evidence_revision"`
+	BaselineSessionID          string    `json:"baseline_session_id,omitempty"`
+	BaselineEvaluationRevision string    `json:"baseline_evaluation_revision,omitempty"`
+	EvaluatorRevision          string    `json:"evaluator_revision,omitempty"`
+	RulesRevision              string    `json:"rules_revision,omitempty"`
+	Status                     string    `json:"status"`
+	Reason                     string    `json:"reason,omitempty"`
+	Detail                     string    `json:"detail,omitempty"`
+	OccurredAt                 time.Time `json:"occurred_at"`
+}
+
+// CrawlQualityActionEvent is the durable audit/readback record for an
+// operator- or scheduler-triggered evaluation. It exists independently of
+// snapshot promotion, so an untrusted no-promotion repair remains traceable.
+type CrawlQualityActionEvent struct {
+	SessionID                        string    `json:"session_id"`
+	ActionID                         string    `json:"action_id"`
+	EventSequence                    uint64    `json:"event_sequence"`
+	Action                           string    `json:"action"`
+	Source                           string    `json:"source"`
+	Actor                            string    `json:"actor,omitempty"`
+	Reason                           string    `json:"reason"`
+	ExpectedEvaluationRevision       string    `json:"expected_evaluation_revision,omitempty"`
+	PreviousEvaluationRevision       string    `json:"previous_evaluation_revision,omitempty"`
+	ResultEvaluationRevision         string    `json:"result_evaluation_revision,omitempty"`
+	ExpectedPageRankEvidenceRevision string    `json:"expected_pagerank_evidence_revision,omitempty"`
+	PageRankEvidenceRevision         string    `json:"pagerank_evidence_revision,omitempty"`
+	Status                           string    `json:"status"`
+	OccurredAt                       time.Time `json:"occurred_at"`
+}
+
+// QualityReevaluateRequest is the narrow admin repair contract. The handler
+// validates confirmation, audit reason, and expected revisions before it asks
+// storage to publish a replacement evaluation.
+type QualityReevaluateRequest struct {
+	Confirm                          bool   `json:"confirm"`
+	Reason                           string `json:"reason"`
+	ExpectedEvaluationRevision       string `json:"expected_evaluation_revision,omitempty"`
+	ExpectedPageRankEvidenceRevision string `json:"expected_pagerank_evidence_revision,omitempty"`
+}
+
+// QualityReevaluateResponse is returned by the idempotent repair endpoint.
+type QualityReevaluateResponse struct {
+	Changed          bool                        `json:"changed"`
+	PromotionChanged bool                        `json:"promotion_changed"`
+	Result           *CrawlQualityResult         `json:"result,omitempty"`
+	Evidence         *PageRankEvidence           `json:"evidence,omitempty"`
+	Promotion        *CrawlQualityPromotionEvent `json:"promotion,omitempty"`
+}
+
+// ProjectCurrentSnapshot describes the materialized full-site current state for a project.
+type ProjectCurrentSnapshot struct {
+	ProjectID                         string    `json:"project_id"`
+	SnapshotRevision                  uint64    `json:"snapshot_revision"`
+	CurrentSessionID                  string    `json:"current_session_id"`
+	BaselineSessionID                 string    `json:"baseline_session_id"`
+	QualityBaselineSessionID          string    `json:"quality_baseline_session_id,omitempty"`
+	QualityEvaluationRevision         string    `json:"quality_evaluation_revision,omitempty"`
+	BaselineQualityEvaluationRevision string    `json:"baseline_quality_evaluation_revision,omitempty"`
+	PageRankEvidenceRevision          string    `json:"pagerank_evidence_revision,omitempty"`
+	QualityEvaluatorRevision          string    `json:"quality_evaluator_revision,omitempty"`
+	QualityRulesRevision              string    `json:"quality_rules_revision,omitempty"`
+	QualityPromotionStatus            string    `json:"quality_promotion_status,omitempty"`
+	BaselineCreatedAt                 time.Time `json:"baseline_created_at"`
+	LastDeltaSessionID                string    `json:"last_delta_session_id"`
+	DeltaCount                        uint32    `json:"delta_count"`
+	UpdatedAt                         time.Time `json:"updated_at"`
 }
 
 // CrawlQualityMetrics is the aggregate data used by the quality evaluator.
@@ -159,6 +329,7 @@ type CrawlQualityMetrics struct {
 	HTMLPages            uint64
 	InternalLinks        uint64
 	Status404            uint64
+	Status5xx            uint64
 	Noindex              uint64
 	Redirects            uint64
 	CanonicalMismatch    uint64
@@ -188,6 +359,12 @@ type RedirectHopRow struct {
 type HreflangRow struct {
 	Lang string
 	URL  string
+}
+
+// HeadingRow is a heading and its HTML level, kept in document order.
+type HeadingRow struct {
+	Level uint8
+	Text  string
 }
 
 // RobotsRow represents a robots.txt entry for storage.
@@ -229,7 +406,85 @@ type LinkRow struct {
 	Rel            string
 	IsInternal     bool
 	Tag            string
+	LinkLocation   string
 	CrawledAt      time.Time
+}
+
+// PageDiscoveryReferrer is retained link evidence that explains how a page was reached.
+type PageDiscoveryReferrer struct {
+	SourceURL    string    `json:"source_url"`
+	TargetURL    string    `json:"target_url"`
+	AnchorText   string    `json:"anchor_text"`
+	Rel          string    `json:"rel"`
+	Tag          string    `json:"tag"`
+	LinkLocation string    `json:"link_location"`
+	ViaRedirect  bool      `json:"via_redirect"`
+	RedirectURL  string    `json:"redirect_url,omitempty"`
+	CrawledAt    time.Time `json:"crawled_at"`
+}
+
+// PageDiscoveryEvidence describes why a URL is present in a crawl session.
+type PageDiscoveryEvidence struct {
+	Availability           string                  `json:"availability"`
+	PrimarySource          string                  `json:"primary_source"`
+	Detail                 string                  `json:"detail"`
+	FoundOn                string                  `json:"found_on,omitempty"`
+	IsSeed                 bool                    `json:"is_seed"`
+	IsInSitemap            bool                    `json:"is_in_sitemap"`
+	SitemapSourceURL       string                  `json:"sitemap_source_url,omitempty"`
+	SitemapRawLoc          string                  `json:"sitemap_raw_loc,omitempty"`
+	CandidateSources       []string                `json:"candidate_sources"`
+	Referrers              []PageDiscoveryReferrer `json:"referrers"`
+	ReferrersCount         uint64                  `json:"referrers_count"`
+	DirectReferrersCount   uint64                  `json:"direct_referrers_count"`
+	RedirectReferrersCount uint64                  `json:"redirect_referrers_count"`
+}
+
+// PageRankOptions controls link graph construction for PageRank recomputation.
+type PageRankOptions struct {
+	IncludeFooterLinks  bool
+	FooterSelectors     []string
+	RefreshLinkLocation bool
+}
+
+const (
+	PageRankEvidenceStarted   = "started"
+	PageRankEvidenceFinalized = "finalized"
+	PageRankEvidenceFailed    = "failed"
+
+	PageRankEvidenceComputed         = "computed"
+	PageRankEvidenceObservedExisting = "observed_existing"
+	PageRankAlgorithmVersion         = "pagerank-v1"
+)
+
+// PageRankEvidence is an append-only lifecycle event for one PageRank attempt.
+// AttemptID is the PageRank revision stamped onto computed page rows.
+type PageRankEvidence struct {
+	SessionID            string    `json:"session_id"`
+	AttemptID            string    `json:"attempt_id"`
+	EventSequence        uint64    `json:"event_sequence"`
+	PredecessorAttemptID string    `json:"predecessor_attempt_id,omitempty"`
+	State                string    `json:"state"`
+	Source               string    `json:"source"`
+	AlgorithmVersion     string    `json:"algorithm_version"`
+	PredicateVersion     string    `json:"predicate_version"`
+	OptionsSignature     string    `json:"options_signature"`
+	GraphFingerprint     string    `json:"graph_fingerprint"`
+	RankFingerprint      string    `json:"rank_fingerprint"`
+	GraphPageCount       uint64    `json:"graph_page_count"`
+	EligiblePageCount    uint64    `json:"eligible_page_count"`
+	PositivePageCount    uint64    `json:"positive_page_count"`
+	ZeroPageCount        uint64    `json:"zero_page_count"`
+	QueryIdentity        string    `json:"query_identity"`
+	OccurredAt           time.Time `json:"occurred_at"`
+	Failure              string    `json:"failure,omitempty"`
+}
+
+// PageRankPopulation is the reconciled population for a PageRank revision.
+type PageRankPopulation struct {
+	Eligible uint64 `json:"eligible"`
+	Positive uint64 `json:"positive"`
+	Zero     uint64 `json:"zero"`
 }
 
 // CompareStatsResult holds side-by-side stats for two sessions.
@@ -541,8 +796,12 @@ type WeightedPageRankPage struct {
 
 // WeightedPageRankResult wraps paginated weighted PageRank results.
 type WeightedPageRankResult struct {
-	Pages []WeightedPageRankPage `json:"pages"`
-	Total uint64                 `json:"total"`
+	Pages    []WeightedPageRankPage `json:"pages"`
+	Total    uint64                 `json:"total"`
+	Eligible uint64                 `json:"eligible_pages"`
+	Positive uint64                 `json:"positive_pages"`
+	Zero     uint64                 `json:"zero_pages"`
+	Evidence *PageRankEvidence      `json:"evidence,omitempty"`
 }
 
 // InterlinkingOpportunity represents a pair of semantically similar pages without an existing internal link.

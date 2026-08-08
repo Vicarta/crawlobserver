@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -75,5 +76,28 @@ func TestRobotsCacheNoRobotsTxt(t *testing.T) {
 	// Should allow everything when robots.txt returns 404
 	if !rc.IsAllowed(server.URL + "/anything") {
 		t.Error("expected all URLs to be allowed when robots.txt is missing")
+	}
+}
+
+func TestRobotsCacheDeclaredSitemapURLsExcludesFallbacks(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "User-agent: *\nSitemap: %s/declared.xml\n", server.URL)
+	}))
+	defer server.Close()
+
+	rc := NewRobotsCache("CrawlObserver", 5*time.Second, DialOptions{AllowPrivateIPs: true}, "")
+	if !rc.IsAllowed(server.URL + "/page") {
+		t.Fatal("expected robots request to allow the test page")
+	}
+
+	if got, want := rc.DeclaredSitemapURLs(), []string{server.URL + "/declared.xml"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("DeclaredSitemapURLs() = %v, want %v", got, want)
+	}
+	if got, want := rc.SitemapFallbackURLs(), []string{
+		server.URL + "/sitemap.xml",
+		server.URL + "/sitemap_index.xml",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("SitemapFallbackURLs() = %v, want %v", got, want)
 	}
 }

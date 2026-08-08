@@ -132,6 +132,24 @@ func TestCheckUpdate_DevVersion(t *testing.T) {
 	}
 }
 
+func TestIsSelfUpdateSupportedVersion(t *testing.T) {
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"dev", false},
+		{"docker", false},
+		{"", false},
+		{"v1.2.3", true},
+		{"1.2.3", true},
+	}
+	for _, tt := range tests {
+		if got := isSelfUpdateSupportedVersion(tt.version); got != tt.want {
+			t.Fatalf("isSelfUpdateSupportedVersion(%q) = %v, want %v", tt.version, got, tt.want)
+		}
+	}
+}
+
 func TestCheckUpdate_Non200(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)

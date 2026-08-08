@@ -27,6 +27,8 @@
     ['internal_links_min_delta', 'Internal links min delta', 'Minimum absolute internal link change.'],
     ['status_404_percent', '404 growth %', '404 growth warning threshold.'],
     ['status_404_min_delta', '404 min delta', 'Minimum absolute 404 growth.'],
+    ['status_5xx_percent', '5xx growth %', '5xx growth blocking threshold.'],
+    ['status_5xx_min_delta', '5xx min delta', 'Minimum absolute 5xx growth before blocking.'],
     ['noindex_percent', 'Noindex growth %', 'Noindex growth warning threshold.'],
     ['noindex_min_delta', 'Noindex min delta', 'Minimum absolute noindex growth.'],
     ['redirect_percent', 'Redirect growth %', 'Redirect growth warning threshold.'],
@@ -37,6 +39,15 @@
     ['pagerank_top_overlap_min_percent', 'PageRank overlap min %', 'Minimum overlap with baseline top pages.'],
     ['pagerank_zero_top_pages_max', 'Zero PageRank top pages max', 'Allowed count of top pages with zero PageRank.'],
     ['canary_min_internal_links_default', 'Default canary internal links', 'Default lower bound for canary internal outlinks.'],
+    ['delta_min_crawled_pages', 'Delta min crawled pages', 'Minimum pages before Daily Delta can update current snapshot.'],
+    ['delta_min_crawled_percent', 'Delta min crawled %', 'Minimum completed share of planned Daily Delta run.'],
+    ['delta_min_launched_candidates', 'Delta min launched candidates', 'Minimum planned candidate URLs a Daily Delta must launch before promotion.'],
+    ['delta_min_launched_percent', 'Delta launched candidate %', 'Minimum launched share of the total candidate set; 0 disables this gate.'],
+    ['delta_min_sitemap_candidates', 'Delta min sitemap candidates', 'Minimum sitemap-derived candidates when sitemap is enabled.'],
+    ['delta_min_sitemap_percent', 'Delta sitemap candidate %', 'Minimum sitemap candidate share compared with the baseline sitemap URL count.'],
+    ['delta_candidate_coverage_percent', 'Delta candidate coverage %', 'Minimum launched candidate URLs that must appear in crawl results.'],
+    ['delta_status_5xx_percent', 'Delta 5xx max %', 'Daily Delta is not promoted when 5xx share reaches this threshold.'],
+    ['delta_status_5xx_min_pages', 'Delta 5xx min pages', 'Minimum absolute 5xx pages before the Delta 5xx threshold applies.'],
   ];
 
   function newCanary() {
@@ -148,6 +159,10 @@
           </label>
         {/each}
       </div>
+      <label class="toggle-row inline-toggle">
+        <input type="checkbox" bind:checked={settings.delta_require_canaries} disabled={!isAdmin} />
+        <span>Require canaries before promoting Daily Delta</span>
+      </label>
 
       {#if isAdmin}
         <div class="form-actions">

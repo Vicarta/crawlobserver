@@ -216,6 +216,7 @@ a:hover {
 
 .main {
   flex: 1;
+  min-width: 0;
   margin-left: var(--sidebar-width);
   padding-top: var(--topbar-height);
   min-height: 100vh;
@@ -223,6 +224,7 @@ a:hover {
 }
 
 .main-content {
+  min-width: 0;
   padding: 28px 32px 48px;
   width: 100%;
   max-width: none;

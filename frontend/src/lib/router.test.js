@@ -139,6 +139,19 @@ describe('parseRoute', () => {
     expect(route.filters).toEqual({ q: 'test' });
     expect(route.offset).toBe(10);
   });
+
+  it('preserves the nested external-links view on reload', () => {
+    setLocation('/sessions/abc123/links/external/checks', '?source_url=%21%2Fcdn-cgi%2F');
+    expect(parseRoute()).toEqual({
+      sessionId: 'abc123',
+      tab: 'links',
+      subView: 'external',
+      nestedSubView: 'checks',
+      redirectFrom: null,
+      filters: { source_url: '!/cdn-cgi/' },
+      offset: 0,
+    });
+  });
 });
 
 describe('pushURL', () => {

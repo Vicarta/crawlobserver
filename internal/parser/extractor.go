@@ -44,3 +44,30 @@ func extractHeadings(doc *goquery.Document, tag string) []string {
 	})
 	return headings
 }
+
+// extractHeadingOutline keeps headings in the order they appear in the DOM.
+// Per-level arrays are still extracted for table views and issue checks, while
+// this outline is used where the page structure itself matters.
+func extractHeadingOutline(doc *goquery.Document) []Heading {
+	outline := make([]Heading, 0)
+	doc.Find("h1, h2, h3, h4, h5, h6").Each(func(_ int, s *goquery.Selection) {
+		if len(s.Nodes) == 0 {
+			return
+		}
+
+		tag := strings.ToLower(s.Nodes[0].Data)
+		if len(tag) != 2 || tag[0] != 'h' || tag[1] < '1' || tag[1] > '6' {
+			return
+		}
+
+		text := strings.TrimSpace(s.Text())
+		if text == "" {
+			return
+		}
+		outline = append(outline, Heading{
+			Level: uint8(tag[1] - '0'),
+			Text:  text,
+		})
+	})
+	return outline
+}

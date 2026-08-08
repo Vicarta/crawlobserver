@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"sync"
 	"time"
 
@@ -101,17 +102,17 @@ func (rc *RobotsCache) get(host string) *RobotsCacheEntry {
 	return rc.cache[host]
 }
 
-// SitemapURLs collects sitemap URLs from all cached robots.txt entries,
-// plus common fallback paths (/sitemap.xml, /sitemap_index.xml).
-func (rc *RobotsCache) SitemapURLs() []string {
+// DeclaredSitemapURLs returns only sitemap roots explicitly declared by
+// robots.txt. It does not add conventional fallback paths.
+func (rc *RobotsCache) DeclaredSitemapURLs() []string {
 	rc.mu.RLock()
 	defer rc.mu.RUnlock()
 
 	seen := make(map[string]bool)
 	var urls []string
 
-	for host, entry := range rc.cache {
-		// Add sitemaps declared in robots.txt
+	for _, host := range sortedRobotsHosts(rc.cache) {
+		entry := rc.cache[host]
 		if entry.parsed != nil {
 			for _, s := range entry.parsed.Sitemaps {
 				if !seen[s] {
@@ -120,7 +121,20 @@ func (rc *RobotsCache) SitemapURLs() []string {
 				}
 			}
 		}
-		// Add common fallback paths
+	}
+	return urls
+}
+
+// SitemapFallbackURLs returns conventional fallback paths for cached hosts.
+// It intentionally excludes robots.txt declarations so strict sitemap refresh
+// callers can decide when fallbacks are appropriate.
+func (rc *RobotsCache) SitemapFallbackURLs() []string {
+	rc.mu.RLock()
+	defer rc.mu.RUnlock()
+
+	seen := make(map[string]bool)
+	var urls []string
+	for _, host := range sortedRobotsHosts(rc.cache) {
 		for _, path := range []string{"/sitemap.xml", "/sitemap_index.xml"} {
 			u := host + path
 			if !seen[u] {
@@ -130,6 +144,32 @@ func (rc *RobotsCache) SitemapURLs() []string {
 		}
 	}
 	return urls
+}
+
+// SitemapURLs collects sitemap URLs from all cached robots.txt entries, plus
+// common fallback paths (/sitemap.xml, /sitemap_index.xml). It preserves the
+// broad discovery behavior used by full crawls.
+func (rc *RobotsCache) SitemapURLs() []string {
+	declared := rc.DeclaredSitemapURLs()
+	fallbacks := rc.SitemapFallbackURLs()
+	seen := make(map[string]bool, len(declared)+len(fallbacks))
+	urls := make([]string, 0, len(declared)+len(fallbacks))
+	for _, sitemapURL := range append(declared, fallbacks...) {
+		if !seen[sitemapURL] {
+			seen[sitemapURL] = true
+			urls = append(urls, sitemapURL)
+		}
+	}
+	return urls
+}
+
+func sortedRobotsHosts(cache map[string]*RobotsCacheEntry) []string {
+	hosts := make([]string, 0, len(cache))
+	for host := range cache {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	return hosts
 }
 
 func (rc *RobotsCache) fetch(host string) *RobotsCacheEntry {

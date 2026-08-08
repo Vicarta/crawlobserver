@@ -8,6 +8,8 @@
     getInterlinkingSimulations,
     getInterlinkingSimulation,
   } from '../api.js';
+  import { exportSelectedCSV, opportunitySelectionKey } from '../selectedCsv.js';
+  import ExportSelectedButton from './ExportSelectedButton.svelte';
 
   let { sessionId, onerror } = $props();
 
@@ -28,7 +30,13 @@
   let oppSort = $state('opportunity_score');
   let oppOrder = $state('desc');
   let oppFilters = $state({});
-  let selected = $state(new Set());
+  let selected = $state({});
+  let selectedRows = $derived(Object.values(selected));
+  let selectedCount = $derived(selectedRows.length);
+  let allVisibleSelected = $derived(
+    opportunities.length > 0 &&
+      opportunities.every((opportunity) => selected[opportunitySelectionKey(opportunity)]),
+  );
 
   // Simulation state
   let simulations = $state([]);
@@ -87,10 +95,11 @@
   }
 
   async function handleSimulate() {
-    if (selected.size === 0) return;
-    const links = opportunities
-      .filter((_, i) => selected.has(i))
-      .map((o) => ({ source: o.source_url, target: o.target_url }));
+    if (selectedCount === 0) return;
+    const links = selectedRows.map((opportunity) => ({
+      source: opportunity.source_url,
+      target: opportunity.target_url,
+    }));
     try {
       const res = await simulateInterlinking(sessionId, links);
       if (res?.simulation_id) {
@@ -154,18 +163,20 @@
 
   let lastClickedIdx = -1;
 
-  function toggleSelect(idx, e) {
-    const next = new Set(selected);
+  function toggleSelect(opportunity, idx, e) {
+    const next = { ...selected };
 
     if (e?.shiftKey && lastClickedIdx >= 0 && lastClickedIdx !== idx) {
       const lo = Math.min(lastClickedIdx, idx);
       const hi = Math.max(lastClickedIdx, idx);
       for (let i = lo; i <= hi; i++) {
-        next.add(i);
+        const row = opportunities[i];
+        next[opportunitySelectionKey(row)] = row;
       }
     } else {
-      if (next.has(idx)) next.delete(idx);
-      else next.add(idx);
+      const key = opportunitySelectionKey(opportunity);
+      if (next[key]) delete next[key];
+      else next[key] = opportunity;
     }
 
     lastClickedIdx = idx;
@@ -173,11 +184,59 @@
   }
 
   function toggleSelectAll() {
-    if (selected.size === opportunities.length) {
-      selected = new Set();
-    } else {
-      selected = new Set(opportunities.map((_, i) => i));
+    const next = { ...selected };
+    for (const opportunity of opportunities) {
+      const key = opportunitySelectionKey(opportunity);
+      if (allVisibleSelected) delete next[key];
+      else next[key] = opportunity;
     }
+    selected = next;
+  }
+
+  function clearSelection() {
+    selected = {};
+    lastClickedIdx = -1;
+  }
+
+  function handleExportSelected() {
+    if (selectedCount === 0) return;
+    exportSelectedCSV(
+      'interlinking-opportunities-selected.csv',
+      {
+        headers: [
+          'Source URL',
+          'Source Title',
+          'Target URL',
+          'Target Title',
+          'Score',
+          'Similarity (%)',
+          'Category',
+          'Source PageRank',
+          'Target PageRank',
+          'Source Words',
+          'Target Words',
+        ],
+        keys: [
+          'source_url',
+          'source_title',
+          'target_url',
+          'target_title',
+          'opportunity_score',
+          'similarity_percent',
+          'category',
+          'source_pagerank',
+          'target_pagerank',
+          'source_word_count',
+          'target_word_count',
+        ],
+        transform: (opportunity) => ({
+          ...opportunity,
+          similarity_percent:
+            opportunity.similarity == null ? '' : (opportunity.similarity * 100).toFixed(1),
+        }),
+      },
+      selectedRows,
+    );
   }
 
   function handleOppSort(col) {
@@ -219,7 +278,7 @@
   function switchCategoryTab(tab) {
     categoryTab = tab;
     oppOffset = 0;
-    selected = new Set();
+    clearSelection();
     loadOpportunities();
   }
 
@@ -319,21 +378,19 @@
           >{t('common.showing')}
           {oppOffset + 1}-{Math.min(oppOffset + PAGE_SIZE, oppTotal)} / {oppTotal}</span
         >
-        {#if selected.size > 0}
+        {#if selectedCount > 0}
           <button class="btn-primary" onclick={handleSimulate}>
-            {t('interlinking.simulate')} ({selected.size})
+            {t('interlinking.simulate')} ({selectedCount})
           </button>
+          <button class="btn btn-sm" onclick={clearSelection}>{t('common.clear')}</button>
+          <ExportSelectedButton onclick={handleExportSelected} />
         {/if}
       </div>
       <table>
         <thead>
           <tr>
             <th class="col-check"
-              ><input
-                type="checkbox"
-                checked={selected.size === opportunities.length}
-                onchange={toggleSelectAll}
-              /></th
+              ><input type="checkbox" checked={allVisibleSelected} onchange={toggleSelectAll} /></th
             >
             <th class="sortable" onclick={() => handleOppSort('source_url')}
               >{t('interlinking.source')}{sortIcon('source_url', oppSort, oppOrder)}</th
@@ -434,8 +491,8 @@
               <td class="col-check"
                 ><input
                   type="checkbox"
-                  checked={selected.has(idx)}
-                  onclick={(e) => toggleSelect(idx, e)}
+                  checked={!!selected[opportunitySelectionKey(opp)]}
+                  onclick={(e) => toggleSelect(opp, idx, e)}
                 /></td
               >
               <td class="cell-url" title={opp.source_url}>

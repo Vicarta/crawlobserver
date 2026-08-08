@@ -17,9 +17,10 @@ type Link struct {
 	Rel        string
 	IsInternal bool
 	Tag        string // "a", "link", "area", etc.
+	Location   string // "body", "footer"
 }
 
-func extractLinks(doc *goquery.Document, baseURL *url.URL) []Link {
+func extractLinks(doc *goquery.Document, baseURL *url.URL, footerSelectors []string) []Link {
 	var links []Link
 
 	doc.Find("a, area").Each(func(_ int, s *goquery.Selection) {
@@ -49,10 +50,66 @@ func extractLinks(doc *goquery.Document, baseURL *url.URL) []Link {
 			Rel:        strings.TrimSpace(rel),
 			IsInternal: isInternal(baseURL, resolved),
 			Tag:        tag,
+			Location:   linkLocation(s, footerSelectors),
 		})
 	})
 
 	return links
+}
+
+func linkLocation(s *goquery.Selection, footerSelectors []string) string {
+	for cur := s; cur != nil && cur.Length() > 0; cur = cur.Parent() {
+		name := strings.ToLower(goquery.NodeName(cur))
+		if name == "footer" {
+			return "footer"
+		}
+		if htmlutil.AttrTokenContains(cur, "role", "contentinfo") {
+			return "footer"
+		}
+		for _, attr := range []string{"id", "class", "aria-label", "data-testid", "data-test", "data-section", "data-component"} {
+			v, ok := htmlutil.Attr(cur, attr)
+			if ok && strings.Contains(strings.ToLower(v), "footer") {
+				return "footer"
+			}
+		}
+		if matchesFooterSelector(cur, footerSelectors) {
+			return "footer"
+		}
+	}
+	return "body"
+}
+
+func matchesFooterSelector(s *goquery.Selection, selectors []string) bool {
+	for _, raw := range selectors {
+		selector := strings.TrimSpace(raw)
+		if selector == "" {
+			continue
+		}
+		if safeSelectionIs(s, selector) {
+			return true
+		}
+		token := strings.Trim(selector, ".#[]=\"' ")
+		if token == "" {
+			continue
+		}
+		token = strings.ToLower(token)
+		for _, attr := range []string{"id", "class", "aria-label", "data-testid", "data-test", "data-section", "data-component"} {
+			v, ok := htmlutil.Attr(s, attr)
+			if ok && strings.Contains(strings.ToLower(v), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func safeSelectionIs(s *goquery.Selection, selector string) (matched bool) {
+	defer func() {
+		if recover() != nil {
+			matched = false
+		}
+	}()
+	return s.Is(selector)
 }
 
 func isInternal(baseURL *url.URL, targetURL string) bool {

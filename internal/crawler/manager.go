@@ -26,6 +26,8 @@ const (
 	maxLastErrors          = 1000
 	defaultMaxPages        = 100000
 	maxRescanURLs          = 200
+	stopReasonManual       = "manual"
+	stopReasonShutdown     = "shutdown"
 )
 
 func applySavedCrawlerConfig(cfg *config.Config, saved config.CrawlerConfig) {
@@ -101,38 +103,44 @@ func (m *Manager) LastError(sessionID string) string {
 
 // CrawlRequest holds parameters for starting a new crawl.
 type CrawlRequest struct {
-	Seeds               []string `json:"seeds"`
-	SessionSeedURLs     []string `json:"session_seed_urls,omitempty"`
-	MaxPages            int      `json:"max_pages"`
-	MaxDepth            int      `json:"max_depth"`
-	Workers             int      `json:"workers"`
-	Delay               string   `json:"delay"`
-	StoreHTML           bool     `json:"store_html"`
-	CrawlScope          string   `json:"crawl_scope"`
-	ProjectID           *string  `json:"project_id"`
-	CheckExternalLinks  *bool    `json:"check_external_links"`
-	ExternalLinkWorkers int      `json:"external_link_workers"`
-	RetryStatusCode     int      `json:"retry_status_code"`
-	UserAgent           string   `json:"user_agent"`
-	CrawlSitemapOnly    bool     `json:"crawl_sitemap_only"`
-	FetchSitemaps       *bool    `json:"fetch_sitemaps"`
-	CheckPageResources  *bool    `json:"check_page_resources"`
-	ResourceWorkers     int      `json:"resource_workers"`
-	TLSProfile          string   `json:"tls_profile"`
-	JSRenderMode        string   `json:"js_render_mode"`
-	JSRenderMaxPages    int      `json:"js_render_max_pages"`
-	JSRenderTimeout     string   `json:"js_render_timeout"`
-	FollowJSLinks       bool     `json:"follow_js_links"`
-	SourceIP            string   `json:"source_ip"`
-	ForceIPv4           bool     `json:"force_ipv4"`
-	ExtractorSetID      string   `json:"extractor_set_id"`
-	IgnoreRobots        bool     `json:"ignore_robots"`
-	ExcludePatterns     []string `json:"exclude_patterns"`
-	MeasureCWV          bool     `json:"measure_cwv"`
-	FullRecrawl         bool     `json:"full_recrawl"`
-	Label               string   `json:"label"`
-	RetryMaxRetries     *int     `json:"retry_max_retries"`
-	RetryBackoffSeconds int      `json:"retry_backoff_seconds"`
+	Seeds                        []string                `json:"seeds"`
+	SessionSeedURLs              []string                `json:"session_seed_urls,omitempty"`
+	MaxPages                     int                     `json:"max_pages"`
+	MaxDepth                     int                     `json:"max_depth"`
+	Workers                      int                     `json:"workers"`
+	Delay                        string                  `json:"delay"`
+	StoreHTML                    bool                    `json:"store_html"`
+	CrawlScope                   string                  `json:"crawl_scope"`
+	ProjectID                    *string                 `json:"project_id"`
+	CheckExternalLinks           *bool                   `json:"check_external_links"`
+	ExternalLinkWorkers          int                     `json:"external_link_workers"`
+	RetryStatusCode              int                     `json:"retry_status_code"`
+	UserAgent                    string                  `json:"user_agent"`
+	CrawlSitemapOnly             bool                    `json:"crawl_sitemap_only"`
+	FetchSitemaps                *bool                   `json:"fetch_sitemaps"`
+	CheckPageResources           *bool                   `json:"check_page_resources"`
+	ResourceWorkers              int                     `json:"resource_workers"`
+	TLSProfile                   string                  `json:"tls_profile"`
+	JSRenderMode                 string                  `json:"js_render_mode"`
+	JSRenderMaxPages             int                     `json:"js_render_max_pages"`
+	JSRenderTimeout              string                  `json:"js_render_timeout"`
+	FollowJSLinks                bool                    `json:"follow_js_links"`
+	SourceIP                     string                  `json:"source_ip"`
+	ForceIPv4                    bool                    `json:"force_ipv4"`
+	ExtractorSetID               string                  `json:"extractor_set_id"`
+	IgnoreRobots                 bool                    `json:"ignore_robots"`
+	ExcludePatterns              []string                `json:"exclude_patterns"`
+	MeasureCWV                   bool                    `json:"measure_cwv"`
+	FullRecrawl                  bool                    `json:"full_recrawl"`
+	Label                        string                  `json:"label"`
+	DeltaPlannedPages            int                     `json:"delta_planned_pages,omitempty"`
+	DeltaPlan                    *config.DeltaPlanConfig `json:"delta_plan,omitempty"`
+	InitialSitemaps              []storage.SitemapRow    `json:"-"`
+	InitialSitemapURLs           []storage.SitemapURLRow `json:"-"`
+	RetryMaxRetries              *int                    `json:"retry_max_retries"`
+	RetryBackoffSeconds          int                     `json:"retry_backoff_seconds"`
+	IncludeFooterLinksInPageRank *bool                   `json:"include_footer_links_in_pagerank,omitempty"`
+	FooterSelectorPatterns       []string                `json:"footer_selector_patterns,omitempty"`
 }
 
 // StartCrawl launches a new crawl session in background. Returns the session ID.
@@ -153,6 +161,12 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 	crawlerCfg := cfg.Crawler
 	if req.MaxPages > 0 {
 		crawlerCfg.MaxPages = req.MaxPages
+	}
+	if req.DeltaPlannedPages > 0 {
+		crawlerCfg.DeltaPlannedPages = req.DeltaPlannedPages
+	}
+	if req.DeltaPlan != nil {
+		crawlerCfg.DeltaPlan = req.DeltaPlan
 	}
 	if req.MaxDepth > 0 {
 		crawlerCfg.MaxDepth = req.MaxDepth
@@ -251,6 +265,9 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 	sessionID := engine.SessionID(sessionSeeds)
 	engine.session.ProjectID = req.ProjectID
 	engine.session.Label = req.Label
+	engine.SetInitialSitemapObservation(req.InitialSitemaps, req.InitialSitemapURLs)
+	engine.includeFooterLinksInPageRank = boolValue(req.IncludeFooterLinksInPageRank, true)
+	engine.footerSelectorPatterns = append([]string(nil), req.FooterSelectorPatterns...)
 	engine.sitemapOnly = cfg.Crawler.CrawlSitemapOnly
 	// Fetch sitemaps: default true; forced true when sitemapOnly
 	engine.fetchSitemaps = boolValue(cfg.Crawler.FetchSitemaps, true) || engine.sitemapOnly
@@ -314,6 +331,11 @@ func (m *Manager) StopCrawl(sessionID string) error {
 		if err == nil {
 			sess.Status = "stopped"
 			sess.FinishedAt = time.Now()
+			sess.Config = config.WithSessionStopMetadata(sess.Config, config.SessionStopMetadata{
+				Reason:  stopReasonManual,
+				Message: "Queued crawl removed by operator before it started",
+				At:      sess.FinishedAt,
+			})
 			_ = m.store.InsertSession(ctx, sess)
 		}
 		return nil
@@ -327,14 +349,14 @@ func (m *Manager) StopCrawl(sessionID string) error {
 		return fmt.Errorf("session %s is not running", sessionID)
 	}
 
-	engine.Stop()
+	engine.StopWithReason(stopReasonManual, "Stopped by operator")
 
-	// Wait for the engine workers to drain (max 15s).
-	// Finalization (depths, PageRank) continues in background.
+	// Wait for terminal finalization (max 15s). The engine remains active until
+	// derived PageRank evidence and its terminal status are persisted.
 	select {
 	case <-engine.Done():
 	case <-time.After(15 * time.Second):
-		applog.Warnf("crawler", "Timeout waiting for engine %s workers to drain", sessionID)
+		applog.Warnf("crawler", "Timeout waiting for engine %s finalization", sessionID)
 	}
 	return nil
 }
@@ -900,6 +922,11 @@ func (m *Manager) Shutdown(timeout time.Duration) {
 		if err == nil {
 			sess.Status = "stopped"
 			sess.FinishedAt = time.Now()
+			sess.Config = config.WithSessionStopMetadata(sess.Config, config.SessionStopMetadata{
+				Reason:  stopReasonShutdown,
+				Message: "CrawlObserver process shutdown interrupted this queued crawl before it started",
+				At:      sess.FinishedAt,
+			})
 			_ = m.store.InsertSession(ctx, sess)
 		}
 		applog.Infof("crawler", "Shutdown: queued session %s marked stopped", qc.sessionID)
@@ -918,7 +945,7 @@ func (m *Manager) Shutdown(timeout time.Duration) {
 
 	applog.Infof("crawler", "Shutdown: stopping %d running engine(s)...", len(snapshot))
 	for _, e := range snapshot {
-		e.Stop()
+		e.StopWithReason(stopReasonShutdown, "CrawlObserver process shutdown interrupted this crawl, most often because of deploy, restart, or server shutdown")
 	}
 
 	deadline := time.After(timeout)
@@ -970,6 +997,11 @@ func (m *Manager) RecoverOrphanedSessions(ctx context.Context) {
 		} else if sess.Status == "queued" {
 			sess.Status = "stopped"
 			sess.FinishedAt = time.Now()
+			sess.Config = config.WithSessionStopMetadata(sess.Config, config.SessionStopMetadata{
+				Reason:  "orphaned",
+				Message: "Queued session was recovered after startup because it was left queued by a previous process",
+				At:      sess.FinishedAt,
+			})
 			if err := m.store.InsertSession(ctx, &sess); err != nil {
 				applog.Errorf("crawler", "RecoverOrphanedSessions: could not update session %s: %v", sess.ID, err)
 				continue
@@ -1080,15 +1112,6 @@ func (m *Manager) runEngine(sessionID string, engine *Engine, seeds []string) {
 		Set("workers", engine.cfg.Crawler.Workers).
 		Set("source", "ui"))
 
-	// Remove engine from map as soon as workers are drained (before finalization).
-	// This makes the SSE report is_running=false immediately when Stop is called.
-	go func() {
-		<-engine.Done()
-		m.mu.Lock()
-		delete(m.engines, sessionID)
-		m.mu.Unlock()
-	}()
-
 	err := engine.Run(seeds)
 	status := "completed"
 	if err != nil {
@@ -1098,7 +1121,6 @@ func (m *Manager) runEngine(sessionID string, engine *Engine, seeds []string) {
 		Set("status", status).
 		Set("source", "ui"))
 	m.mu.Lock()
-	// Engine already removed via Done() goroutine above, but ensure cleanup
 	delete(m.engines, sessionID)
 	if err != nil {
 		if len(m.lastErrors) >= maxLastErrors {

@@ -37,11 +37,15 @@ type mockStore struct {
 	sessions             []storage.CrawlSession
 	pages                []storage.PageRow
 	pageIssues           []storage.PageIssue
+	coreWebVitalsReport  *storage.CoreWebVitalsReport
+	coreWebVitalsCalls   []coreWebVitalsCall
 	links                []storage.LinkRow
 	stats                *storage.SessionStats
 	pageHTML             string
 	page                 *storage.PageRow
 	pageLinks            *storage.PageLinksResult
+	pageDiscovery        *storage.PageDiscoveryEvidence
+	pageDiscoveryErr     error
 	storageStats         *storage.StorageStatsResult
 	sessionStorageStats  map[string]uint64
 	globalSessions       []storage.GlobalSessionStats
@@ -52,6 +56,7 @@ type mockStore struct {
 	robotsContent        *storage.RobotsRow
 	sitemaps             []storage.SitemapRow
 	sitemapURLs          []storage.SitemapURLRow
+	deltaSitemapURLs     []string
 	urlsByHost           map[string][]string // host prefix -> URLs
 	compareStatsResult   *storage.CompareStatsResult
 	comparePagesResult   *storage.PageDiffResult
@@ -75,6 +80,15 @@ type listPagesCall struct {
 	Limit     int
 	Offset    int
 	Filters   []storage.ParsedFilter
+}
+
+type coreWebVitalsCall struct {
+	SessionID string
+	Limit     int
+	Offset    int
+	Rating    string
+	Sort      string
+	Order     string
 }
 
 type deleteProviderCall struct {
@@ -107,7 +121,15 @@ func (m *mockStore) ListSessionsPaginated(_ context.Context, limit, offset int, 
 	if m.err != nil {
 		return nil, 0, m.err
 	}
-	return m.sessions, len(m.sessions), nil
+	sessions := m.sessions
+	if offset >= len(sessions) {
+		return []storage.CrawlSession{}, len(sessions), nil
+	}
+	end := offset + limit
+	if end > len(sessions) {
+		end = len(sessions)
+	}
+	return sessions[offset:end], len(sessions), nil
 }
 
 func (m *mockStore) LatestProjectSession(ctx context.Context, projectID string) (*storage.CrawlSession, error) {
@@ -160,6 +182,26 @@ func (m *mockStore) ListPageIssues(_ context.Context, _ string, _, _ int, _, _, 
 	return m.pageIssues, m.err
 }
 
+func (m *mockStore) CoreWebVitalsReport(_ context.Context, sessionID string, limit, offset int, rating, sort, order string) (*storage.CoreWebVitalsReport, error) {
+	m.coreWebVitalsCalls = append(m.coreWebVitalsCalls, coreWebVitalsCall{
+		SessionID: sessionID,
+		Limit:     limit,
+		Offset:    offset,
+		Rating:    rating,
+		Sort:      sort,
+		Order:     order,
+	})
+	return m.coreWebVitalsReport, m.err
+}
+
+func (m *mockStore) DeletePagesAndReferences(_ context.Context, _ string, urls []string) (int, error) {
+	return len(urls), m.err
+}
+
+func (m *mockStore) ListOrphan404CleanupCandidates(_ context.Context, _ string, _ time.Time, _ int) ([]storage.Orphan404CleanupCandidate, error) {
+	return nil, m.err
+}
+
 func (m *mockStore) ExternalLinksPaginated(_ context.Context, _ string, _, _ int, _ []storage.ParsedFilter, _ *storage.SortParam) ([]storage.LinkRow, error) {
 	return m.links, m.err
 }
@@ -205,6 +247,13 @@ func (m *mockStore) GetPage(_ context.Context, _, _ string) (*storage.PageRow, e
 	return m.page, m.err
 }
 
+func (m *mockStore) GetPageDiscovery(_ context.Context, _, _ string, _ int) (*storage.PageDiscoveryEvidence, error) {
+	if m.pageDiscoveryErr != nil {
+		return nil, m.pageDiscoveryErr
+	}
+	return m.pageDiscovery, m.err
+}
+
 func (m *mockStore) GetPageLinks(_ context.Context, _, _ string, _, _, _, _ int) (*storage.PageLinksResult, error) {
 	return m.pageLinks, m.err
 }
@@ -240,6 +289,10 @@ func (m *mockStore) RecomputeDepths(_ context.Context, _ string, _ []string) err
 }
 
 func (m *mockStore) ComputePageRank(_ context.Context, _ string) error {
+	return m.err
+}
+
+func (m *mockStore) ComputePageRankWithOptions(_ context.Context, _ string, _ storage.PageRankOptions) error {
 	return m.err
 }
 
@@ -292,6 +345,10 @@ func (m *mockStore) GetSitemapURLs(_ context.Context, _, _ string, _, _ int) ([]
 
 func (m *mockStore) GetSitemapCoverageURLs(_ context.Context, _, _ string, _, _ int) ([]storage.SitemapURLRow, error) {
 	return m.sitemapURLs, m.err
+}
+
+func (m *mockStore) CountSitemapURLs(_ context.Context, _ string) (int, error) {
+	return len(m.sitemapURLs), m.err
 }
 
 func (m *mockStore) GetURLsByHost(_ context.Context, _ string, host string) ([]string, error) {
@@ -361,7 +418,7 @@ func (m *mockStore) DeltaGSCCandidateURLs(_ context.Context, _ string, _ int) ([
 }
 
 func (m *mockStore) DeltaSitemapCandidateURLs(_ context.Context, _ string, _ int) ([]string, error) {
-	return []string{}, m.err
+	return append([]string(nil), m.deltaSitemapURLs...), m.err
 }
 
 func (m *mockStore) DeltaProblemPageURLs(_ context.Context, _ string, _ int) ([]string, error) {
@@ -562,6 +619,20 @@ func (m *mockStore) LoadPageMetadata(_ context.Context, _ string) (map[string]st
 func (m *mockStore) LoadPageRankGraph(_ context.Context, _ string) (*storage.PageRankGraph, error) {
 	return nil, m.err
 }
+func (m *mockStore) ExistingLinkPairs(_ context.Context, _ string, links []storage.VirtualLink) (map[storage.VirtualLink]bool, error) {
+	result := make(map[storage.VirtualLink]bool, len(links))
+	for _, link := range links {
+		result[link] = true
+	}
+	return result, m.err
+}
+func (m *mockStore) ResolveExistingLinkPairs(_ context.Context, _ string, links []storage.VirtualLink) (map[storage.VirtualLink]storage.VirtualLink, error) {
+	result := make(map[storage.VirtualLink]storage.VirtualLink, len(links))
+	for _, link := range links {
+		result[link] = link
+	}
+	return result, m.err
+}
 func (m *mockStore) InsertSimulation(_ context.Context, _ string, _ string, _ []storage.VirtualLink, _ []storage.SimulationResultRow, _ storage.SimulationMeta) error {
 	return m.err
 }
@@ -571,7 +642,7 @@ func (m *mockStore) ListSimulations(_ context.Context, _ string) ([]storage.Simu
 func (m *mockStore) GetSimulation(_ context.Context, _, _ string) (*storage.SimulationMeta, error) {
 	return nil, m.err
 }
-func (m *mockStore) ListSimulationResults(_ context.Context, _, _ string, _, _ int, _ []storage.ParsedFilter, _ *storage.SortParam) ([]storage.SimulationResultRow, int, error) {
+func (m *mockStore) ListSimulationResults(_ context.Context, _, _ string, _, _ int, _ []storage.ParsedFilter, _ *storage.SortParam, _ bool) ([]storage.SimulationResultRow, int, error) {
 	return nil, 0, m.err
 }
 
@@ -772,6 +843,59 @@ func newTestServer(t *testing.T) (*Server, http.Handler, *apikeys.Store) {
 func authRequest(req *http.Request) *http.Request {
 	req.SetBasicAuth("admin", "secret")
 	return req
+}
+
+func TestQualityReevaluateRouteRequiresAdminCredentials(t *testing.T) {
+	_, handler, keyStore := newTestServer(t)
+	project, err := keyStore.CreateProject("quality-route-auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readOnly, err := keyStore.CreateAPIKey("quality-read-only", "project", &project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/session-1/quality/re-evaluate", strings.NewReader(`{"confirm":true,"reason":"repair evidence"}`))
+	req.Header.Set("X-API-Key", readOnly.FullKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "admin access required") {
+		t.Fatalf("read-only route response = %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = authRequest(httptest.NewRequest(http.MethodPost, "/api/sessions/session-1/quality/re-evaluate", strings.NewReader(`{"confirm":true,"reason":"repair evidence"}`)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized || rec.Code == http.StatusMethodNotAllowed {
+		t.Fatalf("admin request did not reach registered handler: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSession_ReturnsSyntheticSnapshotOutsideSessionList(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	ms := srv.store.(*mockStore)
+	projectID := "project-1"
+	ms.getSessionByID = map[string]*storage.CrawlSession{
+		"current-snapshot": {
+			ID:        "current-snapshot",
+			Status:    "completed",
+			ProjectID: &projectID,
+			Label:     "Current Snapshot",
+		},
+	}
+
+	req := authRequest(httptest.NewRequest(http.MethodGet, "/api/sessions/current-snapshot", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got map[string]interface{}
+	decodeJSON(t, rec, &got)
+	if got["ID"] != "current-snapshot" || got["Label"] != "Current Snapshot" {
+		t.Fatalf("unexpected session payload: %#v", got)
+	}
 }
 
 // jsonBody encodes v as JSON and returns a *bytes.Reader.
@@ -1257,15 +1381,20 @@ func TestCRUD_DeleteNonRunningSession(t *testing.T) {
 }
 
 func TestCRUD_StartCrawl(t *testing.T) {
-	srv, handler, _ := newTestServer(t)
+	srv, handler, keyStore := newTestServer(t)
 
 	mm := srv.manager.(*mockManager)
 	mm.startResult = "new-sess-123"
+	project, err := keyStore.CreateProject("Gerus")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	body := jsonBody(t, map[string]interface{}{
-		"seeds":     []string{"https://example.com"},
-		"max_pages": 100,
-		"workers":   5,
+		"seeds":      []string{"https://example.com"},
+		"max_pages":  100,
+		"workers":    5,
+		"project_id": project.ID,
 	})
 	req := authRequest(httptest.NewRequest("POST", "/api/crawl", body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1280,6 +1409,55 @@ func TestCRUD_StartCrawl(t *testing.T) {
 	decodeJSON(t, rec, &resp)
 	if resp["session_id"] != "new-sess-123" {
 		t.Errorf("expected session_id new-sess-123, got %q", resp["session_id"])
+	}
+	if len(mm.startCalls) != 1 {
+		t.Fatalf("expected one StartCrawl call, got %d", len(mm.startCalls))
+	}
+	if mm.startCalls[0].ProjectID == nil || *mm.startCalls[0].ProjectID != project.ID {
+		t.Fatalf("StartCrawl project_id = %v, want %s", mm.startCalls[0].ProjectID, project.ID)
+	}
+}
+
+func TestStartCrawlRejectsUnknownProject(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	mm := srv.manager.(*mockManager)
+
+	body := jsonBody(t, map[string]interface{}{
+		"seeds":      []string{"https://example.com"},
+		"project_id": "missing-project",
+	})
+	req := authRequest(httptest.NewRequest("POST", "/api/crawl", body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if len(mm.startCalls) != 0 {
+		t.Fatalf("StartCrawl called for unknown project: %#v", mm.startCalls)
+	}
+}
+
+func TestStartCrawlNormalizesBlankProject(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	mm := srv.manager.(*mockManager)
+	mm.startResult = "unassigned-session"
+
+	body := jsonBody(t, map[string]interface{}{
+		"seeds":      []string{"https://example.com"},
+		"project_id": "   ",
+	})
+	req := authRequest(httptest.NewRequest("POST", "/api/crawl", body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if len(mm.startCalls) != 1 || mm.startCalls[0].ProjectID != nil {
+		t.Fatalf("blank project_id was not normalized: %#v", mm.startCalls)
 	}
 }
 
@@ -1585,6 +1763,67 @@ func TestAPIKeys_Lifecycle(t *testing.T) {
 	decodeJSON(t, rec, &afterDelete)
 	if len(afterDelete) != 0 {
 		t.Errorf("expected 0 keys after delete, got %d", len(afterDelete))
+	}
+}
+
+func TestDeltaSettings_ProjectReaderCanGetAndOnlyAdminCanUpdate(t *testing.T) {
+	_, handler, ks := newTestServer(t)
+
+	project, err := ks.CreateProject("delta-settings-project")
+	if err != nil {
+		t.Fatalf("creating project: %v", err)
+	}
+	projectKey, err := ks.CreateAPIKey("delta-settings-reader", "project", &project.ID)
+	if err != nil {
+		t.Fatalf("creating project key: %v", err)
+	}
+	path := "/api/projects/" + project.ID + "/delta/settings"
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("X-API-Key", projectKey.FullKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("project GET delta settings: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var read apikeys.ProjectDeltaSettings
+	decodeJSON(t, rec, &read)
+	if read.SitemapRefreshFailureMode != apikeys.SitemapRefreshFailureModeSkip {
+		t.Fatalf("GET sitemap_refresh_failure_mode = %q, want %q", read.SitemapRefreshFailureMode, apikeys.SitemapRefreshFailureModeSkip)
+	}
+
+	settings, err := ks.GetProjectDeltaSettings(project.ID)
+	if err != nil {
+		t.Fatalf("loading default settings: %v", err)
+	}
+	settings.SitemapRefreshFailureMode = apikeys.SitemapRefreshFailureModeSnapshotFallback
+	req = httptest.NewRequest(http.MethodPut, path, jsonBody(t, settings))
+	req.Header.Set("X-API-Key", projectKey.FullKey)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("project PUT delta settings: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = authRequest(httptest.NewRequest(http.MethodPut, path, jsonBody(t, settings)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin PUT delta settings: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var updated apikeys.ProjectDeltaSettings
+	decodeJSON(t, rec, &updated)
+	if updated.SitemapRefreshFailureMode != apikeys.SitemapRefreshFailureModeSnapshotFallback {
+		t.Fatalf("updated sitemap_refresh_failure_mode = %q, want %q", updated.SitemapRefreshFailureMode, apikeys.SitemapRefreshFailureModeSnapshotFallback)
+	}
+
+	req = authRequest(httptest.NewRequest(http.MethodPut, path, jsonBody(t, map[string]string{
+		"sitemap_refresh_failure_mode": "historical_fallback",
+	})))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid sitemap refresh failure mode: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -3330,8 +3569,23 @@ func TestPageDetail_Success(t *testing.T) {
 	ms.getSessionByID = map[string]*storage.CrawlSession{
 		"sess-1": {ID: "sess-1", Status: "completed"},
 	}
-	ms.page = &storage.PageRow{URL: "https://example.com/", StatusCode: 200}
+	ms.page = &storage.PageRow{
+		URL:            "https://example.com/",
+		StatusCode:     200,
+		HeadingOutline: []storage.HeadingRow{{Level: 1, Text: "Example heading"}},
+	}
 	ms.pageLinks = &storage.PageLinksResult{}
+	ms.pageDiscovery = &storage.PageDiscoveryEvidence{
+		Availability:   "derived",
+		PrimarySource:  "redirect_internal_link",
+		ReferrersCount: 1,
+		Referrers: []storage.PageDiscoveryReferrer{{
+			SourceURL:   "https://example.com/source",
+			TargetURL:   "https://example.com/old",
+			RedirectURL: "https://example.com/old",
+			ViaRedirect: true,
+		}},
+	}
 
 	req := authRequest(httptest.NewRequest("GET", "/api/sessions/sess-1/page-detail?url=https://example.com/", nil))
 	rec := httptest.NewRecorder()
@@ -3348,6 +3602,52 @@ func TestPageDetail_Success(t *testing.T) {
 	}
 	if resp["links"] == nil {
 		t.Error("expected links field")
+	}
+	discovery, ok := resp["discovery"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("discovery = %#v, want object", resp["discovery"])
+	}
+	if discovery["availability"] != "derived" || discovery["primary_source"] != "redirect_internal_link" {
+		t.Errorf("discovery contract = %#v", discovery)
+	}
+	referrers, ok := discovery["referrers"].([]interface{})
+	if !ok || len(referrers) != 1 {
+		t.Fatalf("discovery referrers = %#v, want one", discovery["referrers"])
+	}
+	referrer, ok := referrers[0].(map[string]interface{})
+	if !ok || referrer["source_url"] != "https://example.com/source" || referrer["via_redirect"] != true {
+		t.Errorf("discovery referrer = %#v", referrers[0])
+	}
+	page, ok := resp["page"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("page = %#v, want object", resp["page"])
+	}
+	outline, ok := page["HeadingOutline"].([]interface{})
+	if !ok || len(outline) != 1 {
+		t.Fatalf("HeadingOutline = %#v, want one heading", page["HeadingOutline"])
+	}
+	heading, ok := outline[0].(map[string]interface{})
+	if !ok || heading["Level"] != float64(1) || heading["Text"] != "Example heading" {
+		t.Errorf("HeadingOutline[0] = %#v, want level 1 Example heading", outline[0])
+	}
+}
+
+func TestPageDetail_DiscoveryError(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	ms := srv.store.(*mockStore)
+	ms.getSessionByID = map[string]*storage.CrawlSession{
+		"sess-1": {ID: "sess-1", Status: "completed"},
+	}
+	ms.page = &storage.PageRow{URL: "https://example.com/", StatusCode: 200}
+	ms.pageLinks = &storage.PageLinksResult{}
+	ms.pageDiscoveryErr = fmt.Errorf("discovery lookup failed")
+
+	req := authRequest(httptest.NewRequest("GET", "/api/sessions/sess-1/page-detail?url=https://example.com/", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d; body: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -3906,6 +4206,37 @@ func TestInternalLinks_Success(t *testing.T) {
 	}
 }
 
+func TestExternalLinks_ReturnsSourceToTargetEdges(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	ms := srv.store.(*mockStore)
+	ms.getSessionByID = map[string]*storage.CrawlSession{
+		"snapshot-1": {ID: "snapshot-1", Status: "completed"},
+	}
+	ms.links = []storage.LinkRow{{
+		CrawlSessionID: "snapshot-1",
+		SourceURL:      "https://example.com/article/",
+		TargetURL:      "https://external.example/resource",
+		AnchorText:     "Reference",
+		Tag:            "a",
+		LinkLocation:   "body",
+	}}
+
+	req := authRequest(httptest.NewRequest("GET", "/api/sessions/snapshot-1/links?target_url=!ads.example", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var links []storage.LinkRow
+	if err := json.NewDecoder(rec.Body).Decode(&links); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if len(links) != 1 || links[0].SourceURL != "https://example.com/article/" || links[0].TargetURL != "https://external.example/resource" {
+		t.Fatalf("expected source-aware external link, got %#v", links)
+	}
+}
+
 // =========================================================================
 // External check handler tests
 // =========================================================================
@@ -4335,10 +4666,11 @@ func TestHandleDeleteUnassignedSessions_Success(t *testing.T) {
 	if resp["status"] != "ok" {
 		t.Errorf("expected status ok, got %v", resp["status"])
 	}
-	// sess-orphan and sess-data-only should be deleted (no project)
+	// Only a persisted unassigned session may be deleted. Aggregated data without
+	// a CrawlSession record is not an unassigned session and must not be targeted.
 	deletedCount := resp["deleted"].(float64)
-	if deletedCount != 2 {
-		t.Errorf("expected 2 deleted, got %v", deletedCount)
+	if deletedCount != 1 {
+		t.Errorf("expected 1 deleted, got %v", deletedCount)
 	}
 }
 
@@ -6903,11 +7235,10 @@ func TestGlobalStats_FullWithProjectsAndSessions(t *testing.T) {
 	}
 }
 
-func TestGlobalStats_AutoAssignOrphanSessions(t *testing.T) {
+func TestGlobalStats_DoesNotAutoAssignOrphanSessions(t *testing.T) {
 	srv, handler, ks := newTestServer(t)
 	ms := srv.store.(*mockStore)
 
-	// Session with no project — should be auto-assigned
 	ms.sessions = []storage.CrawlSession{
 		{ID: "sess-orphan", SeedURLs: []string{"https://orphan.com/"}, Status: "completed"},
 	}
@@ -6925,24 +7256,17 @@ func TestGlobalStats_AutoAssignOrphanSessions(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Verify project was auto-created
 	projects, err := ks.ListProjects()
 	if err != nil {
 		t.Fatalf("listing projects: %v", err)
 	}
-	found := false
 	for _, p := range projects {
 		if p.Name == "orphan.com" {
-			found = true
-			break
+			t.Fatalf("Stats must not auto-create project %q", p.Name)
 		}
 	}
-	if !found {
-		t.Error("expected auto-created project 'orphan.com'")
-	}
-	// Verify session was associated
-	if len(ms.updateProjectCalls) == 0 {
-		t.Error("expected session project update call")
+	if len(ms.updateProjectCalls) != 0 {
+		t.Fatalf("Stats must not auto-assign sessions, got %d update calls", len(ms.updateProjectCalls))
 	}
 }
 
@@ -8773,6 +9097,42 @@ func TestPageIssues_Success(t *testing.T) {
 	}
 }
 
+func TestCoreWebVitalsReport_Success(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	ms := srv.store.(*mockStore)
+	ms.getSessionByID = map[string]*storage.CrawlSession{
+		"sess-1": {ID: "sess-1", Status: "completed"},
+	}
+	ms.coreWebVitalsReport = &storage.CoreWebVitalsReport{
+		Summary: storage.CoreWebVitalsSummary{EligiblePages: 2, MeasuredPages: 1, Poor: 1, UnmeasuredPages: 1},
+		Pages: []storage.CoreWebVitalsPage{{
+			URL: "https://example.test/slow", LCPMs: 4200, CLS: 0.05, TTFBMs: 500,
+			LCPRating: "poor", CLSRating: "good", TTFBRating: "good", OverallRating: "poor",
+		}},
+		Total: 1,
+	}
+
+	req := authRequest(httptest.NewRequest("GET", "/api/sessions/sess-1/core-web-vitals?rating=poor&sort=lcp&order=desc", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var report storage.CoreWebVitalsReport
+	decodeJSON(t, rec, &report)
+	if report.Total != 1 || len(report.Pages) != 1 || report.Pages[0].OverallRating != "poor" {
+		t.Fatalf("report = %+v", report)
+	}
+	if len(ms.coreWebVitalsCalls) != 1 {
+		t.Fatalf("core web vitals calls = %d, want 1", len(ms.coreWebVitalsCalls))
+	}
+	call := ms.coreWebVitalsCalls[0]
+	if call.SessionID != "sess-1" || call.Rating != "poor" || call.Sort != "lcp" || call.Order != "desc" {
+		t.Fatalf("core web vitals call = %+v", call)
+	}
+}
+
 // =========================================================================
 // Coverage push tests — handleListSessions paginated
 // =========================================================================
@@ -10433,12 +10793,10 @@ func TestExportSession_WithIncludeHTML(t *testing.T) {
 // Coverage push — handleDeleteUnassignedSessions with store errors
 // =========================================================================
 
-func TestDeleteUnassignedSessions_GlobalStatsError(t *testing.T) {
+func TestDeleteUnassignedSessions_ListSessionsError(t *testing.T) {
 	srv, handler, _ := newTestServer(t)
 	ms := srv.store.(*mockStore)
-	// Return sessions OK, but GlobalStats will fail because err is set
-	ms.sessions = []storage.CrawlSession{{ID: "sess-1", Status: "completed"}}
-	ms.err = fmt.Errorf("global stats error")
+	ms.err = fmt.Errorf("list sessions error")
 
 	req := authRequest(httptest.NewRequest("DELETE", "/api/sessions-unassigned", nil))
 	rec := httptest.NewRecorder()
@@ -11573,10 +11931,7 @@ func TestDeleteUnassignedSessions_WithUnassigned(t *testing.T) {
 	ms := srv.store.(*mockStore)
 	ms.sessions = []storage.CrawlSession{
 		{ID: "sess-assigned", Status: "completed", ProjectID: strPtr("proj-1")},
-	}
-	ms.globalSessions = []storage.GlobalSessionStats{
-		{SessionID: "sess-assigned"},
-		{SessionID: "sess-unassigned"},
+		{ID: "sess-unassigned", Status: "completed"},
 	}
 
 	req := authRequest(httptest.NewRequest("DELETE", "/api/sessions-unassigned", nil))

@@ -1,6 +1,8 @@
 package renderer
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -33,5 +35,81 @@ func TestDefaultPoolOptions_Immutability(t *testing.T) {
 	opts1.MaxPages = 99
 	if opts2.MaxPages != 4 {
 		t.Errorf("modifying opts1 affected opts2: MaxPages = %d, want 4", opts2.MaxPages)
+	}
+}
+
+func TestRenderOriginNormalizesSchemeAndHost(t *testing.T) {
+	got := renderOrigin("HTTPS://Example.COM:443/path?q=1")
+	if got != "https://example.com:443" {
+		t.Fatalf("renderOrigin() = %q", got)
+	}
+	if got := renderOrigin("/relative"); got != "" {
+		t.Fatalf("relative renderOrigin() = %q, want empty", got)
+	}
+}
+
+func TestOriginGateSerializesSameOrigin(t *testing.T) {
+	pool := &Pool{}
+	releaseFirst, err := pool.acquireOrigin(context.Background(), "https://example.com/one")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	acquiredSecond := make(chan func(), 1)
+	go func() {
+		release, acquireErr := pool.acquireOrigin(context.Background(), "https://example.com/two")
+		if acquireErr == nil {
+			acquiredSecond <- release
+		}
+	}()
+
+	select {
+	case <-acquiredSecond:
+		t.Fatal("same-origin render acquired before the first render released")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	releaseFirst()
+	select {
+	case releaseSecond := <-acquiredSecond:
+		releaseSecond()
+	case <-time.After(time.Second):
+		t.Fatal("same-origin render did not acquire after release")
+	}
+}
+
+func TestOriginGateAllowsDifferentOrigins(t *testing.T) {
+	pool := &Pool{}
+	releaseFirst, err := pool.acquireOrigin(context.Background(), "https://one.example/page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseFirst()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	releaseSecond, err := pool.acquireOrigin(ctx, "https://two.example/page")
+	if err != nil {
+		t.Fatalf("different origin was blocked: %v", err)
+	}
+	releaseSecond()
+}
+
+func TestOriginGateHonorsCancellation(t *testing.T) {
+	pool := &Pool{}
+	releaseFirst, err := pool.acquireOrigin(context.Background(), "https://example.com/one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseFirst()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	release, err := pool.acquireOrigin(ctx, "https://example.com/two")
+	if release != nil {
+		t.Fatal("cancelled origin wait returned a release function")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled origin wait error = %v", err)
 	}
 }

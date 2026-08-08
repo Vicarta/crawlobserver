@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -220,12 +221,17 @@ func pruneOldSessions(ctx context.Context, store *storage.Store, keep int) {
 	if ctx.Err() != nil || keep < 1 {
 		return
 	}
+	protected, err := store.RetentionProtectedSessionIDs(ctx)
+	if err != nil {
+		applog.Errorf("cli", "Session retention failed to load protected sessions: %v", err)
+		return
+	}
 	sessions, err := store.ListSessions(ctx)
 	if err != nil {
 		applog.Errorf("cli", "Session retention failed to list sessions: %v", err)
 		return
 	}
-	for _, sess := range sessionsToPrune(sessions, keep) {
+	for _, sess := range sessionsToPrune(sessions, keep, protected) {
 		if err := store.DeleteSession(ctx, sess.ID); err != nil {
 			applog.Errorf("cli", "Session retention failed to delete session %s: %v", sess.ID, err)
 			continue
@@ -234,17 +240,29 @@ func pruneOldSessions(ctx context.Context, store *storage.Store, keep int) {
 	}
 }
 
-func sessionsToPrune(sessions []storage.CrawlSession, keep int) []storage.CrawlSession {
+func sessionsToPrune(sessions []storage.CrawlSession, keep int, protected map[string]struct{}) []storage.CrawlSession {
 	if keep < 1 {
 		return nil
 	}
+	if protected == nil {
+		protected = map[string]struct{}{}
+	}
 
 	byProject := make(map[string][]storage.CrawlSession)
+	newestFullByProject := make(map[string]string)
 	for _, sess := range sessions {
 		if isActiveSessionStatus(sess.Status) {
 			continue
 		}
+		if _, ok := protected[sess.ID]; ok {
+			continue
+		}
 		key := retentionProjectKey(sess)
+		if !isDailyDeltaSessionLabel(sess.Label) {
+			if _, exists := newestFullByProject[key]; !exists {
+				newestFullByProject[key] = sess.ID
+			}
+		}
 		byProject[key] = append(byProject[key], sess)
 	}
 
@@ -254,7 +272,12 @@ func sessionsToPrune(sessions []storage.CrawlSession, keep int) []storage.CrawlS
 			return projectSessions[i].StartedAt.After(projectSessions[j].StartedAt)
 		})
 		if len(projectSessions) > keep {
-			prune = append(prune, projectSessions[keep:]...)
+			for _, sess := range projectSessions[keep:] {
+				if newestFullByProject[retentionProjectKey(sess)] == sess.ID {
+					continue
+				}
+				prune = append(prune, sess)
+			}
 		}
 	}
 	sort.SliceStable(prune, func(i, j int) bool {
@@ -270,6 +293,10 @@ func isActiveSessionStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func isDailyDeltaSessionLabel(label string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(label)), "daily delta")
 }
 
 func retentionProjectKey(sess storage.CrawlSession) string {

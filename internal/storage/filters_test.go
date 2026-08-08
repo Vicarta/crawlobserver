@@ -1,8 +1,28 @@
 package storage
 
 import (
+	"strings"
 	"testing"
 )
+
+func TestPageRankEligiblePredicateV1(t *testing.T) {
+	got := PageRankEligiblePredicate("p")
+	for _, want := range []string{
+		"p.content_type", "p.status_code >= 200", "p.status_code < 300",
+		"p.final_url = '' OR p.final_url = p.url",
+		"p.canonical = '' OR p.canonical_is_self OR p.canonical = p.url",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("predicate missing %q: %s", want, got)
+		}
+	}
+	if strings.Contains(strings.ToLower(got), "pagerank") {
+		t.Fatalf("eligibility must not depend on pagerank: %s", got)
+	}
+	if PageRankEligiblePredicateVersion != "pagerank-eligible-v1" {
+		t.Fatalf("unexpected predicate version %q", PageRankEligiblePredicateVersion)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // parseUintRange
@@ -10,11 +30,11 @@ import (
 
 func TestParseUintRange_Valid(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		wantLo   uint64
-		wantHi   uint64
-		wantOK   bool
+		name   string
+		input  string
+		wantLo uint64
+		wantHi uint64
+		wantOK bool
 	}{
 		{"simple range", "100-300", 100, 300, true},
 		{"zero range", "0-0", 0, 0, true},
@@ -294,6 +314,35 @@ func TestBuildWhereClause_FilterLike(t *testing.T) {
 	}
 }
 
+func TestBuildWhereClause_FilterLikeNegation(t *testing.T) {
+	filters := []ParsedFilter{
+		{Def: FilterDef{Column: "target_url", Type: FilterLike}, Value: "!  /cdn-cgi/"},
+	}
+	clause, args, err := BuildWhereClause(filters)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "NOT (target_url ILIKE ?)"; clause != want {
+		t.Errorf("clause = %q, want %q", clause, want)
+	}
+	if len(args) != 1 || args[0] != "%/cdn-cgi/%" {
+		t.Errorf("args = %#v, want [%%/cdn-cgi/%%]", args)
+	}
+}
+
+func TestBuildWhereClause_FilterLikeEmptyNegationSkipped(t *testing.T) {
+	filters := []ParsedFilter{
+		{Def: FilterDef{Column: "url", Type: FilterLike}, Value: "!   "},
+	}
+	clause, args, err := BuildWhereClause(filters)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if clause != "" || args != nil {
+		t.Errorf("empty negation must be ignored, got clause=%q args=%v", clause, args)
+	}
+}
+
 func TestBuildWhereClause_FilterUint_PlainNumber(t *testing.T) {
 	filters := []ParsedFilter{
 		{Def: FilterDef{Column: "status_code", Type: FilterUint}, Value: "200"},
@@ -467,6 +516,22 @@ func TestBuildWhereClause_FilterArray(t *testing.T) {
 	}
 	if args[0] != "%welcome%" {
 		t.Errorf("arg[0] = %q, want %q", args[0], "%welcome%")
+	}
+}
+
+func TestBuildWhereClause_FilterArrayNegation(t *testing.T) {
+	filters := []ParsedFilter{
+		{Def: FilterDef{Column: "h1", Type: FilterArray}, Value: "!welcome"},
+	}
+	clause, args, err := BuildWhereClause(filters)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := "NOT (arrayExists(x -> x ILIKE ?, h1))"; clause != want {
+		t.Errorf("clause = %q, want %q", clause, want)
+	}
+	if len(args) != 1 || args[0] != "%welcome%" {
+		t.Errorf("args = %#v, want [%%welcome%%]", args)
 	}
 }
 

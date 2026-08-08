@@ -1,6 +1,6 @@
 <script>
   import { t } from '../i18n/index.svelte.js';
-  import { fmtN, fmtSize } from '../utils.js';
+  import { fmtN, fmtSize, timeAgo } from '../utils.js';
   import { getProjectsPaginated } from '../api.js';
 
   let {
@@ -87,6 +87,15 @@
   }
 
   let displayedProjects = $derived(searchResults !== null ? searchResults : projects.slice(0, 30));
+  let unassignedSessions = $derived(sessions.filter((session) => !session.ProjectID));
+
+  function sessionHostname(session) {
+    try {
+      return new URL(session.SeedURLs?.[0] || 'https://unknown').hostname;
+    } catch {
+      return session.SeedURLs?.[0] || 'Unknown';
+    }
+  }
 
   let collapsed = $state(localStorage.getItem('sidebar-collapsed') === 'true');
 
@@ -345,15 +354,19 @@
       </div>
     </details>
 
-    {#if sessions.filter((s) => !s.ProjectID).length > 0}
+    {#if unassignedSessions.length > 0}
       <div class="sidebar-section">
-        <div class="sidebar-section-title">{t('sidebar.unassigned')}</div>
+        <div class="sidebar-section-title">
+          <span>{t('sidebar.unassigned')}</span>
+          <span class="sidebar-section-count">{fmtN(unassignedSessions.length)}</span>
+        </div>
         <nav class="sidebar-nav">
-          {#each sessions.filter((s) => !s.ProjectID).slice(0, 5) as s}
+          {#each unassignedSessions.slice(0, 5) as s}
             <button
-              class="sidebar-link"
+              class="sidebar-link sidebar-session-link"
               class:active={selectedSession?.ID === s.ID}
               onclick={() => onselectsession?.(s)}
+              title={`${s.SeedURLs?.[0] || 'Unknown'} · ${s.Label || s.Status} · ${new Date(s.StartedAt).toLocaleString()}`}
             >
               <svg
                 viewBox="0 0 24 24"
@@ -368,14 +381,13 @@
                   d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"
                 /></svg
               >
-              <span class="truncate">
-                {#if s.is_running}
-                  <span class="text-info"
-                    >{new URL(s.SeedURLs?.[0] || 'https://unknown').hostname}</span
-                  >
-                {:else}
-                  {new URL(s.SeedURLs?.[0] || 'https://unknown').hostname}
-                {/if}
+              <span class="sidebar-session-copy">
+                <span class="truncate" class:text-info={s.is_running}>{sessionHostname(s)}</span>
+                <span class="sidebar-session-meta">
+                  <span class="truncate">{s.Label || s.Status}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{timeAgo(s.StartedAt)}</span>
+                </span>
               </span>
             </button>
           {/each}
@@ -496,6 +508,27 @@
           {#if !collapsed}{t('sidebar.api')}{/if}
         </button>
       {/if}
+      <button
+        class="sidebar-link"
+        class:active={currentView === 'pagerank-lab'}
+        onclick={() => onnavigate?.('/pagerank-lab')}
+        title={collapsed ? 'PageRank Lab' : undefined}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          ><path d="M3 12h4l3-8 4 16 3-8h4" /><circle cx="7" cy="12" r="1" /><circle
+            cx="17"
+            cy="12"
+            r="1"
+          /></svg
+        >
+        {#if !collapsed}PageRank Lab{/if}
+      </button>
     </nav>
   </div>
 
@@ -738,6 +771,10 @@
     color: var(--text-muted);
     padding: 0 8px 8px;
   }
+  .sidebar-section-count {
+    float: right;
+    font-variant-numeric: tabular-nums;
+  }
   .sidebar-add-btn {
     background: none;
     border: none;
@@ -831,6 +868,25 @@
   }
   .sidebar-link.active svg {
     opacity: 1;
+  }
+  .sidebar-session-link {
+    align-items: flex-start;
+  }
+  .sidebar-session-copy {
+    min-width: 0;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .sidebar-session-meta {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 400;
   }
   .sidebar-project {
     margin-bottom: 2px;

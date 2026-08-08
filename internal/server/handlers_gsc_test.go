@@ -22,7 +22,7 @@ func TestSortGSCPropertiesPrefersProjectDomainAndHTTPS(t *testing.T) {
 	server := &Server{store: store}
 	props := []gsc.Property{
 		{SiteURL: "http://www.example.com/", PermissionLevel: "siteOwner"},
-		{SiteURL: "https://example.com/", PermissionLevel: "siteOwner"},
+		{SiteURL: "https://unrelated.example/", PermissionLevel: "siteOwner"},
 		{SiteURL: "https://www.example.com/", PermissionLevel: "siteOwner"},
 		{SiteURL: "sc-domain:example.com", PermissionLevel: "siteOwner"},
 	}
@@ -34,7 +34,7 @@ func TestSortGSCPropertiesPrefersProjectDomainAndHTTPS(t *testing.T) {
 		"sc-domain:example.com",
 		"https://www.example.com/",
 		"http://www.example.com/",
-		"https://example.com/",
+		"https://unrelated.example/",
 	}
 	for i := range want {
 		if got[i] != want[i] {

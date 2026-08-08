@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+set -eu
+
+LOG_DIR="${CRAWLOBSERVER_CLICKHOUSE_LOG_DIR:-/var/lib/docker/volumes/deploy_clickhouse_logs/_data}"
+
+if [ ! -d "$LOG_DIR" ]; then
+  exit 0
+fi
+
+# ClickHouse can create numeric archives before host logrotate runs. Remove
+# only rotated files older than seven days and never touch active log files.
+find "$LOG_DIR" -maxdepth 1 -type f -mmin +10080 \
+  \( \
+    -name 'clickhouse-server.log.*' -o \
+    -name 'clickhouse-server.err.log.*' -o \
+    -name 'clickhouse-server.log-*' -o \
+    -name 'clickhouse-server.err.log-*' \
+  \) \
+  -delete

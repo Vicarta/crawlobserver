@@ -1,11 +1,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getSessions, exportSession, subscribeProgress } from './api.js';
+import {
+  getSessions,
+  getSession,
+  getCoreWebVitals,
+  getExternalLinks,
+  getCurrentUser,
+  exportSession,
+  getSessionQualityHistory,
+  getSessionPageRankEvidence,
+  reevaluateSessionQuality,
+  subscribeProgress,
+  AUTH_EXPIRED_EVENT,
+  AuthError,
+  resetAuthExpiredSignal,
+} from './api.js';
 
 // --- fetchJSON (tested via getSessions) ---
 
 describe('fetchJSON', () => {
   beforeEach(() => {
     globalThis.fetch = vi.fn();
+    resetAuthExpiredSignal();
   });
 
   afterEach(() => {
@@ -44,9 +59,177 @@ describe('fetchJSON', () => {
     await expect(getSessions()).rejects.toThrow('Internal Server Error');
   });
 
+  it('throws AuthError and dispatches auth-expired on 401', async () => {
+    const onExpired = vi.fn();
+    window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
+    globalThis.fetch.mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: 'Unauthorized',
+      json: () => Promise.resolve({ error: 'Unauthorized' }),
+      text: () => Promise.resolve(''),
+    });
+
+    await expect(getSessions()).rejects.toBeInstanceOf(AuthError);
+    expect(onExpired).toHaveBeenCalledOnce();
+    expect(onExpired.mock.calls[0][0].detail).toMatchObject({
+      path: '/sessions',
+      status: 401,
+      message: 'Unauthorized',
+    });
+    window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
+  });
+
+  it('does not dispatch auth-expired for suppressed auth checks', async () => {
+    const onExpired = vi.fn();
+    window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
+    globalThis.fetch.mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: 'Unauthorized',
+      json: () => Promise.resolve({ error: 'Unauthorized' }),
+      text: () => Promise.resolve(''),
+    });
+
+    await expect(getCurrentUser()).rejects.toBeInstanceOf(AuthError);
+    expect(onExpired).not.toHaveBeenCalled();
+    window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
+  });
+
   it('throws on network failure', async () => {
     globalThis.fetch.mockRejectedValue(new TypeError('Failed to fetch'));
     await expect(getSessions()).rejects.toThrow('Failed to fetch');
+  });
+});
+
+describe('getExternalLinks', () => {
+  beforeEach(() => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve('[]'),
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('preserves negated source and target filters in the server-side query', async () => {
+    await getExternalLinks('snapshot-1', 100, 0, {
+      source_url: '!/cdn-cgi/',
+      target_url: '!facebook.com',
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      '/api/sessions/snapshot-1/links?limit=100&offset=0&source_url=!%2Fcdn-cgi%2F&target_url=!facebook.com',
+      {},
+    );
+  });
+});
+
+describe('getSession', () => {
+  beforeEach(() => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify({ ID: 'current-snapshot' })),
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('loads a synthetic snapshot by ID without relying on the session list', async () => {
+    await expect(getSession('current-snapshot')).resolves.toEqual({ ID: 'current-snapshot' });
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/sessions/current-snapshot', {});
+  });
+});
+
+describe('getCoreWebVitals', () => {
+  beforeEach(() => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify({ summary: {}, pages: [], total: 0 })),
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('builds the paginated, filtered and sorted lab-data report URL', async () => {
+    await getCoreWebVitals('session / 1', 25, 50, 'needs_improvement', 'lcp', 'asc');
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      '/api/sessions/session%20%2F%201/core-web-vitals?limit=25&offset=50&rating=needs_improvement&sort=lcp&order=asc',
+      {},
+    );
+  });
+});
+
+describe('quality evidence API', () => {
+  beforeEach(() => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify({ changed: true })),
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('loads immutable quality history and latest PageRank evidence', async () => {
+    await getSessionQualityHistory('session / 1');
+    await getSessionPageRankEvidence('session / 1');
+
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(
+      1,
+      '/api/sessions/session%20%2F%201/quality/history',
+      {},
+    );
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(
+      2,
+      '/api/sessions/session%20%2F%201/pagerank/evidence',
+      {},
+    );
+  });
+
+  it('posts an explicit audited re-evaluation request with expected revisions', async () => {
+    await reevaluateSessionQuality('session-1', {
+      confirm: true,
+      reason: 'Repair stale PageRank quality evidence',
+      expected_evaluation_revision: 'quality-v1',
+      expected_pagerank_evidence_revision: 'pagerank-v1',
+    });
+
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/sessions/session-1/quality/re-evaluate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        confirm: true,
+        reason: 'Repair stale PageRank quality evidence',
+        expected_evaluation_revision: 'quality-v1',
+        expected_pagerank_evidence_revision: 'pagerank-v1',
+      }),
+    });
+  });
+
+  it('preserves a re-evaluation conflict status for the UI refresh path', async () => {
+    globalThis.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      statusText: 'Conflict',
+      json: () => Promise.resolve({ error: 'quality evidence revision changed' }),
+      text: () => Promise.resolve(''),
+    });
+
+    await expect(
+      reevaluateSessionQuality('session-1', {
+        confirm: true,
+        reason: 'Repair stale PageRank quality evidence',
+      }),
+    ).rejects.toMatchObject({ status: 409, message: 'quality evidence revision changed' });
   });
 });
 

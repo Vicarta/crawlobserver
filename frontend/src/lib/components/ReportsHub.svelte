@@ -8,6 +8,7 @@
   import StructureReport from './reports/StructureReport.svelte';
   import SitemapReport from './reports/SitemapReport.svelte';
   import InternationalReport from './reports/InternationalReport.svelte';
+  import CoreWebVitalsReport from './reports/CoreWebVitalsReport.svelte';
 
   let {
     sessionId,
@@ -33,6 +34,7 @@
     'structure',
     'sitemaps',
     'international',
+    'core-web-vitals',
   ];
   const SUB_VIEW_KEYS = {
     overview: 'reports.overview',
@@ -42,7 +44,12 @@
     structure: 'reports.structure',
     sitemaps: 'reports.sitemaps',
     international: 'reports.international',
+    'core-web-vitals': 'reports.coreWebVitals',
   };
+
+  function subViewNeedsAudit(id) {
+    return id !== 'overview' && id !== 'core-web-vitals';
+  }
 
   async function loadAudit() {
     if (auditData || auditLoading) return;
@@ -61,13 +68,13 @@
   function switchSubView(id) {
     subView = id;
     onpushurl?.(`/sessions/${sessionId}/reports/${id}`);
-    if (id !== 'overview' && !auditData) {
+    if (subViewNeedsAudit(id) && !auditData) {
       loadAudit();
     }
   }
 
   // Auto-load audit if initial sub-view requires it
-  if (initialSubView !== 'overview') {
+  if (subViewNeedsAudit(initialSubView)) {
     loadAudit();
   }
 </script>
@@ -87,6 +94,8 @@
 
   {#if subView === 'overview'}
     <OverviewReport {stats} {sessionId} {isRunning} {onnavigate} {statsVersion} />
+  {:else if subView === 'core-web-vitals'}
+    <CoreWebVitalsReport {sessionId} {onnavigate} {onerror} />
   {:else if auditLoading}
     <p class="reports-msg-muted">{t('reports.loadingAudit')}</p>
   {:else if auditError && !auditData}
@@ -103,6 +112,7 @@
       {isRunning}
       {onnavigate}
       {statsVersion}
+      onreportnavigate={() => switchSubView('core-web-vitals')}
     />
   {:else if subView === 'links'}
     <LinksReport {stats} audit={auditData} {sessionId} {onnavigate} />

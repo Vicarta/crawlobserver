@@ -91,6 +91,22 @@
  */
 
 const BASE = '/api';
+export const AUTH_EXPIRED_EVENT = 'crawlobserver:auth-expired';
+
+let authExpiredDispatched = false;
+
+export class AuthError extends Error {
+  constructor(message = 'Authentication required', status = 401, path = '') {
+    super(message);
+    this.name = 'AuthError';
+    this.status = status;
+    this.path = path;
+  }
+}
+
+export function resetAuthExpiredSignal() {
+  authExpiredDispatched = false;
+}
 
 export function buildApiPath(path, params = {}) {
   const qs = Object.entries(params)
@@ -116,7 +132,8 @@ const SSE_MAX_RETRIES = 10;
  * @returns {Promise<any>}
  */
 async function fetchJSON(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, options);
+  const { suppressAuthEvent = false, ...fetchOptions } = options;
+  const res = await fetch(`${BASE}${path}`, fetchOptions);
   if (!res.ok) {
     let errorMessage;
     try {
@@ -124,7 +141,21 @@ async function fetchJSON(path, options = {}) {
     } catch {
       errorMessage = await res.text().catch(() => res.statusText);
     }
-    throw new Error(errorMessage || `API error: ${res.status}`);
+    if (res.status === 401) {
+      const authError = new AuthError(errorMessage || 'Session expired', res.status, path);
+      if (!suppressAuthEvent && !authExpiredDispatched && typeof window !== 'undefined') {
+        authExpiredDispatched = true;
+        window.dispatchEvent(
+          new CustomEvent(AUTH_EXPIRED_EVENT, {
+            detail: { path, status: res.status, message: authError.message },
+          }),
+        );
+      }
+      throw authError;
+    }
+    const error = new Error(errorMessage || `API error: ${res.status}`);
+    error.status = res.status;
+    throw error;
   }
   const text = await res.text();
   if (!text) return null;
@@ -132,19 +163,22 @@ async function fetchJSON(path, options = {}) {
 }
 
 export async function login(username, password) {
-  return fetchJSON('/auth/login', {
+  const user = await fetchJSON('/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
+    suppressAuthEvent: true,
   });
+  resetAuthExpiredSignal();
+  return user;
 }
 
 export async function logout() {
-  return fetchJSON('/auth/logout', { method: 'POST' });
+  return fetchJSON('/auth/logout', { method: 'POST', suppressAuthEvent: true });
 }
 
 export async function getCurrentUser() {
-  return fetchJSON('/auth/me');
+  return fetchJSON('/auth/me', { suppressAuthEvent: true });
 }
 
 export async function getUsers() {
@@ -176,6 +210,11 @@ export async function getSessions() {
   return fetchJSON('/sessions');
 }
 
+/** @returns {Promise<Session>} */
+export async function getSession(sessionId) {
+  return fetchJSON(`/sessions/${encodeURIComponent(sessionId)}`);
+}
+
 /**
  * @param {string} sessionId
  * @param {number} limit
@@ -200,12 +239,7 @@ export async function getPages(
   return fetchJSON(url);
 }
 
-export async function getPageIssues(
-  sessionId,
-  limit = DEFAULT_LIMIT,
-  offset = 0,
-  filters = {},
-) {
+export async function getPageIssues(sessionId, limit = DEFAULT_LIMIT, offset = 0, filters = {}) {
   let url = `/sessions/${sessionId}/page-issues?limit=${limit}&offset=${offset}`;
   for (const [k, v] of Object.entries(filters)) {
     if (v !== '' && v != null) url += `&${k}=${encodeURIComponent(v)}`;
@@ -275,6 +309,36 @@ export async function getStats(sessionId) {
  */
 export async function getAudit(sessionId) {
   return fetchJSON(`/sessions/${encodeURIComponent(sessionId)}/audit`);
+}
+
+/**
+ * Returns page-level Core Web Vitals lab data and an unfiltered crawl summary.
+ * @param {string} sessionId
+ * @param {number} limit
+ * @param {number} offset
+ * @param {string} rating
+ * @param {string} sort
+ * @param {string} order
+ * @returns {Promise<{summary: Object, pages: Object[], total: number}>}
+ */
+export async function getCoreWebVitals(
+  sessionId,
+  limit = 50,
+  offset = 0,
+  rating = '',
+  sort = 'overall',
+  order = 'desc',
+) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+    rating,
+    sort,
+    order,
+  });
+  return fetchJSON(
+    `/sessions/${encodeURIComponent(sessionId)}/core-web-vitals?${params.toString()}`,
+  );
 }
 
 /**
@@ -424,6 +488,14 @@ export async function recomputeDepths(sessionId) {
  */
 export async function computePageRank(sessionId) {
   return fetchJSON(`/sessions/${sessionId}/compute-pagerank`, { method: 'POST' });
+}
+
+export async function deletePages(sessionId, urls) {
+  return fetchJSON(`/sessions/${sessionId}/delete-pages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ urls, confirm: true }),
+  });
 }
 
 /**
@@ -687,6 +759,22 @@ export async function updateProjectDeltaSettings(projectId, settings) {
   });
 }
 
+export async function getProjectPageRankRecomputeStatus(projectId) {
+  return fetchJSON(`/projects/${projectId}/pagerank/recompute-status`);
+}
+
+export async function getProjectOrphan404CleanupPreview(projectId, limit = 5000) {
+  return fetchJSON(`/projects/${projectId}/orphan-404-cleanup/preview?limit=${limit}`);
+}
+
+export async function cleanupProjectOrphan404s(projectId, limit = 5000) {
+  return fetchJSON(`/projects/${projectId}/orphan-404-cleanup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: true, limit }),
+  });
+}
+
 export async function getProjectDeltaPreview(projectId) {
   return fetchJSON(`/projects/${projectId}/delta/preview`);
 }
@@ -701,6 +789,10 @@ export async function addProjectDeltaManualURLs(projectId, urls) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ urls }),
   });
+}
+
+export async function getProjectCurrentSnapshot(projectId) {
+  return fetchJSON(`/projects/${projectId}/current-snapshot`);
 }
 
 export async function getProjectQualitySettings(projectId) {
@@ -741,6 +833,39 @@ export async function deleteProjectCanary(projectId, canaryId) {
 
 export async function getSessionQuality(sessionId) {
   return fetchJSON(`/sessions/${sessionId}/quality`);
+}
+
+/**
+ * Returns every immutable quality evaluation for a session, newest first.
+ * @param {string} sessionId
+ * @returns {Promise<Array<Object>>}
+ */
+export async function getSessionQualityHistory(sessionId) {
+  return fetchJSON(`/sessions/${encodeURIComponent(sessionId)}/quality/history`);
+}
+
+/**
+ * Returns the most recent PageRank lifecycle evidence for a session.
+ * @param {string} sessionId
+ * @returns {Promise<Object>}
+ */
+export async function getSessionPageRankEvidence(sessionId) {
+  return fetchJSON(`/sessions/${encodeURIComponent(sessionId)}/pagerank/evidence`);
+}
+
+/**
+ * Deterministically re-evaluates a completed session against finalized
+ * PageRank evidence. This never starts a crawl or recomputes PageRank.
+ * @param {string} sessionId
+ * @param {{confirm: boolean, reason: string, expected_evaluation_revision?: string, expected_pagerank_evidence_revision?: string}} request
+ * @returns {Promise<{changed: boolean, promotion_changed: boolean, result: Object, evidence: Object, promotion: Object}>}
+ */
+export async function reevaluateSessionQuality(sessionId, request) {
+  return fetchJSON(`/sessions/${encodeURIComponent(sessionId)}/quality/re-evaluate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
 }
 
 /**
@@ -1396,11 +1521,23 @@ export async function getInterlinkingOpportunities(
   return fetchJSON(url);
 }
 
-export async function simulateInterlinking(sessionId, links) {
+export async function simulateInterlinking(sessionId, links, removeLinks = []) {
   return fetchJSON(`/sessions/${sessionId}/simulate-interlinking`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ links }),
+    body: JSON.stringify({ links, remove_links: removeLinks }),
+  });
+}
+
+export async function simulateProjectCurrentSnapshotInterlinking(
+  projectId,
+  links,
+  removeLinks = [],
+) {
+  return fetchJSON(`/projects/${projectId}/current-snapshot/simulate-interlinking`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ links, remove_links: removeLinks }),
   });
 }
 
@@ -1423,10 +1560,18 @@ export async function getInterlinkingSimulation(
   offset = 0,
   sort = '',
   order = '',
+  filters = {},
+  options = {},
 ) {
   let url = `/sessions/${sessionId}/interlinking-simulations/${simId}?limit=${limit}&offset=${offset}`;
   if (sort) url += `&sort=${encodeURIComponent(sort)}`;
   if (order) url += `&order=${encodeURIComponent(order)}`;
+  if (options.htmlOnly) url += '&html_only=true';
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== '' && value != null) {
+      url += `&${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+    }
+  }
   return fetchJSON(url);
 }
 

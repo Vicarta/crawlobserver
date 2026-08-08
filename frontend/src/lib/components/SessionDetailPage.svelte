@@ -25,6 +25,7 @@
     initialOffset = 0,
     initialDetailUrl = '',
     initialSubView = null,
+    initialNestedSubView = null,
     onerror,
     onstop,
     onresume,
@@ -34,6 +35,7 @@
     oncompare,
     onnavigate,
     ongohome,
+    isAdmin = false,
   } = $props();
 
   let tab = $state(initialTab);
@@ -198,12 +200,14 @@
         onnavigate={(url) => onnavigate?.(url)}
         onerror={(msg) => onerror?.(msg)}
         onopenhtml={openHtmlModal}
+        {isAdmin}
       />
     {:else if tab === 'links'}
       <LinksExplorer
         sessionId={session.ID}
         projectId={session.ProjectID}
         initialSubView={subView || 'internal'}
+        {initialNestedSubView}
         {initialFilters}
         {initialOffset}
         onpushurl={(u) => pushURL(u)}

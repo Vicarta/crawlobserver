@@ -15,6 +15,7 @@
     sessionId,
     projectId = null,
     initialSubView = 'internal',
+    initialNestedSubView = null,
     initialFilters = {},
     initialOffset = 0,
     onpushurl,
@@ -272,6 +273,8 @@
   {:else if subView === 'external'}
     <ExternalChecksTab
       {sessionId}
+      initialSubView={initialNestedSubView || 'links'}
+      initialFilters={initialFilters}
       basePath={`/sessions/${sessionId}/links/external`}
       onpushurl={(u) => onpushurl?.(u)}
       onnavigate={(url) => onnavigate?.(url)}

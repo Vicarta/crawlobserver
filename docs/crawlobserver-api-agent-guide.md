@@ -118,6 +118,14 @@ title=fragment
 content_type=text/html
 ```
 
+For any text filter, prefix the value with `!` to exclude matching rows. The
+predicate runs on the server before pagination and export:
+
+```text
+url=!/cdn-cgi/
+title=!draft
+```
+
 Example: list 404 pages:
 
 ```bash
@@ -146,6 +154,25 @@ All links:
 curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
   "https://crawlobserver.example.com/api/sessions/{session_id}/links?limit=100&offset=0"
 ```
+
+This endpoint is the source of truth for outbound-link auditing. Every row is
+one `SourceURL -> TargetURL` edge and includes `AnchorText`, `Rel`, `Tag`, and
+`LinkLocation`. To exclude a destination pattern, for example:
+
+```text
+target_url=!facebook.com
+```
+
+Read one session or snapshot directly:
+
+```bash
+curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
+  "https://crawlobserver.example.com/api/sessions/{session_id}"
+```
+
+Use this endpoint when the ID is a `Current Snapshot` or `Current Baseline Snapshot`.
+Those synthetic snapshots are intentionally omitted from `GET /sessions` but remain
+available for direct reads when the caller has access to the owning project.
 
 External link checks:
 
@@ -374,6 +401,30 @@ Use this after site fixes when only selected URLs need fresh status, title, meta
 Daily Delta Crawl is project-level. It checks configured candidate sources, starts a new bounded delta crawl session, and preserves previous sessions.
 Candidate limits are split between known changed/problem/stale URLs and new URLs. The crawler also follows internal links discovered from launched candidates within the configured scope, discovery depth, and discovered-page budget. Manual queue URLs are marked consumed only when they are actually launched.
 
+When the Sitemap source is enabled, preview, manual runs, and scheduled runs fetch the sitemap at plan time. They do not use an old Current Snapshot sitemap as the normal candidate source. The preview and the launched session contain `sitemap_refresh` metadata:
+
+```json
+{
+  "mode": "fresh",
+  "fetched_at": "2026-07-16T12:00:00Z",
+  "fresh_url_count": 4031,
+  "snapshot_url_count": 4016,
+  "added_count": 23,
+  "removed_count": 8,
+  "invalid_entry_count": 0,
+  "declared_sitemap_urls": ["https://example.com/sitemap.xml"],
+  "warnings": []
+}
+```
+
+`mode` is one of:
+
+- `fresh`: complete sitemap observation; only these sitemap URLs are candidates.
+- `skipped`: sitemap refresh was unavailable or incomplete, so the sitemap source contributed no URLs.
+- `snapshot_fallback`: an admin explicitly enabled fallback; historical sitemap URLs may be used, but they are not fresh and never replace Current Snapshot sitemap membership.
+
+Agents must not describe `skipped` or `snapshot_fallback` data as a current sitemap view. A URL that has disappeared from a fresh sitemap is not reintroduced merely because an older snapshot contains it. Raw sitemap `<loc>` evidence is returned with pages as `SitemapSourceURL` and `SitemapRawLoc`; agents must show it as received and must not silently repair literal spaces or malformed URL content.
+
 Read settings:
 
 ```bash
@@ -529,6 +580,7 @@ https://crawlobserver.example.com/api
 | `GET` | `/server-info` | Public API metadata. |
 | `GET` | `/projects` | List visible projects. |
 | `GET` | `/sessions` | List visible sessions. |
+| `GET` | `/sessions/{id}` | One session, including a synthetic current or baseline snapshot. |
 | `GET` | `/sessions/{id}/stats` | Session summary. |
 | `GET` | `/sessions/{id}/pages` | Crawled pages. |
 | `GET` | `/sessions/{id}/page-detail?url=` | One page detail. |

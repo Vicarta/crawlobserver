@@ -37,6 +37,7 @@ type ProjectDeltaSettings struct {
 	SourceProblemPages                       bool        `json:"source_problem_pages"`
 	SourceStalePages                         bool        `json:"source_stale_pages"`
 	SourceManualQueue                        bool        `json:"source_manual_queue"`
+	SitemapRefreshFailureMode                string      `json:"sitemap_refresh_failure_mode"`
 	StaleAfterDays                           int         `json:"stale_after_days"`
 	MaxCandidatesPerRun                      int         `json:"max_candidates_per_run"`
 	MaxChangedPagesPerRun                    int         `json:"max_changed_pages_per_run"`
@@ -51,7 +52,11 @@ type ProjectDeltaSettings struct {
 	RetryCount                               int         `json:"retry_count"`
 	RetryBackoffSeconds                      int         `json:"retry_backoff_seconds"`
 	RecomputePageRankWhenGraphChanged        bool        `json:"recompute_pagerank_when_graph_changed"`
+	IncludeFooterLinksInPageRank             bool        `json:"include_footer_links_in_pagerank"`
+	FooterSelectorPatterns                   StringSlice `json:"footer_selector_patterns"`
 	KeepDeltaHistoryDays                     int         `json:"keep_delta_history_days"`
+	CurrentSnapshotMaxDeltas                 int         `json:"current_snapshot_max_deltas"`
+	CurrentSnapshotBaselineIntervalDays      int         `json:"current_snapshot_baseline_interval_days"`
 	CanonicalHostPolicy                      string      `json:"canonical_host_policy"`
 	NormalizeTrailingSlash                   bool        `json:"normalize_trailing_slash"`
 	StripFragments                           bool        `json:"strip_fragments"`
@@ -59,6 +64,7 @@ type ProjectDeltaSettings struct {
 	AllowedQueryParams                       StringSlice `json:"allowed_query_params"`
 	BlockedURLPatterns                       StringSlice `json:"blocked_url_patterns"`
 	AllowedURLPatterns                       StringSlice `json:"allowed_url_patterns"`
+	Orphan404CleanupDays                     int         `json:"orphan_404_cleanup_days"`
 	RequireConfirmationOnScopeChange         bool        `json:"require_confirmation_on_scope_change"`
 	RequireConfirmationOnFullRecrawl         bool        `json:"require_confirmation_on_full_recrawl"`
 	NeverDeletePreviousSnapshotBeforeSuccess bool        `json:"never_delete_previous_snapshot_before_success"`
@@ -71,6 +77,32 @@ type ProjectDeltaSettings struct {
 }
 
 type StringSlice []string
+
+const (
+	SitemapRefreshFailureModeSkip             = "skip"
+	SitemapRefreshFailureModeSnapshotFallback = "snapshot_fallback"
+)
+
+func validateSitemapRefreshFailureMode(mode string) error {
+	if mode == "" || mode == SitemapRefreshFailureModeSkip || mode == SitemapRefreshFailureModeSnapshotFallback {
+		return nil
+	}
+	return fmt.Errorf("invalid sitemap_refresh_failure_mode %q: must be %q or %q", mode, SitemapRefreshFailureModeSkip, SitemapRefreshFailureModeSnapshotFallback)
+}
+
+func (s *ProjectDeltaSettings) UnmarshalJSON(data []byte) error {
+	type projectDeltaSettingsAlias ProjectDeltaSettings
+
+	var decoded projectDeltaSettingsAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if err := validateSitemapRefreshFailureMode(decoded.SitemapRefreshFailureMode); err != nil {
+		return err
+	}
+	*s = ProjectDeltaSettings(decoded)
+	return nil
+}
 
 func (s StringSlice) Value() (driver.Value, error) {
 	if s == nil {
@@ -266,6 +298,7 @@ func NewStore(dbPath string) (*Store, error) {
 			source_problem_pages INTEGER NOT NULL DEFAULT 1,
 			source_stale_pages INTEGER NOT NULL DEFAULT 1,
 			source_manual_queue INTEGER NOT NULL DEFAULT 1,
+			sitemap_refresh_failure_mode TEXT NOT NULL DEFAULT 'skip',
 			stale_after_days INTEGER NOT NULL DEFAULT 30,
 			max_candidates_per_run INTEGER NOT NULL DEFAULT 5000,
 			max_changed_pages_per_run INTEGER NOT NULL DEFAULT 1000,
@@ -280,7 +313,11 @@ func NewStore(dbPath string) (*Store, error) {
 			retry_count INTEGER NOT NULL DEFAULT 2,
 			retry_backoff_seconds INTEGER NOT NULL DEFAULT 10,
 			recompute_pagerank_when_graph_changed INTEGER NOT NULL DEFAULT 1,
+			include_footer_links_in_pagerank INTEGER NOT NULL DEFAULT 1,
+			footer_selector_patterns TEXT NOT NULL DEFAULT '[]',
 			keep_delta_history_days INTEGER NOT NULL DEFAULT 90,
+			current_snapshot_max_deltas INTEGER NOT NULL DEFAULT 14,
+			current_snapshot_baseline_interval_days INTEGER NOT NULL DEFAULT 30,
 			canonical_host_policy TEXT NOT NULL DEFAULT 'project',
 			normalize_trailing_slash INTEGER NOT NULL DEFAULT 1,
 			strip_fragments INTEGER NOT NULL DEFAULT 1,
@@ -288,6 +325,7 @@ func NewStore(dbPath string) (*Store, error) {
 			allowed_query_params TEXT NOT NULL DEFAULT '[]',
 			blocked_url_patterns TEXT NOT NULL DEFAULT '[]',
 			allowed_url_patterns TEXT NOT NULL DEFAULT '[]',
+			orphan_404_cleanup_days INTEGER NOT NULL DEFAULT 30,
 			require_confirmation_on_scope_change INTEGER NOT NULL DEFAULT 1,
 			require_confirmation_on_full_recrawl INTEGER NOT NULL DEFAULT 1,
 			never_delete_previous_snapshot_before_success INTEGER NOT NULL DEFAULT 1,
@@ -301,6 +339,17 @@ func NewStore(dbPath string) (*Store, error) {
 	`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("creating project_delta_settings table: %w", err)
+	}
+
+	for _, col := range []string{
+		"ALTER TABLE project_delta_settings ADD COLUMN include_footer_links_in_pagerank INTEGER NOT NULL DEFAULT 1",
+		"ALTER TABLE project_delta_settings ADD COLUMN footer_selector_patterns TEXT NOT NULL DEFAULT '[]'",
+		"ALTER TABLE project_delta_settings ADD COLUMN current_snapshot_max_deltas INTEGER NOT NULL DEFAULT 14",
+		"ALTER TABLE project_delta_settings ADD COLUMN current_snapshot_baseline_interval_days INTEGER NOT NULL DEFAULT 30",
+		"ALTER TABLE project_delta_settings ADD COLUMN orphan_404_cleanup_days INTEGER NOT NULL DEFAULT 30",
+		"ALTER TABLE project_delta_settings ADD COLUMN sitemap_refresh_failure_mode TEXT NOT NULL DEFAULT 'skip'",
+	} {
+		db.Exec(col) // ignore duplicate column errors
 	}
 
 	if _, err := db.Exec(`
@@ -330,6 +379,8 @@ func NewStore(dbPath string) (*Store, error) {
 			internal_links_min_delta INTEGER NOT NULL DEFAULT 500,
 			status_404_percent REAL NOT NULL DEFAULT 10,
 			status_404_min_delta INTEGER NOT NULL DEFAULT 25,
+			status_5xx_percent REAL NOT NULL DEFAULT 5,
+			status_5xx_min_delta INTEGER NOT NULL DEFAULT 5,
 			noindex_percent REAL NOT NULL DEFAULT 10,
 			noindex_min_delta INTEGER NOT NULL DEFAULT 25,
 			redirect_percent REAL NOT NULL DEFAULT 15,
@@ -340,11 +391,37 @@ func NewStore(dbPath string) (*Store, error) {
 			pagerank_top_overlap_min_percent REAL NOT NULL DEFAULT 50,
 			pagerank_zero_top_pages_max INTEGER NOT NULL DEFAULT 2,
 			canary_min_internal_links_default INTEGER NOT NULL DEFAULT 1,
+			delta_min_crawled_pages INTEGER NOT NULL DEFAULT 5,
+			delta_min_crawled_percent REAL NOT NULL DEFAULT 50,
+			delta_min_launched_candidates INTEGER NOT NULL DEFAULT 0,
+			delta_min_launched_percent REAL NOT NULL DEFAULT 0,
+			delta_min_sitemap_candidates INTEGER NOT NULL DEFAULT 1,
+			delta_min_sitemap_percent REAL NOT NULL DEFAULT 30,
+			delta_candidate_coverage_percent REAL NOT NULL DEFAULT 100,
+			delta_status_5xx_percent REAL NOT NULL DEFAULT 5,
+			delta_status_5xx_min_pages INTEGER NOT NULL DEFAULT 5,
+			delta_require_canaries INTEGER NOT NULL DEFAULT 0,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
 	`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("creating project_quality_settings table: %w", err)
+	}
+	for _, col := range []string{
+		"ALTER TABLE project_quality_settings ADD COLUMN delta_min_crawled_pages INTEGER NOT NULL DEFAULT 5",
+		"ALTER TABLE project_quality_settings ADD COLUMN delta_min_crawled_percent REAL NOT NULL DEFAULT 50",
+		"ALTER TABLE project_quality_settings ADD COLUMN delta_min_launched_candidates INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE project_quality_settings ADD COLUMN delta_min_launched_percent REAL NOT NULL DEFAULT 0",
+		"ALTER TABLE project_quality_settings ADD COLUMN delta_min_sitemap_candidates INTEGER NOT NULL DEFAULT 1",
+		"ALTER TABLE project_quality_settings ADD COLUMN delta_min_sitemap_percent REAL NOT NULL DEFAULT 30",
+		"ALTER TABLE project_quality_settings ADD COLUMN delta_candidate_coverage_percent REAL NOT NULL DEFAULT 100",
+		"ALTER TABLE project_quality_settings ADD COLUMN status_5xx_percent REAL NOT NULL DEFAULT 5",
+		"ALTER TABLE project_quality_settings ADD COLUMN status_5xx_min_delta INTEGER NOT NULL DEFAULT 5",
+		"ALTER TABLE project_quality_settings ADD COLUMN delta_status_5xx_percent REAL NOT NULL DEFAULT 5",
+		"ALTER TABLE project_quality_settings ADD COLUMN delta_status_5xx_min_pages INTEGER NOT NULL DEFAULT 5",
+		"ALTER TABLE project_quality_settings ADD COLUMN delta_require_canaries INTEGER NOT NULL DEFAULT 0",
+	} {
+		db.Exec(col) // ignore duplicate column errors
 	}
 
 	if _, err := db.Exec(`
@@ -584,6 +661,7 @@ func DefaultProjectDeltaSettings(projectID string) ProjectDeltaSettings {
 		SourceProblemPages:                       true,
 		SourceStalePages:                         true,
 		SourceManualQueue:                        true,
+		SitemapRefreshFailureMode:                SitemapRefreshFailureModeSkip,
 		StaleAfterDays:                           30,
 		MaxCandidatesPerRun:                      5000,
 		MaxChangedPagesPerRun:                    1000,
@@ -598,7 +676,11 @@ func DefaultProjectDeltaSettings(projectID string) ProjectDeltaSettings {
 		RetryCount:                               2,
 		RetryBackoffSeconds:                      10,
 		RecomputePageRankWhenGraphChanged:        true,
+		IncludeFooterLinksInPageRank:             true,
+		FooterSelectorPatterns:                   []string{},
 		KeepDeltaHistoryDays:                     90,
+		CurrentSnapshotMaxDeltas:                 14,
+		CurrentSnapshotBaselineIntervalDays:      30,
 		CanonicalHostPolicy:                      "project",
 		NormalizeTrailingSlash:                   true,
 		StripFragments:                           true,
@@ -606,6 +688,7 @@ func DefaultProjectDeltaSettings(projectID string) ProjectDeltaSettings {
 		AllowedQueryParams:                       []string{},
 		BlockedURLPatterns:                       []string{},
 		AllowedURLPatterns:                       []string{},
+		Orphan404CleanupDays:                     30,
 		RequireConfirmationOnScopeChange:         true,
 		RequireConfirmationOnFullRecrawl:         true,
 		NeverDeletePreviousSnapshotBeforeSuccess: true,
@@ -618,6 +701,9 @@ func DefaultProjectDeltaSettings(projectID string) ProjectDeltaSettings {
 
 func sanitizeDeltaSettings(in ProjectDeltaSettings) ProjectDeltaSettings {
 	out := in
+	if out.SitemapRefreshFailureMode != SitemapRefreshFailureModeSnapshotFallback {
+		out.SitemapRefreshFailureMode = SitemapRefreshFailureModeSkip
+	}
 	if out.ScheduleTime == "" {
 		out.ScheduleTime = "03:00"
 	}
@@ -657,6 +743,12 @@ func sanitizeDeltaSettings(in ProjectDeltaSettings) ProjectDeltaSettings {
 	if out.KeepDeltaHistoryDays <= 0 {
 		out.KeepDeltaHistoryDays = 90
 	}
+	if out.CurrentSnapshotMaxDeltas <= 0 {
+		out.CurrentSnapshotMaxDeltas = 14
+	}
+	if out.CurrentSnapshotBaselineIntervalDays <= 0 {
+		out.CurrentSnapshotBaselineIntervalDays = 30
+	}
 	if out.CanonicalHostPolicy == "" {
 		out.CanonicalHostPolicy = "project"
 	}
@@ -675,6 +767,12 @@ func sanitizeDeltaSettings(in ProjectDeltaSettings) ProjectDeltaSettings {
 	if out.AllowedURLPatterns == nil {
 		out.AllowedURLPatterns = []string{}
 	}
+	if out.Orphan404CleanupDays <= 0 {
+		out.Orphan404CleanupDays = 30
+	}
+	if out.FooterSelectorPatterns == nil {
+		out.FooterSelectorPatterns = []string{}
+	}
 	return out
 }
 
@@ -683,12 +781,16 @@ func (s *Store) GetProjectDeltaSettings(projectID string) (*ProjectDeltaSettings
 	row := s.db.QueryRow(`
 		SELECT project_id, enabled, schedule_time, timezone,
 			source_sitemap, source_gsc, source_problem_pages, source_stale_pages, source_manual_queue,
+			sitemap_refresh_failure_mode,
 			stale_after_days, max_candidates_per_run, max_changed_pages_per_run, max_new_pages_per_run,
 			max_discovered_pages_per_run, max_discovery_depth, respect_robots_txt, use_conditional_requests,
 			fallback_to_get_when_head_fails, enable_js_rendering_for_delta, rate_limit_requests_per_second,
-			retry_count, retry_backoff_seconds, recompute_pagerank_when_graph_changed, keep_delta_history_days,
+			retry_count, retry_backoff_seconds, recompute_pagerank_when_graph_changed,
+			include_footer_links_in_pagerank, footer_selector_patterns, keep_delta_history_days,
+			current_snapshot_max_deltas, current_snapshot_baseline_interval_days,
 			canonical_host_policy, normalize_trailing_slash, strip_fragments, strip_tracking_params,
 			allowed_query_params, blocked_url_patterns, allowed_url_patterns,
+			orphan_404_cleanup_days,
 			require_confirmation_on_scope_change, require_confirmation_on_full_recrawl,
 			never_delete_previous_snapshot_before_success, pause_delta_when_full_crawl_running,
 			max_runtime_minutes, on_limit_reached, last_run_at, last_session_id, updated_at
@@ -696,18 +798,21 @@ func (s *Store) GetProjectDeltaSettings(projectID string) (*ProjectDeltaSettings
 
 	var st ProjectDeltaSettings
 	var enabled, sourceSitemap, sourceGSC, sourceProblemPages, sourceStalePages, sourceManualQueue int
-	var respectRobots, useConditional, fallbackGet, recomputePR int
+	var respectRobots, useConditional, fallbackGet, recomputePR, includeFooterPR int
 	var normalizeSlash, stripFragments, stripTracking int
 	var requireScopeConfirm, requireRecrawlConfirm, neverDelete, pauseWhenFull int
 	if err := row.Scan(
 		&st.ProjectID, &enabled, &st.ScheduleTime, &st.Timezone,
 		&sourceSitemap, &sourceGSC, &sourceProblemPages, &sourceStalePages, &sourceManualQueue,
+		&st.SitemapRefreshFailureMode,
 		&st.StaleAfterDays, &st.MaxCandidatesPerRun, &st.MaxChangedPagesPerRun, &st.MaxNewPagesPerRun,
 		&st.MaxDiscoveredPagesPerRun, &st.MaxDiscoveryDepth, &respectRobots, &useConditional,
 		&fallbackGet, &st.EnableJSRenderingForDelta, &st.RateLimitRequestsPerSecond,
-		&st.RetryCount, &st.RetryBackoffSeconds, &recomputePR, &st.KeepDeltaHistoryDays,
+		&st.RetryCount, &st.RetryBackoffSeconds, &recomputePR, &includeFooterPR, &st.FooterSelectorPatterns, &st.KeepDeltaHistoryDays,
+		&st.CurrentSnapshotMaxDeltas, &st.CurrentSnapshotBaselineIntervalDays,
 		&st.CanonicalHostPolicy, &normalizeSlash, &stripFragments, &stripTracking,
 		&st.AllowedQueryParams, &st.BlockedURLPatterns, &st.AllowedURLPatterns,
+		&st.Orphan404CleanupDays,
 		&requireScopeConfirm, &requireRecrawlConfirm, &neverDelete, &pauseWhenFull,
 		&st.MaxRuntimeMinutes, &st.OnLimitReached, &st.LastRunAt, &st.LastSessionID, &st.UpdatedAt,
 	); err != nil {
@@ -726,6 +831,7 @@ func (s *Store) GetProjectDeltaSettings(projectID string) (*ProjectDeltaSettings
 	st.UseConditionalRequests = useConditional != 0
 	st.FallbackToGetWhenHeadFails = fallbackGet != 0
 	st.RecomputePageRankWhenGraphChanged = recomputePR != 0
+	st.IncludeFooterLinksInPageRank = includeFooterPR != 0
 	st.NormalizeTrailingSlash = normalizeSlash != 0
 	st.StripFragments = stripFragments != 0
 	st.StripTrackingParams = stripTracking != 0
@@ -733,6 +839,7 @@ func (s *Store) GetProjectDeltaSettings(projectID string) (*ProjectDeltaSettings
 	st.RequireConfirmationOnFullRecrawl = requireRecrawlConfirm != 0
 	st.NeverDeletePreviousSnapshotBeforeSuccess = neverDelete != 0
 	st.PauseDeltaWhenFullCrawlRunning = pauseWhenFull != 0
+	st = sanitizeDeltaSettings(st)
 	return &st, nil
 }
 
@@ -740,22 +847,29 @@ func (s *Store) SaveProjectDeltaSettings(settings ProjectDeltaSettings) (*Projec
 	if settings.ProjectID == "" {
 		return nil, fmt.Errorf("project_id is required")
 	}
+	if err := validateSitemapRefreshFailureMode(settings.SitemapRefreshFailureMode); err != nil {
+		return nil, err
+	}
 	settings = sanitizeDeltaSettings(settings)
 	now := time.Now().UTC()
 	_, err := s.db.Exec(`
 		INSERT INTO project_delta_settings (
 			project_id, enabled, schedule_time, timezone,
 			source_sitemap, source_gsc, source_problem_pages, source_stale_pages, source_manual_queue,
+			sitemap_refresh_failure_mode,
 			stale_after_days, max_candidates_per_run, max_changed_pages_per_run, max_new_pages_per_run,
 			max_discovered_pages_per_run, max_discovery_depth, respect_robots_txt, use_conditional_requests,
 			fallback_to_get_when_head_fails, enable_js_rendering_for_delta, rate_limit_requests_per_second,
-			retry_count, retry_backoff_seconds, recompute_pagerank_when_graph_changed, keep_delta_history_days,
+			retry_count, retry_backoff_seconds, recompute_pagerank_when_graph_changed,
+			include_footer_links_in_pagerank, footer_selector_patterns, keep_delta_history_days,
+			current_snapshot_max_deltas, current_snapshot_baseline_interval_days,
 			canonical_host_policy, normalize_trailing_slash, strip_fragments, strip_tracking_params,
 			allowed_query_params, blocked_url_patterns, allowed_url_patterns,
+			orphan_404_cleanup_days,
 			require_confirmation_on_scope_change, require_confirmation_on_full_recrawl,
 			never_delete_previous_snapshot_before_success, pause_delta_when_full_crawl_running,
 			max_runtime_minutes, on_limit_reached, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id) DO UPDATE SET
 			enabled = excluded.enabled,
 			schedule_time = excluded.schedule_time,
@@ -765,6 +879,7 @@ func (s *Store) SaveProjectDeltaSettings(settings ProjectDeltaSettings) (*Projec
 			source_problem_pages = excluded.source_problem_pages,
 			source_stale_pages = excluded.source_stale_pages,
 			source_manual_queue = excluded.source_manual_queue,
+			sitemap_refresh_failure_mode = excluded.sitemap_refresh_failure_mode,
 			stale_after_days = excluded.stale_after_days,
 			max_candidates_per_run = excluded.max_candidates_per_run,
 			max_changed_pages_per_run = excluded.max_changed_pages_per_run,
@@ -779,7 +894,11 @@ func (s *Store) SaveProjectDeltaSettings(settings ProjectDeltaSettings) (*Projec
 			retry_count = excluded.retry_count,
 			retry_backoff_seconds = excluded.retry_backoff_seconds,
 			recompute_pagerank_when_graph_changed = excluded.recompute_pagerank_when_graph_changed,
+			include_footer_links_in_pagerank = excluded.include_footer_links_in_pagerank,
+			footer_selector_patterns = excluded.footer_selector_patterns,
 			keep_delta_history_days = excluded.keep_delta_history_days,
+			current_snapshot_max_deltas = excluded.current_snapshot_max_deltas,
+			current_snapshot_baseline_interval_days = excluded.current_snapshot_baseline_interval_days,
 			canonical_host_policy = excluded.canonical_host_policy,
 			normalize_trailing_slash = excluded.normalize_trailing_slash,
 			strip_fragments = excluded.strip_fragments,
@@ -787,6 +906,7 @@ func (s *Store) SaveProjectDeltaSettings(settings ProjectDeltaSettings) (*Projec
 			allowed_query_params = excluded.allowed_query_params,
 			blocked_url_patterns = excluded.blocked_url_patterns,
 			allowed_url_patterns = excluded.allowed_url_patterns,
+			orphan_404_cleanup_days = excluded.orphan_404_cleanup_days,
 			require_confirmation_on_scope_change = excluded.require_confirmation_on_scope_change,
 			require_confirmation_on_full_recrawl = excluded.require_confirmation_on_full_recrawl,
 			never_delete_previous_snapshot_before_success = excluded.never_delete_previous_snapshot_before_success,
@@ -796,12 +916,16 @@ func (s *Store) SaveProjectDeltaSettings(settings ProjectDeltaSettings) (*Projec
 			updated_at = excluded.updated_at`,
 		settings.ProjectID, deltaBoolInt(settings.Enabled), settings.ScheduleTime, settings.Timezone,
 		deltaBoolInt(settings.SourceSitemap), deltaBoolInt(settings.SourceGSC), deltaBoolInt(settings.SourceProblemPages), deltaBoolInt(settings.SourceStalePages), deltaBoolInt(settings.SourceManualQueue),
+		settings.SitemapRefreshFailureMode,
 		settings.StaleAfterDays, settings.MaxCandidatesPerRun, settings.MaxChangedPagesPerRun, settings.MaxNewPagesPerRun,
 		settings.MaxDiscoveredPagesPerRun, settings.MaxDiscoveryDepth, deltaBoolInt(settings.RespectRobotsTxt), deltaBoolInt(settings.UseConditionalRequests),
 		deltaBoolInt(settings.FallbackToGetWhenHeadFails), settings.EnableJSRenderingForDelta, settings.RateLimitRequestsPerSecond,
-		settings.RetryCount, settings.RetryBackoffSeconds, deltaBoolInt(settings.RecomputePageRankWhenGraphChanged), settings.KeepDeltaHistoryDays,
+		settings.RetryCount, settings.RetryBackoffSeconds, deltaBoolInt(settings.RecomputePageRankWhenGraphChanged),
+		deltaBoolInt(settings.IncludeFooterLinksInPageRank), settings.FooterSelectorPatterns, settings.KeepDeltaHistoryDays,
+		settings.CurrentSnapshotMaxDeltas, settings.CurrentSnapshotBaselineIntervalDays,
 		settings.CanonicalHostPolicy, deltaBoolInt(settings.NormalizeTrailingSlash), deltaBoolInt(settings.StripFragments), deltaBoolInt(settings.StripTrackingParams),
 		settings.AllowedQueryParams, settings.BlockedURLPatterns, settings.AllowedURLPatterns,
+		settings.Orphan404CleanupDays,
 		deltaBoolInt(settings.RequireConfirmationOnScopeChange), deltaBoolInt(settings.RequireConfirmationOnFullRecrawl),
 		deltaBoolInt(settings.NeverDeletePreviousSnapshotBeforeSuccess), deltaBoolInt(settings.PauseDeltaWhenFullCrawlRunning),
 		settings.MaxRuntimeMinutes, settings.OnLimitReached, now,

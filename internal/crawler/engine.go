@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"net/http/cookiejar"
 
@@ -95,14 +96,21 @@ type Engine struct {
 
 	excludePatterns []string // URL substrings: if URL contains any, skip fetching
 
-	rescanOnly        bool
-	skipSessionWrites bool
-	rescanMeta        map[string]rescanPageMeta
+	rescanOnly                   bool
+	skipSessionWrites            bool
+	rescanMeta                   map[string]rescanPageMeta
+	includeFooterLinksInPageRank bool
+	footerSelectorPatterns       []string
+	initialSitemaps              []storage.SitemapRow
+	initialSitemapURLs           []storage.SitemapURLRow
 
-	ctx     context.Context
-	cancel  context.CancelFunc
-	done    chan struct{} // closed when workers are drained (before finalization)
-	stopped atomic.Bool   // true when Stop() was called (voluntary stop)
+	ctx      context.Context
+	cancel   context.CancelFunc
+	done     chan struct{} // closed after terminal finalization and status persistence
+	doneOnce sync.Once
+	stopped  atomic.Bool // true when Stop() was called (voluntary stop)
+	stopMu   sync.Mutex
+	stop     config.SessionStopMetadata
 }
 
 type rescanPageMeta struct {
@@ -148,10 +156,11 @@ func NewEngine(cfg *config.Config, store *storage.Store) *Engine {
 			BaseDelay:  cfg.Crawler.Retry.BaseDelay,
 			MaxDelay:   cfg.Crawler.Retry.MaxDelay,
 		},
-		baseDelay: cfg.Crawler.Delay,
-		ctx:       ctx,
-		cancel:    cancel,
-		done:      make(chan struct{}),
+		baseDelay:                    cfg.Crawler.Delay,
+		ctx:                          ctx,
+		cancel:                       cancel,
+		done:                         make(chan struct{}),
+		includeFooterLinksInPageRank: true,
 	}
 }
 
@@ -166,6 +175,15 @@ func (e *Engine) SetSessionID(id string) {
 	if e.session != nil {
 		e.session.ID = id
 	}
+}
+
+// SetInitialSitemapObservation supplies sitemap rows already fetched by the
+// Daily Delta planner. Engine initialization persists them after the session
+// row is durable, so no second sitemap request is needed and preview remains
+// side-effect free.
+func (e *Engine) SetInitialSitemapObservation(sitemaps []storage.SitemapRow, sitemapURLs []storage.SitemapURLRow) {
+	e.initialSitemaps = append([]storage.SitemapRow(nil), sitemaps...)
+	e.initialSitemapURLs = append([]storage.SitemapURLRow(nil), sitemapURLs...)
 }
 
 // ResumeSession prepares the engine to resume an existing session.
@@ -327,7 +345,7 @@ func (e *Engine) isExcluded(targetURL string) bool {
 // Run starts the crawl with the given seed URLs.
 func (e *Engine) Run(seeds []string) error {
 	if err := e.initCrawl(seeds); err != nil {
-		close(e.done)
+		e.signalDone()
 		return err
 	}
 	e.seedFrontier(seeds)
@@ -339,9 +357,19 @@ func (e *Engine) Run(seeds []string) error {
 	e.dispatcher(fetchCh)
 
 	drainWorkers()
-	close(e.done) // signal that crawl pipeline is drained (Stop can return)
-	finalize()
-	return nil
+	return e.runFinalization(finalize)
+}
+
+// runFinalization closes Done only after the terminal finalizer has returned.
+// A terminal session must remain observable as active until PageRank evidence
+// and its status row are durable.
+func (e *Engine) runFinalization(finalizer func() error) error {
+	defer e.signalDone()
+	return finalizer()
+}
+
+func (e *Engine) signalDone() {
+	e.doneOnce.Do(func() { close(e.done) })
 }
 
 // initCrawl prepares the session, buffer, and persists the session row.
@@ -371,6 +399,11 @@ func (e *Engine) initCrawl(seeds []string) error {
 		if err := e.store.InsertSession(e.ctx, e.session.ToStorageRow()); err != nil {
 			return fmt.Errorf("inserting session: %w", err)
 		}
+		if err := e.persistInitialSitemapObservation(); err != nil {
+			e.session.Status = "failed"
+			_ = e.store.InsertSession(e.ctx, e.session.ToStorageRow())
+			return err
+		}
 	}
 
 	// Initialize shared cookie jar so cookies (e.g. cf_clearance) persist across requests
@@ -380,9 +413,9 @@ func (e *Engine) initCrawl(seeds []string) error {
 	e.cfHoldQueue = make(map[string][]*RetryItem)
 	e.cfFailedHosts = make(map[string]time.Time)
 
-	// Initialize JS rendering pool if enabled
+	// CWV lab data requires a browser even when normal JS rendering is disabled.
 	e.renderMode = renderer.ParseDetectionMode(e.cfg.Crawler.JSRender.Mode)
-	if e.renderMode != renderer.ModeOff {
+	if e.renderMode != renderer.ModeOff || e.measureCWV {
 		poolOpts := renderer.PoolOptions{
 			MaxPages:       e.cfg.Crawler.JSRender.MaxPages,
 			PageTimeout:    e.cfg.Crawler.JSRender.PageTimeout,
@@ -397,12 +430,32 @@ func (e *Engine) initCrawl(seeds []string) error {
 		} else {
 			e.renderPool = pool
 			e.renderWorkers = poolOpts.MaxPages
-			applog.Infof("crawler", "JS rendering enabled (mode=%s, workers=%d)", e.renderMode, e.renderWorkers)
+			applog.Infof("crawler", "JS rendering enabled (mode=%s, CWV=%t, workers=%d)", e.renderMode, e.measureCWV, e.renderWorkers)
 		}
 	}
 
 	applog.Infof("crawler", "%s Starting crawl with %d seed(s), %d workers",
 		e.logTag(), len(seeds), e.cfg.Crawler.Workers)
+	return nil
+}
+
+func (e *Engine) persistInitialSitemapObservation() error {
+	if len(e.initialSitemaps) == 0 && len(e.initialSitemapURLs) == 0 {
+		return nil
+	}
+	for i := range e.initialSitemaps {
+		e.initialSitemaps[i].CrawlSessionID = e.session.ID
+	}
+	for i := range e.initialSitemapURLs {
+		e.initialSitemapURLs[i].CrawlSessionID = e.session.ID
+	}
+	if err := e.store.InsertSitemaps(e.ctx, e.initialSitemaps); err != nil {
+		return fmt.Errorf("persisting planned sitemap observation: %w", err)
+	}
+	if err := e.store.InsertSitemapURLs(e.ctx, e.initialSitemapURLs); err != nil {
+		return fmt.Errorf("persisting planned sitemap URLs: %w", err)
+	}
+	applog.Infof("crawler", "%s persisted planned sitemap observation: %d sitemap(s), %d URL(s)", e.logTag(), len(e.initialSitemaps), len(e.initialSitemapURLs))
 	return nil
 }
 
@@ -436,7 +489,7 @@ func (e *Engine) prefetchRobots() {
 
 // startWorkers launches all worker goroutines and returns the pipeline channels
 // along with a shutdown function that must be called after the dispatcher returns.
-func (e *Engine) startWorkers() (chan *frontier.CrawlURL, func(), func()) {
+func (e *Engine) startWorkers() (chan *frontier.CrawlURL, func(), func() error) {
 	fetchCh := make(chan *frontier.CrawlURL, e.cfg.Crawler.Workers)
 	parseCh := make(chan *fetcher.FetchResult, e.cfg.Crawler.Workers)
 
@@ -594,7 +647,7 @@ func (e *Engine) startWorkers() (chan *frontier.CrawlURL, func(), func()) {
 	}
 
 	// finalize runs heavy post-crawl computations (depths, PageRank, session update).
-	finalize := func() {
+	finalize := func() error {
 		bufState := e.buffer.ErrorState()
 		if bufState.LostPages > 0 || bufState.LostLinks > 0 {
 			applog.Warnf("crawler", "%s Crawl ended with data loss: %d pages, %d links dropped",
@@ -602,9 +655,9 @@ func (e *Engine) startWorkers() (chan *frontier.CrawlURL, func(), func()) {
 		}
 		if e.skipSessionWrites {
 			applog.Infof("crawler", "%s Rescan complete; skipped session finalization and analytics recomputation", e.logTag())
-			return
+			return nil
 		}
-		e.finalizeSession(bufState)
+		return e.finalizeSession(bufState)
 	}
 
 	return fetchCh, drainWorkers, finalize
@@ -644,13 +697,38 @@ func (e *Engine) logTag() string {
 
 // Stop gracefully stops the engine.
 func (e *Engine) Stop() {
-	applog.Infof("crawler", "%s Stopping crawl engine...", e.logTag())
+	e.StopWithReason("manual", "Stopped by operator")
+}
+
+// StopWithReason gracefully stops the engine and records why it was stopped.
+func (e *Engine) StopWithReason(reason, message string) {
+	reason = strings.TrimSpace(reason)
+	message = strings.TrimSpace(message)
+	if reason == "" {
+		reason = "manual"
+	}
+	if message == "" {
+		message = "Stopped by operator"
+	}
+	e.stopMu.Lock()
+	if e.stop.Reason == "" || reason == "shutdown" {
+		e.stop = config.SessionStopMetadata{Reason: reason, Message: message, At: time.Now().UTC()}
+	}
+	e.stopMu.Unlock()
+	applog.Infof("crawler", "%s Stopping crawl engine (%s)...", e.logTag(), reason)
 	e.stopped.Store(true)
 	e.cancel()
 	e.front.Close()
 }
 
-// Done returns a channel that is closed when Run() completes.
+func (e *Engine) stopMetadata() config.SessionStopMetadata {
+	e.stopMu.Lock()
+	defer e.stopMu.Unlock()
+	return e.stop
+}
+
+// Done returns a channel that is closed after Run completes terminal
+// finalization and persists its resulting status.
 func (e *Engine) Done() <-chan struct{} {
 	return e.done
 }
@@ -967,16 +1045,18 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 
 		// Parse HTML if applicable
 		if result.IsHTML() && len(result.Body) > 0 && result.Error == "" {
-			pageData, err := parser.Parse(result.Body, result.FinalURL)
+			pageData, err := parser.ParseWithOptions(result.Body, result.FinalURL, parser.ParseOptions{
+				FooterSelectors: e.footerSelectorPatterns,
+			})
 			if err != nil {
 				applog.Warnf("crawler", "Parse error for %s: %v", result.URL, err)
 			} else {
 				pageRow.Title = pageData.Title
-				pageRow.TitleLength = uint16(len(pageData.Title))
+				pageRow.TitleLength = seoTextLength(pageData.Title)
 				pageRow.Canonical = pageData.Canonical
 				pageRow.MetaRobots = pageData.MetaRobots
 				pageRow.MetaDescription = pageData.MetaDescription
-				pageRow.MetaDescLength = uint16(len(pageData.MetaDescription))
+				pageRow.MetaDescLength = seoTextLength(pageData.MetaDescription)
 				pageRow.MetaKeywords = pageData.MetaKeywords
 				pageRow.H1 = pageData.H1
 				pageRow.H2 = pageData.H2
@@ -991,6 +1071,11 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 				pageRow.OGDescription = pageData.OGDescription
 				pageRow.OGImage = pageData.OGImage
 				pageRow.SchemaTypes = pageData.SchemaTypes
+				pageRow.PageCreatedAt = pageData.PublishedAt
+				pageRow.PageModifiedAt = pageData.ModifiedAt
+				if pageRow.PageModifiedAt == nil {
+					pageRow.PageModifiedAt = lastModifiedFromHeaders(result.Headers)
+				}
 
 				// Structured data validation
 				if len(pageData.JSONLDBlocks) > 0 {
@@ -1050,6 +1135,7 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 						Rel:            link.Rel,
 						IsInternal:     link.IsInternal,
 						Tag:            link.Tag,
+						LinkLocation:   link.Location,
 						CrawledAt:      now,
 					})
 
@@ -1087,14 +1173,10 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 				pageRow.InternalLinksOut = internalOut
 				pageRow.ExternalLinksOut = externalOut
 
-				if len(linkRows) > 0 {
-					e.buffer.AddLinks(linkRows)
-				}
-
 				resourceRefs := e.processPageResources(pageRow.URL, pageData.Resources, nil)
 
 				// JS rendering: check if this page needs rendering
-				if e.renderPool != nil && renderer.NeedsRendering(e.renderMode, result.Body, pageData) {
+				if e.renderPool != nil && needsBrowserRender(e.measureCWV, e.renderMode, result.Body, pageData) {
 					ensureNonNilArrays(&pageRow)
 					select {
 					case e.renderCh <- &renderItem{
@@ -1109,12 +1191,35 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 						// Context cancelled, fall through to store static data
 					}
 				}
+
+				if len(linkRows) > 0 {
+					e.buffer.AddLinks(linkRows)
+				}
 			}
 		}
 
 		ensureNonNilArrays(&pageRow)
 		e.buffer.AddPage(pageRow)
 	}
+}
+
+func needsBrowserRender(measureCWV bool, mode renderer.DetectionMode, body []byte, pageData *parser.PageData) bool {
+	return measureCWV || renderer.NeedsRendering(mode, body, pageData)
+}
+
+func lastModifiedFromHeaders(headers map[string]string) *time.Time {
+	for key, value := range headers {
+		if !strings.EqualFold(key, "Last-Modified") {
+			continue
+		}
+		parsed, err := http.ParseTime(strings.TrimSpace(value))
+		if err != nil {
+			return nil
+		}
+		utc := parsed.UTC()
+		return &utc
+	}
+	return nil
 }
 
 // retryDispatcher polls the retry queue and sends ready items to fetchCh.
@@ -1714,47 +1819,65 @@ func (e *Engine) persistRobotsData() {
 	}
 }
 
-// finalizeSession updates session status immediately, then recomputes depths and PageRank.
+// finalizeSession recomputes derived analytics before publishing a terminal status.
 // Uses a dedicated context because the crawl context (e.ctx) may already be cancelled.
-func (e *Engine) finalizeSession(bufState storage.BufferErrorState) {
+func (e *Engine) finalizeSession(bufState storage.BufferErrorState) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	// 1. Determine and persist status FIRST so the UI updates immediately.
-	switch {
-	case e.stopped.Load():
-		e.session.Status = "stopped"
-	case bufState.LostPages > 0 || bufState.LostLinks > 0:
-		e.session.Status = "completed_with_errors"
-	default:
-		e.session.Status = "completed"
-	}
 	if total, err := e.store.CountPages(ctx, e.session.ID); err == nil {
 		e.session.Pages = total
 	} else {
 		e.session.Pages = uint64(e.pagesCrawled.Load())
 	}
-	row := e.session.ToStorageRow()
-	row.FinishedAt = time.Now()
-	if err := e.store.InsertSession(ctx, row); err != nil {
-		applog.Errorf("crawler", "updating session: %v", err)
-	}
+	applog.Infof("crawler", "%s Finalizing %d pages before publishing terminal status...", e.logTag(), e.session.Pages)
 
-	applog.Infof("crawler", "%s Session marked %s (%d pages), computing depths & PageRank...",
-		e.logTag(), e.session.Status, e.session.Pages)
-
-	// 2. Heavy computations run after status is persisted.
 	if err := e.store.RecomputeDepths(ctx, e.session.ID, e.session.SeedURLs); err != nil {
 		applog.Warnf("crawler", "%s depth recomputation failed: %v", e.logTag(), err)
 	}
-	if err := e.store.ComputePageRank(ctx, e.session.ID); err != nil {
-		applog.Warnf("crawler", "%s PageRank computation failed: %v", e.logTag(), err)
+	pageRankErr := e.store.ComputePageRankWithOptions(ctx, e.session.ID, storage.PageRankOptions{
+		IncludeFooterLinks: e.includeFooterLinksInPageRank,
+		FooterSelectors:    append([]string(nil), e.footerSelectorPatterns...),
+	})
+	if pageRankErr != nil {
+		applog.Warnf("crawler", "%s PageRank computation failed: %v", e.logTag(), pageRankErr)
 	}
 	if err := e.store.ComputeNearDuplicates(ctx, e.session.ID); err != nil {
 		applog.Warnf("crawler", "%s near-duplicate computation failed: %v", e.logTag(), err)
 	}
 
-	applog.Infof("crawler", "%s Finalization complete", e.logTag())
+	// Quality evaluation only considers terminal sessions, so publish the status
+	// after PageRank and the other derived fields are ready. Stop state is checked
+	// again here because an operator can stop an engine during finalization.
+	finalStatus := finalizationStatus(e.stopped.Load(), bufState, pageRankErr)
+	if finalStatus == "stopped" {
+		e.session.Stop = e.stopMetadata()
+	}
+	e.session.Status = finalStatus
+	row := e.session.ToStorageRow()
+	row.FinishedAt = time.Now()
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer statusCancel()
+	if err := e.store.InsertSession(statusCtx, row); err != nil {
+		applog.Errorf("crawler", "updating finalized session: %v", err)
+		return fmt.Errorf("persisting finalized session: %w", err)
+	}
+
+	applog.Infof("crawler", "%s Finalization complete; session marked %s", e.logTag(), finalStatus)
+	if pageRankErr != nil && finalStatus != "stopped" {
+		return fmt.Errorf("computing PageRank: %w", pageRankErr)
+	}
+	return nil
+}
+
+func finalizationStatus(stopped bool, bufState storage.BufferErrorState, pageRankErr error) string {
+	if stopped {
+		return "stopped"
+	}
+	if bufState.LostPages > 0 || bufState.LostLinks > 0 || pageRankErr != nil {
+		return "completed_with_errors"
+	}
+	return "completed"
 }
 
 // newCheckClient creates an HTTP client for external/resource check workers.
@@ -1797,15 +1920,12 @@ func (e *Engine) renderWorker(id int, in <-chan *renderItem) {
 			finalURL = item.result.URL
 		}
 
-		// Create a timeout context for rendering
-		renderCtx, renderCancel := context.WithTimeout(e.ctx, e.cfg.Crawler.JSRender.PageTimeout)
 		var renderResult *renderer.RenderResult
 		if e.measureCWV {
-			renderResult = e.renderPool.RenderWithCWV(renderCtx, finalURL)
+			renderResult = e.renderPool.RenderWithCWV(e.ctx, finalURL)
 		} else {
-			renderResult = e.renderPool.Render(renderCtx, finalURL)
+			renderResult = e.renderPool.Render(e.ctx, finalURL)
 		}
-		renderCancel()
 
 		item.pageRow.JSRendered = true
 		item.pageRow.JSRenderDurationMs = uint64(renderResult.RenderDuration.Milliseconds())
@@ -1816,6 +1936,8 @@ func (e *Engine) renderWorker(id int, in <-chan *renderItem) {
 			item.pageRow.CWVLCP = renderResult.CWVLCP
 			item.pageRow.CWVCLS = renderResult.CWVCLS
 			item.pageRow.CWVTTFB = renderResult.CWVTTFB
+		} else if e.measureCWV {
+			applog.Warnf("crawler", "CWV measurement unavailable for %s: %s", finalURL, renderResult.CWVError)
 		}
 
 		if renderResult.Error != nil {
@@ -1823,7 +1945,9 @@ func (e *Engine) renderWorker(id int, in <-chan *renderItem) {
 			applog.Warnf("crawler", "Render error for %s: %v", finalURL, renderResult.Error)
 		} else {
 			// Re-parse rendered HTML
-			renderedData, err := parser.Parse([]byte(renderResult.RenderedHTML), finalURL)
+			renderedData, err := parser.ParseWithOptions([]byte(renderResult.RenderedHTML), finalURL, parser.ParseOptions{
+				FooterSelectors: e.footerSelectorPatterns,
+			})
 			if err != nil {
 				item.pageRow.JSRenderError = fmt.Sprintf("parse rendered: %v", err)
 			} else {
@@ -1835,6 +1959,12 @@ func (e *Engine) renderWorker(id int, in <-chan *renderItem) {
 				item.pageRow.RenderedCanonical = renderedData.Canonical
 				item.pageRow.RenderedMetaRobots = renderedData.MetaRobots
 				item.pageRow.RenderedSchemaTypes = renderedData.SchemaTypes
+				if item.pageRow.PageCreatedAt == nil {
+					item.pageRow.PageCreatedAt = renderedData.PublishedAt
+				}
+				if item.staticData.ModifiedAt == nil && renderedData.ModifiedAt != nil {
+					item.pageRow.PageModifiedAt = renderedData.ModifiedAt
+				}
 
 				// Count rendered links and images
 				item.pageRow.RenderedLinksCount = uint32(len(renderedData.Links))
@@ -1874,10 +2004,18 @@ func (e *Engine) renderWorker(id int, in <-chan *renderItem) {
 				// Compute diffs
 				computeJSDiffs(&item.pageRow, item.staticData, renderedData)
 
-				// Discover new links from rendered content
-				if e.followJSLinks {
-					for _, link := range renderedData.Links {
-						if link.IsInternal && e.isInScope(link.TargetURL) {
+				// The rendered DOM is the effective document for SEO analysis.
+				// Keep the original response fields separately for diagnostics.
+				promoteRenderedData(&item.pageRow, item.staticData, renderedData, renderResult.RenderedHTML, finalURL)
+				item.linkRows, item.pageRow.InternalLinksOut, item.pageRow.ExternalLinksOut =
+					buildLinkRows(e.session.ID, item.pageRow.URL, renderedData.Links, time.Now())
+
+				// Discover new links from rendered content and check rendered
+				// external destinations. Persistence is independent of whether
+				// JS-only URLs are followed.
+				for _, link := range renderedData.Links {
+					if link.IsInternal {
+						if e.followJSLinks && e.isInScope(link.TargetURL) {
 							newDepth := item.result.Depth + 1
 							if e.cfg.Crawler.MaxDepth == 0 || newDepth <= e.cfg.Crawler.MaxDepth {
 								priority := newDepth
@@ -1892,6 +2030,13 @@ func (e *Engine) renderWorker(id int, in <-chan *renderItem) {
 								})
 							}
 						}
+					} else if e.checkExternal && e.externalCh != nil {
+						if _, loaded := e.externalChecked.LoadOrStore(link.TargetURL, struct{}{}); !loaded {
+							select {
+							case e.externalCh <- link.TargetURL:
+							default:
+							}
+						}
 					}
 				}
 			}
@@ -1903,6 +2048,104 @@ func (e *Engine) renderWorker(id int, in <-chan *renderItem) {
 			e.buffer.AddLinks(item.linkRows)
 		}
 	}
+}
+
+func buildLinkRows(sessionID, sourceURL string, links []parser.Link, crawledAt time.Time) ([]storage.LinkRow, uint32, uint32) {
+	rows := make([]storage.LinkRow, 0, len(links))
+	var internalOut, externalOut uint32
+	for _, link := range links {
+		rows = append(rows, storage.LinkRow{
+			CrawlSessionID: sessionID,
+			SourceURL:      sourceURL,
+			TargetURL:      link.TargetURL,
+			AnchorText:     link.AnchorText,
+			Rel:            link.Rel,
+			IsInternal:     link.IsInternal,
+			Tag:            link.Tag,
+			LinkLocation:   link.Location,
+			CrawledAt:      crawledAt,
+		})
+		if link.IsInternal {
+			internalOut++
+		} else {
+			externalOut++
+		}
+	}
+	return rows, internalOut, externalOut
+}
+
+func promoteRenderedData(row *storage.PageRow, static, rendered *parser.PageData, renderedHTML, finalURL string) {
+	row.StaticTitle = static.Title
+	row.StaticMetaDescription = static.MetaDescription
+	row.StaticH1 = append([]string(nil), static.H1...)
+	row.StaticWordCount = uint32(static.WordCount)
+	row.StaticCanonical = static.Canonical
+	row.StaticMetaRobots = static.MetaRobots
+	row.StaticLinksCount = uint32(len(static.Links))
+	row.StaticImagesCount = uint16(len(static.Images))
+	row.StaticContentHash = static.ContentHash
+	if row.BodyHTML != "" {
+		row.StaticBodyHTML = row.BodyHTML
+		row.BodyHTML = renderedHTML
+	}
+
+	row.Title = rendered.Title
+	row.TitleLength = seoTextLength(rendered.Title)
+	row.Canonical = rendered.Canonical
+	row.CanonicalIsSelf = rendered.Canonical != "" &&
+		(rendered.Canonical == row.URL || rendered.Canonical == finalURL)
+	row.MetaRobots = rendered.MetaRobots
+	row.MetaDescription = rendered.MetaDescription
+	row.MetaDescLength = seoTextLength(rendered.MetaDescription)
+	row.MetaKeywords = rendered.MetaKeywords
+	row.H1 = append([]string(nil), rendered.H1...)
+	row.H2 = append([]string(nil), rendered.H2...)
+	row.H3 = append([]string(nil), rendered.H3...)
+	row.H4 = append([]string(nil), rendered.H4...)
+	row.H5 = append([]string(nil), rendered.H5...)
+	row.H6 = append([]string(nil), rendered.H6...)
+	row.WordCount = uint32(rendered.WordCount)
+	row.ContentHash = rendered.ContentHash
+	row.Lang = rendered.Lang
+	row.OGTitle = rendered.OGTitle
+	row.OGDescription = rendered.OGDescription
+	row.OGImage = rendered.OGImage
+	row.SchemaTypes = append([]string(nil), rendered.SchemaTypes...)
+	if rendered.PublishedAt != nil {
+		row.PageCreatedAt = rendered.PublishedAt
+	}
+	if rendered.ModifiedAt != nil {
+		row.PageModifiedAt = rendered.ModifiedAt
+	}
+
+	row.ImagesCount = uint16(len(rendered.Images))
+	row.ImagesNoAlt = 0
+	for _, image := range rendered.Images {
+		if image.Alt == "" {
+			row.ImagesNoAlt++
+		}
+	}
+
+	row.Hreflang = row.Hreflang[:0]
+	for _, entry := range rendered.Hreflang {
+		row.Hreflang = append(row.Hreflang, storage.HreflangRow{
+			Lang: entry.Lang,
+			URL:  entry.URL,
+		})
+	}
+
+	row.IsIndexable, row.IndexReason = computeIndexability(
+		row.StatusCode,
+		rendered.MetaRobots,
+		row.XRobotsTag,
+		rendered.Canonical,
+		finalURL,
+		row.URL,
+	)
+}
+
+func seoTextLength(value string) uint16 {
+	return uint16(utf8.RuneCountInString(value))
 }
 
 // computeJSDiffs compares static and rendered page data and sets diff flags.

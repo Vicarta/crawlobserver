@@ -66,6 +66,16 @@ type providerFetchStatus struct {
 	cancel       context.CancelFunc
 }
 
+// pageRankRecomputeStatus tracks a background project current-snapshot PageRank recalculation.
+type pageRankRecomputeStatus struct {
+	Status     string     `json:"status"` // idle, running, completed, failed
+	Message    string     `json:"message,omitempty"`
+	SessionID  string     `json:"session_id,omitempty"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	Error      string     `json:"error,omitempty"`
+}
+
 // SetupProgress tracks the download/startup progress exposed to the frontend.
 type SetupProgress struct {
 	Percent         int   `json:"percent"`
@@ -97,6 +107,9 @@ type Server struct {
 	providerFetchMu     sync.Mutex
 	providerFetchStatus map[string]*providerFetchStatus // "projectID:provider" -> status
 
+	pageRankRecomputeMu     sync.Mutex
+	pageRankRecomputeStatus map[string]*pageRankRecomputeStatus // projectID -> status
+
 	// Setup mode fields (desktop onboarding)
 	SetupMode        bool
 	downloadProgress atomic.Value // *SetupProgress
@@ -110,8 +123,11 @@ type Server struct {
 	deltaSchedulerMu     sync.Mutex
 	deltaSchedulerCancel context.CancelFunc
 
-	qualitySchedulerMu     sync.Mutex
-	qualitySchedulerCancel context.CancelFunc
+	qualitySchedulerMu                sync.Mutex
+	qualitySchedulerCancel            context.CancelFunc
+	qualitySchedulerCursor            int
+	qualitySchedulerCursorInitialized bool
+	qualitySchedulerNow               func() time.Time
 }
 
 // New creates a new Server.
@@ -172,12 +188,16 @@ func (s *Server) buildHandler() (http.Handler, error) {
 
 	// API routes - read
 	mux.HandleFunc("GET /api/sessions", s.handleSessions)
+	mux.HandleFunc("GET /api/sessions/{id}", s.handleSession)
 	mux.HandleFunc("GET /api/sessions/{id}/pages", s.handlePages)
 	mux.HandleFunc("GET /api/sessions/{id}/page-issues", s.handlePageIssues)
+	mux.HandleFunc("GET /api/sessions/{id}/core-web-vitals", s.handleCoreWebVitalsReport)
 	mux.HandleFunc("GET /api/sessions/{id}/links", s.handleLinks)
 	mux.HandleFunc("GET /api/sessions/{id}/internal-links", s.handleInternalLinks)
 	mux.HandleFunc("GET /api/sessions/{id}/stats", s.handleStats)
 	mux.HandleFunc("GET /api/sessions/{id}/quality", s.handleSessionQuality)
+	mux.HandleFunc("GET /api/sessions/{id}/quality/history", s.handleSessionQualityHistory)
+	mux.HandleFunc("GET /api/sessions/{id}/pagerank/evidence", s.handleSessionPageRankEvidence)
 	mux.HandleFunc("GET /api/sessions/{id}/audit", s.handleAudit)
 	mux.HandleFunc("GET /api/sessions/{id}/progress", s.handleProgress)
 	mux.HandleFunc("GET /api/sessions/{id}/events", s.handleSSE)
@@ -228,8 +248,10 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("POST /api/sessions/{id}/stop", s.handleStopCrawl)
 	mux.HandleFunc("POST /api/sessions/{id}/resume", s.handleResumeCrawl)
 	mux.HandleFunc("POST /api/sessions/{id}/rescan-pages", s.handleRescanPages)
+	mux.HandleFunc("POST /api/sessions/{id}/delete-pages", s.handleDeletePages)
 	mux.HandleFunc("POST /api/sessions/{id}/recompute-depths", s.handleRecomputeDepths)
 	mux.HandleFunc("POST /api/sessions/{id}/compute-pagerank", s.handleComputePageRank)
+	mux.HandleFunc("POST /api/sessions/{id}/quality/re-evaluate", s.handleReevaluateSessionQuality)
 	mux.HandleFunc("POST /api/sessions/{id}/compute-near-duplicates", s.handleComputeNearDuplicates)
 	mux.HandleFunc("GET /api/sessions/{id}/hreflang-validation", s.handleHreflangValidation)
 	mux.HandleFunc("POST /api/sessions/{id}/compute-hreflang-validation", s.handleComputeHreflangValidation)
@@ -240,6 +262,7 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("POST /api/sessions/{id}/simulate-interlinking", s.handleSimulateInterlinking)
 	mux.HandleFunc("GET /api/sessions/{id}/interlinking-simulations", s.handleListSimulations)
 	mux.HandleFunc("GET /api/sessions/{id}/interlinking-simulations/{simId}", s.handleGetSimulationResults)
+	mux.HandleFunc("POST /api/projects/{id}/current-snapshot/simulate-interlinking", s.handleProjectCurrentSnapshotSimulateInterlinking)
 	mux.HandleFunc("POST /api/sessions/{id}/import-virtual-links", s.handleImportVirtualLinks)
 	mux.HandleFunc("POST /api/sessions/{id}/recompute-content-hashes", s.handleRecomputeContentHashes)
 	mux.HandleFunc("POST /api/sessions/{id}/retry-failed", s.handleRetryFailed)
@@ -268,9 +291,13 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("DELETE /api/projects/{id}/with-sessions", s.handleDeleteProjectWithSessions)
 	mux.HandleFunc("GET /api/projects/{id}/delta/settings", s.handleProjectDeltaSettings)
 	mux.HandleFunc("PUT /api/projects/{id}/delta/settings", s.handleUpdateProjectDeltaSettings)
+	mux.HandleFunc("GET /api/projects/{id}/pagerank/recompute-status", s.handleProjectPageRankRecomputeStatus)
 	mux.HandleFunc("POST /api/projects/{id}/delta/manual-queue", s.handleProjectDeltaManualQueue)
 	mux.HandleFunc("GET /api/projects/{id}/delta/preview", s.handleProjectDeltaPreview)
 	mux.HandleFunc("POST /api/projects/{id}/delta/run", s.handleProjectDeltaRun)
+	mux.HandleFunc("GET /api/projects/{id}/orphan-404-cleanup/preview", s.handleProjectOrphan404CleanupPreview)
+	mux.HandleFunc("POST /api/projects/{id}/orphan-404-cleanup", s.handleProjectOrphan404Cleanup)
+	mux.HandleFunc("GET /api/projects/{id}/current-snapshot", s.handleProjectCurrentSnapshot)
 	mux.HandleFunc("GET /api/projects/{id}/quality/settings", s.handleProjectQualitySettings)
 	mux.HandleFunc("PUT /api/projects/{id}/quality/settings", s.handleUpdateProjectQualitySettings)
 	mux.HandleFunc("GET /api/projects/{id}/canaries", s.handleProjectCanaries)

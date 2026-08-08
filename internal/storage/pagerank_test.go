@@ -3,8 +3,52 @@ package storage
 import (
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 )
+
+func TestSanitizePageRankFailureRedactsCredentialsBeforePersistence(t *testing.T) {
+	raw := `mutation failed Authorization: Bearer bearer-value api_key=api-value token:token-value password="password-value" client-secret=secret-value X-API-Key header-value`
+	sanitized := sanitizePageRankFailure(raw)
+	for _, secret := range []string{"bearer-value", "api-value", "token-value", "password-value", "secret-value", "header-value"} {
+		if strings.Contains(sanitized, secret) {
+			t.Fatalf("sanitized failure exposed %q: %s", secret, sanitized)
+		}
+	}
+	if strings.Count(sanitized, "[REDACTED]") != 6 {
+		t.Fatalf("sanitized failure did not redact every credential: %s", sanitized)
+	}
+	long := sanitizePageRankFailure(strings.Repeat("x", 9000) + " token=late-secret")
+	if len(long) > 1024 || strings.Contains(long, "late-secret") {
+		t.Fatalf("sanitized failure cap/redaction failed: length=%d", len(long))
+	}
+}
+
+func TestPageRankOptionsSignatureCanonicalizesSelectors(t *testing.T) {
+	first := PageRankOptionsSignature(PageRankOptions{
+		IncludeFooterLinks:  false,
+		RefreshLinkLocation: true,
+		FooterSelectors:     []string{" footer ", "nav", "footer", ""},
+	})
+	second := PageRankOptionsSignature(PageRankOptions{
+		IncludeFooterLinks:  false,
+		RefreshLinkLocation: true,
+		FooterSelectors:     []string{"nav", "footer"},
+	})
+	if first != second {
+		t.Fatalf("options signatures differ for equivalent selectors: %q != %q", first, second)
+	}
+	if first == PageRankOptionsSignature(PageRankOptions{IncludeFooterLinks: true, FooterSelectors: []string{"footer", "nav"}}) {
+		t.Fatal("options signatures must change when graph options change")
+	}
+}
+
+func TestPageRankPopulationReconcilesPositiveAndZero(t *testing.T) {
+	population := PageRankPopulation{Eligible: 51, Positive: 51, Zero: 0}
+	if population.Eligible != population.Positive+population.Zero {
+		t.Fatalf("population does not reconcile: %#v", population)
+	}
+}
 
 // helper: return normalized 0–100 scores for a graph.
 func computePR(t *testing.T, n uint32, outLinks [][]uint32, totalOutLinks []uint32, edgeWeights ...[][]float64) []float64 {
@@ -28,9 +72,9 @@ func assertApprox(t *testing.T, label string, got, want, eps float64) {
 func TestPageRank_SimpleChain(t *testing.T) {
 	// A(0) → B(1) → C(2), C is dangling
 	outLinks := [][]uint32{
-		{1},       // A → B
-		{2},       // B → C
-		nil,       // C → (nothing)
+		{1}, // A → B
+		{2}, // B → C
+		nil, // C → (nothing)
 	}
 	totalOutLinks := []uint32{1, 1, 0}
 	rank := computePR(t, 3, outLinks, totalOutLinks)
@@ -82,9 +126,9 @@ func TestPageRank_NofollowDilutesButDoesNotPass(t *testing.T) {
 	// B(1) → (dangling)
 	// C(2) → (dangling)
 	outLinks := [][]uint32{
-		{1},       // A → B (only dofollow edge)
-		nil,       // B dangling
-		nil,       // C dangling
+		{1}, // A → B (only dofollow edge)
+		nil, // B dangling
+		nil, // C dangling
 	}
 	totalOutLinks := []uint32{2, 0, 0} // A has 2 total outlinks (1 dofollow + 1 nofollow)
 
@@ -170,6 +214,15 @@ func TestPageRank_SingleNode(t *testing.T) {
 	totalOutLinks := []uint32{0}
 	rank := computePR(t, 1, outLinks, totalOutLinks)
 	assertApprox(t, "single node", rank[0], 100.0, 0.01)
+}
+
+func TestPageRankLinkLocationFilter(t *testing.T) {
+	if got := pageRankLinkLocationFilter(PageRankOptions{IncludeFooterLinks: true}); got != "" {
+		t.Fatalf("include footer filter = %q, want empty", got)
+	}
+	if got := pageRankLinkLocationFilter(PageRankOptions{IncludeFooterLinks: false}); got != "AND link_location != 'footer'" {
+		t.Fatalf("exclude footer filter = %q", got)
+	}
 }
 
 // --- Test 8: hub page linking to many pages via dofollow vs same hub with external dilution ---
@@ -568,8 +621,8 @@ func TestPageRank_SparseEdgeWeights(t *testing.T) {
 	totalOutLinks := []uint32{1, 1, 0}
 
 	weights := [][]float64{
-		nil,    // A→B: no weight → defaults to 1.0
-		{0.9},  // B→C: redirect penalty
+		nil,   // A→B: no weight → defaults to 1.0
+		{0.9}, // B→C: redirect penalty
 		nil,
 	}
 	rank := computePR(t, 3, outLinks, totalOutLinks, weights)

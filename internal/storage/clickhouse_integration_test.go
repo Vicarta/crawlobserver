@@ -4,6 +4,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -11,7 +12,7 @@ import (
 )
 
 // testStore creates a Store connected to a local ClickHouse, runs migrations,
-// and returns it. Skips the test if CH is not reachable.
+// and returns it. Required integration gates fail rather than silently skip.
 func testStore(t *testing.T) *Store {
 	t.Helper()
 
@@ -23,9 +24,17 @@ func testStore(t *testing.T) *Store {
 	if p := os.Getenv("CH_PORT"); p != "" {
 		fmt.Sscanf(p, "%d", &port)
 	}
+	username := os.Getenv("CH_USER")
+	if username == "" {
+		username = "default"
+	}
+	password := os.Getenv("CH_PASSWORD")
 
-	s, err := NewStore(host, port, "default", "default", "")
+	s, err := NewStore(host, port, "default", username, password)
 	if err != nil {
+		if os.Getenv("CRAWLOBSERVER_REQUIRE_CLICKHOUSE") == "1" {
+			t.Fatalf("ClickHouse required but unavailable: %v", err)
+		}
 		t.Skipf("ClickHouse not available: %v", err)
 	}
 
@@ -222,5 +231,159 @@ func TestGetExpiredDomains_Pagination(t *testing.T) {
 	}
 	if page2.Domains[0].RegistrableDomain != "domain-c.com" {
 		t.Errorf("expected domain-c.com, got %s", page2.Domains[0].RegistrableDomain)
+	}
+}
+
+func TestCurrentSnapshotDeltaRetryFinalizesBindingWithoutReapplyingContent(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := "phase-25-1-retry"
+	baselineID := "25100000-0000-4000-8000-000000000001"
+	deltaID := "25100000-0000-4000-8000-000000000002"
+	currentID := "25100000-0000-4000-8000-000000000003"
+	foldedID := "25100000-0000-4000-8000-000000000004"
+	obsoleteID := "25100000-0000-4000-8000-000000000005"
+	baselineEval := "25100000-0000-4000-8000-000000000011"
+	deltaEval := "25100000-0000-4000-8000-000000000012"
+	baselinePR := "25100000-0000-4000-8000-000000000021"
+	deltaPR := "25100000-0000-4000-8000-000000000022"
+	now := time.Now().UTC()
+
+	t.Cleanup(func() {
+		for _, table := range []string{"project_current_snapshot_deltas", "project_current_snapshots"} {
+			_ = s.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE crawlobserver.%s DELETE WHERE project_id = ? SETTINGS mutations_sync = 1", table), projectID)
+		}
+		for _, table := range []string{"crawl_quality_current_pointers", "crawl_quality_evaluations", "pagerank_evidence"} {
+			_ = s.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE crawlobserver.%s DELETE WHERE session_id IN (?, ?, ?, ?, ?) SETTINGS mutations_sync = 1", table), baselineID, deltaID, currentID, foldedID, obsoleteID)
+		}
+		_ = s.conn.Exec(ctx, "ALTER TABLE crawlobserver.crawl_sessions DELETE WHERE id IN (?, ?, ?, ?, ?) SETTINGS mutations_sync = 1", baselineID, deltaID, currentID, foldedID, obsoleteID)
+		for _, table := range []string{"pages", "links"} {
+			_ = s.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE crawlobserver.%s DELETE WHERE crawl_session_id IN (?, ?, ?, ?, ?) SETTINGS mutations_sync = 1", table), baselineID, deltaID, currentID, foldedID, obsoleteID)
+		}
+	})
+
+	for _, session := range []*CrawlSession{
+		{ID: baselineID, StartedAt: now.Add(-time.Hour), FinishedAt: now.Add(-50 * time.Minute), Status: "completed", ProjectID: &projectID, Label: "baseline"},
+		{ID: deltaID, StartedAt: now.Add(-time.Minute), FinishedAt: now, Status: "completed", ProjectID: &projectID, Label: "Daily Delta Crawl"},
+		{ID: currentID, StartedAt: now.Add(-time.Hour), FinishedAt: now, Status: "completed", ProjectID: &projectID, Label: CurrentSnapshotLabel},
+	} {
+		if err := s.InsertSession(ctx, session); err != nil {
+			t.Fatalf("insert session %s: %v", session.ID, err)
+		}
+	}
+	for _, evidence := range []PageRankEvidence{
+		{SessionID: baselineID, AttemptID: baselinePR, State: PageRankEvidenceFinalized, Source: PageRankEvidenceComputed, AlgorithmVersion: PageRankAlgorithmVersion, PredicateVersion: PageRankEligiblePredicateVersion, OccurredAt: now},
+		{SessionID: deltaID, AttemptID: deltaPR, State: PageRankEvidenceFinalized, Source: PageRankEvidenceComputed, AlgorithmVersion: PageRankAlgorithmVersion, PredicateVersion: PageRankEligiblePredicateVersion, OccurredAt: now},
+	} {
+		if err := s.appendPageRankEvidence(ctx, &evidence); err != nil {
+			t.Fatalf("append evidence: %v", err)
+		}
+	}
+	for _, quality := range []CrawlQualityResult{
+		{SessionID: baselineID, ProjectID: projectID, EvaluationRevision: baselineEval, EvaluatorRevision: "eval-v2", RulesRevision: "rules-v2", PageRankEvidenceRevision: baselinePR, PageRankEvidenceStatus: PageRankEvidenceFinalized, PageRankPredicateVersion: PageRankEligiblePredicateVersion, Trusted: true, IsFullCrawl: true, Status: "trusted", Score: 100, EvaluatedAt: now},
+		{SessionID: deltaID, ProjectID: projectID, BaselineSessionID: baselineID, BaselineEvaluationRevision: baselineEval, EvaluationRevision: deltaEval, EvaluatorRevision: "eval-v2", RulesRevision: "rules-v2", PageRankEvidenceRevision: deltaPR, PageRankEvidenceStatus: PageRankEvidenceFinalized, PageRankPredicateVersion: PageRankEligiblePredicateVersion, Trusted: true, Status: "trusted", Score: 100, EvaluatedAt: now},
+	} {
+		if _, _, err := s.PublishCrawlQualityEvaluation(ctx, quality, ""); err != nil {
+			t.Fatalf("publish quality: %v", err)
+		}
+	}
+	initial := ProjectCurrentSnapshot{
+		ProjectID: projectID, CurrentSessionID: currentID, BaselineSessionID: baselineID,
+		QualityBaselineSessionID:  baselineID,
+		QualityEvaluationRevision: baselineEval, BaselineQualityEvaluationRevision: baselineEval,
+		PageRankEvidenceRevision: baselinePR, QualityEvaluatorRevision: "eval-v2", QualityRulesRevision: "rules-v2",
+		QualityPromotionStatus: "applied", BaselineCreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.upsertProjectCurrentSnapshot(ctx, &initial); err != nil {
+		t.Fatalf("insert initial snapshot: %v", err)
+	}
+	if initial.SnapshotRevision == 0 {
+		t.Fatal("initial snapshot revision was not allocated")
+	}
+	// Failure injection: content was already overlaid and marked, but the bound
+	// project pointer was never published.
+	if err := s.conn.Exec(ctx, `INSERT INTO crawlobserver.project_current_snapshot_deltas
+		(project_id, delta_session_id, current_session_id, applied_at) VALUES (?, toUUID(?), toUUID(?), ?)`,
+		projectID, deltaID, currentID, now); err != nil {
+		t.Fatalf("insert content-stage marker: %v", err)
+	}
+	binding := CrawlQualityPromotionEvent{
+		ProjectID: projectID, SessionID: deltaID, EvaluationRevision: deltaEval, PageRankEvidenceRevision: deltaPR,
+		BaselineSessionID: baselineID, BaselineEvaluationRevision: baselineEval, EvaluatorRevision: "eval-v2", RulesRevision: "rules-v2",
+	}
+	result, err := s.PromoteDeltaToCurrentSnapshot(ctx, projectID, deltaID, baselineID, 14, 30, PageRankOptions{}, binding)
+	if err != nil {
+		t.Fatalf("retry promotion: %v", err)
+	}
+	if !currentSnapshotBindingMatches(*result, binding) || result.LastDeltaSessionID != deltaID {
+		t.Fatalf("retry did not finalize bound pointer: %#v", result)
+	}
+	if result.SnapshotRevision <= initial.SnapshotRevision {
+		t.Fatalf("snapshot revision did not advance: initial=%d result=%d", initial.SnapshotRevision, result.SnapshotRevision)
+	}
+	if _, err := s.LatestPageRankEvidence(ctx, currentID); !errors.Is(err, ErrNoFinalizedPageRankEvidence) {
+		t.Fatalf("retry unexpectedly recomputed PageRank: %v", err)
+	}
+	if _, _, err := s.ValidateProjectCurrentSnapshotBinding(ctx, *result); err != nil {
+		t.Fatalf("fresh delta baseline binding rejected: %v", err)
+	}
+	if err := s.appendPageRankEvidence(ctx, &PageRankEvidence{
+		SessionID: baselineID, AttemptID: baselinePR, State: PageRankEvidenceFinalized,
+		Source: PageRankEvidenceComputed, AlgorithmVersion: PageRankAlgorithmVersion,
+		PredicateVersion: "pagerank-eligible-old", OccurredAt: now.Add(time.Millisecond),
+	}); err != nil {
+		t.Fatalf("append stale-predicate baseline evidence: %v", err)
+	}
+	if _, _, err := s.ValidateProjectCurrentSnapshotBinding(ctx, *result); !errors.Is(err, ErrCurrentSnapshotBindingConflict) {
+		t.Fatalf("stale baseline predicate did not invalidate snapshot binding: %v", err)
+	}
+	if err := s.appendPageRankEvidence(ctx, &PageRankEvidence{
+		SessionID: baselineID, AttemptID: baselinePR, State: PageRankEvidenceFinalized,
+		Source: PageRankEvidenceComputed, AlgorithmVersion: PageRankAlgorithmVersion,
+		PredicateVersion: PageRankEligiblePredicateVersion, OccurredAt: now.Add(2 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("restore current-predicate baseline evidence: %v", err)
+	}
+	if _, _, err := s.ValidateProjectCurrentSnapshotBinding(ctx, *result); err != nil {
+		t.Fatalf("restored baseline predicate rejected: %v", err)
+	}
+	if err := s.copySessionForSnapshot(ctx, currentID, foldedID, CurrentBaselineSnapshotLabel, now.Add(time.Second)); err != nil {
+		t.Fatalf("create folded baseline: %v", err)
+	}
+	if err := s.copySessionForSnapshot(ctx, currentID, obsoleteID, CurrentBaselineSnapshotLabel, now.Add(time.Second)); err != nil {
+		t.Fatalf("create obsolete baseline: %v", err)
+	}
+	folded := *result
+	folded.BaselineSessionID = foldedID
+	folded.LastDeltaSessionID = ""
+	folded.DeltaCount = 0
+	folded.BaselineCreatedAt = now.Add(time.Second)
+	folded.UpdatedAt = now.Add(time.Second)
+	if err := s.upsertProjectCurrentSnapshot(ctx, &folded); err != nil {
+		t.Fatalf("publish folded pointer: %v", err)
+	}
+	if folded.SnapshotRevision <= result.SnapshotRevision {
+		t.Fatalf("folded snapshot revision did not advance: result=%d folded=%d", result.SnapshotRevision, folded.SnapshotRevision)
+	}
+	result, err = s.PromoteDeltaToCurrentSnapshot(ctx, projectID, deltaID, baselineID, 14, 30, PageRankOptions{}, binding)
+	if err != nil {
+		t.Fatalf("retry post-pointer fold cleanup: %v", err)
+	}
+	if count, err := s.countProjectCurrentSnapshotDeltas(ctx, projectID); err != nil || count != 0 {
+		t.Fatalf("fold cleanup markers count=%d err=%v", count, err)
+	}
+	if _, err := s.GetSession(ctx, obsoleteID); err == nil {
+		t.Fatal("obsolete synthetic baseline survived cleanup retry")
+	}
+	if err := s.appendPageRankEvidence(ctx, &PageRankEvidence{
+		SessionID: baselineID, AttemptID: "25100000-0000-4000-8000-000000000023",
+		State: PageRankEvidenceFailed, Source: PageRankEvidenceComputed,
+		AlgorithmVersion: PageRankAlgorithmVersion, PredicateVersion: PageRankEligiblePredicateVersion,
+		OccurredAt: now.Add(time.Second), Failure: "injected newer baseline failure",
+	}); err != nil {
+		t.Fatalf("append newer baseline failure: %v", err)
+	}
+	if _, _, err := s.ValidateProjectCurrentSnapshotBinding(ctx, *result); !errors.Is(err, ErrCurrentSnapshotBindingConflict) {
+		t.Fatalf("newer failed baseline evidence did not invalidate snapshot binding: %v", err)
 	}
 }

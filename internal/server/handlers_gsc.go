@@ -341,6 +341,9 @@ func (s *Server) handleGSCFetch(w http.ResponseWriter, r *http.Request) {
 		}
 
 		total, err := s.fetchGSCAnalyticsChunks(ctx, client, conn.PropertyURL, checkpoint)
+		if err == nil {
+			err = s.saveCompletedGSCFetchCheckpoint(projectID, conn.PropertyURL, startDate, endDate, total)
+		}
 		s.gscFetchMu.Lock()
 		if s.gscFetchStatus[projectID] != nil {
 			if err != nil {
@@ -355,6 +358,27 @@ func (s *Server) handleGSCFetch(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	writeJSON(w, map[string]string{"status": "fetching"})
+}
+
+func (s *Server) saveCompletedGSCFetchCheckpoint(projectID, propertyURL, startDate, endDate string, rowsFetched int) error {
+	rangeEnd, err := time.Parse("2006-01-02", endDate)
+	if err != nil {
+		return fmt.Errorf("invalid completed gsc checkpoint end_date %q: %w", endDate, err)
+	}
+	checkpoint := &apikeys.GSCFetchCheckpoint{
+		ProjectID:     projectID,
+		PropertyURL:   propertyURL,
+		StartDate:     startDate,
+		EndDate:       endDate,
+		NextStartDate: rangeEnd.AddDate(0, 0, 1).Format("2006-01-02"),
+		RowsFetched:   rowsFetched,
+		Completed:     true,
+	}
+	if err := s.keyStore.SaveGSCFetchCheckpoint(checkpoint); err != nil {
+		return fmt.Errorf("saving completed gsc checkpoint: %w", err)
+	}
+	applog.Infof("gsc", "checkpoint completed for project %s, property %s, range %s to %s, rows=%d", projectID, propertyURL, startDate, endDate, rowsFetched)
+	return nil
 }
 
 func (s *Server) hasExistingGSCData(ctx context.Context, projectID string) bool {

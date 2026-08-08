@@ -18,6 +18,7 @@ type Session struct {
 	Pages     uint64
 	ProjectID *string
 	Label     string
+	Stop      config.SessionStopMetadata
 }
 
 // NewSession creates a new crawl session.
@@ -34,6 +35,9 @@ func NewSession(seeds []string, cfg *config.Config) *Session {
 // ToStorageRow converts a Session to a storage model.
 func (s *Session) ToStorageRow() *storage.CrawlSession {
 	configJSON, _ := config.SessionConfigJSON(s.Config)
+	if s.Stop.Reason != "" || s.Stop.Message != "" {
+		configJSON = config.WithSessionStopMetadata(configJSON, s.Stop)
+	}
 	return &storage.CrawlSession{
 		ID:           s.ID,
 		StartedAt:    s.StartedAt,

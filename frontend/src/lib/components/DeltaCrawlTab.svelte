@@ -127,9 +127,7 @@
   }
 
   function sourceLabel(source) {
-    return source
-      .replaceAll('_', ' ')
-      .replace(/\b\w/g, (m) => m.toUpperCase());
+    return source.replaceAll('_', ' ').replace(/\b\w/g, (m) => m.toUpperCase());
   }
 
   function scheduleLabel() {
@@ -141,6 +139,19 @@
     if (!settings?.enabled) return 'muted';
     if (!preview?.will_launch) return 'warning';
     return 'active';
+  }
+
+  function formatRefreshTime(value) {
+    if (!value) return 'Not fetched';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+  }
+
+  function refreshModeLabel(mode) {
+    if (mode === 'fresh') return 'Fresh sitemap';
+    if (mode === 'snapshot_fallback') return 'Snapshot fallback';
+    if (mode === 'skipped') return 'Sitemap skipped';
+    return 'Sitemap unavailable';
   }
 
   onMount(load);
@@ -169,7 +180,11 @@
             <button class="btn btn-sm" onclick={loadPreview} disabled={previewing}>
               {previewing ? 'Previewing...' : 'Preview'}
             </button>
-            <button class="btn btn-primary btn-sm" onclick={runNow} disabled={running || !preview?.will_launch}>
+            <button
+              class="btn btn-primary btn-sm"
+              onclick={runNow}
+              disabled={running || !preview?.will_launch}
+            >
               {running ? 'Starting...' : 'Run now'}
             </button>
           </div>
@@ -190,13 +205,17 @@
           <input type="checkbox" bind:checked={settings.enabled} disabled={!isAdmin} />
           <span class="toggle-control"></span>
           <span>
-            <strong>{settings.enabled ? 'Daily delta is enabled' : 'Daily delta is disabled'}</strong>
+            <strong
+              >{settings.enabled ? 'Daily delta is enabled' : 'Daily delta is disabled'}</strong
+            >
             <em>{scheduleLabel()}</em>
           </span>
         </label>
         <div class="status-meta">
           <span>Baseline</span>
-          <strong title={preview?.baseline_session_id || ''}>{preview?.baseline_session_id || 'No baseline session'}</strong>
+          <strong title={preview?.baseline_session_id || ''}
+            >{preview?.baseline_session_id || 'No baseline session'}</strong
+          >
         </div>
       </div>
 
@@ -219,10 +238,39 @@
         </div>
       </div>
 
+      {#if preview?.sitemap_refresh}
+        {@const refresh = preview.sitemap_refresh}
+        <div class:warning={refresh.mode !== 'fresh'} class="sitemap-refresh">
+          <div class="section-heading compact">
+            <h4>{refreshModeLabel(refresh.mode)}</h4>
+            <span>Fetched {formatRefreshTime(refresh.fetched_at)}</span>
+          </div>
+          <div class="refresh-metrics">
+            <span><strong>{formatInt(refresh.fresh_url_count)}</strong> fresh URLs</span>
+            <span><strong>{formatInt(refresh.snapshot_url_count)}</strong> previous URLs</span>
+            <span><strong>{formatInt(refresh.added_count)}</strong> added</span>
+            <span><strong>{formatInt(refresh.removed_count)}</strong> removed</span>
+            <span><strong>{formatInt(refresh.invalid_entry_count)}</strong> invalid</span>
+          </div>
+          {#if refresh.declared_sitemap_urls?.length}
+            <p class="refresh-roots" title={refresh.declared_sitemap_urls.join('\n')}>
+              {refresh.declared_sitemap_urls.join(', ')}
+            </p>
+          {/if}
+          {#if refresh.warnings?.length}
+            <p class="refresh-warning">{refresh.warnings.join(' ')}</p>
+          {/if}
+        </div>
+      {/if}
+
       <div class="delta-section">
         <div class="section-heading">
           <h4>Schedule</h4>
-          <span>{settings.enabled ? 'Runs once per day after the selected local time.' : 'Turn on to run automatically.'}</span>
+          <span
+            >{settings.enabled
+              ? 'Runs once per day after the selected local time.'
+              : 'Turn on to run automatically.'}</span
+          >
         </div>
         <div class="settings-grid">
           <label>
@@ -235,7 +283,12 @@
           </label>
           <label>
             <span>Stale after days</span>
-            <input type="number" min="1" bind:value={settings.stale_after_days} disabled={!isAdmin} />
+            <input
+              type="number"
+              min="1"
+              bind:value={settings.stale_after_days}
+              disabled={!isAdmin}
+            />
           </label>
         </div>
         {#if settings.timezone === 'UTC'}
@@ -251,26 +304,98 @@
           <span>Choose where the daily candidate list comes from.</span>
         </div>
         <div class="source-grid">
-          <label><input type="checkbox" bind:checked={settings.source_sitemap} disabled={!isAdmin} /><span>Sitemap</span></label>
-          <label><input type="checkbox" bind:checked={settings.source_gsc} disabled={!isAdmin} /><span>Google Search Console</span></label>
-          <label><input type="checkbox" bind:checked={settings.source_problem_pages} disabled={!isAdmin} /><span>Problem pages</span></label>
-          <label><input type="checkbox" bind:checked={settings.source_stale_pages} disabled={!isAdmin} /><span>Stale pages</span></label>
-          <label><input type="checkbox" bind:checked={settings.source_manual_queue} disabled={!isAdmin} /><span>Manual queue</span></label>
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={settings.source_sitemap}
+              disabled={!isAdmin}
+            /><span>Sitemap</span></label
+          >
+          <label
+            ><input type="checkbox" bind:checked={settings.source_gsc} disabled={!isAdmin} /><span
+              >Google Search Console</span
+            ></label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={settings.source_problem_pages}
+              disabled={!isAdmin}
+            /><span>Problem pages</span></label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={settings.source_stale_pages}
+              disabled={!isAdmin}
+            /><span>Stale pages</span></label
+          >
+          <label
+            ><input
+              type="checkbox"
+              bind:checked={settings.source_manual_queue}
+              disabled={!isAdmin}
+            /><span>Manual queue</span></label
+          >
         </div>
       </div>
 
       <div class="delta-section">
         <div class="section-heading">
           <h4>Run Limits</h4>
-          <span>Keep the daily job bounded while still following internal links from launched pages.</span>
+          <span
+            >Keep the daily job bounded while still following internal links from launched pages.</span
+          >
         </div>
         <div class="settings-grid">
-          <label><span>Max candidates</span><input type="number" min="1" bind:value={settings.max_candidates_per_run} disabled={!isAdmin} /></label>
-          <label><span>Max changed pages</span><input type="number" min="1" bind:value={settings.max_changed_pages_per_run} disabled={!isAdmin} /></label>
-          <label><span>Max new pages</span><input type="number" min="1" bind:value={settings.max_new_pages_per_run} disabled={!isAdmin} /></label>
-          <label><span>Max discovered pages</span><input type="number" min="0" bind:value={settings.max_discovered_pages_per_run} disabled={!isAdmin} /></label>
-          <label><span>Discovery depth</span><input type="number" min="0" bind:value={settings.max_discovery_depth} disabled={!isAdmin} /></label>
-          <label><span>Max runtime minutes</span><input type="number" min="1" bind:value={settings.max_runtime_minutes} disabled={!isAdmin} /></label>
+          <label
+            ><span>Max candidates</span><input
+              type="number"
+              min="1"
+              bind:value={settings.max_candidates_per_run}
+              disabled={!isAdmin}
+            /></label
+          >
+          <label
+            ><span>Max changed pages</span><input
+              type="number"
+              min="1"
+              bind:value={settings.max_changed_pages_per_run}
+              disabled={!isAdmin}
+            /></label
+          >
+          <label
+            ><span>Max new pages</span><input
+              type="number"
+              min="1"
+              bind:value={settings.max_new_pages_per_run}
+              disabled={!isAdmin}
+            /></label
+          >
+          <label
+            ><span>Max discovered pages</span><input
+              type="number"
+              min="0"
+              bind:value={settings.max_discovered_pages_per_run}
+              disabled={!isAdmin}
+            /></label
+          >
+          <label
+            ><span>Discovery depth</span><input
+              type="number"
+              min="0"
+              bind:value={settings.max_discovery_depth}
+              disabled={!isAdmin}
+            /></label
+          >
+          <label
+            ><span>Max runtime minutes</span><input
+              type="number"
+              min="1"
+              bind:value={settings.max_runtime_minutes}
+              disabled={!isAdmin}
+            /></label
+          >
         </div>
       </div>
 
@@ -287,17 +412,84 @@
                 <h4>Fetch Behavior</h4>
               </div>
               <div class="settings-grid">
-                <label><span>Requests per second</span><input type="number" min="0.1" step="0.1" bind:value={settings.rate_limit_requests_per_second} disabled={!isAdmin} /></label>
-                <label><span>Retry count</span><input type="number" min="0" bind:value={settings.retry_count} disabled={!isAdmin} /></label>
-                <label><span>Retry backoff seconds</span><input type="number" min="1" bind:value={settings.retry_backoff_seconds} disabled={!isAdmin} /></label>
-                <label><span>JS rendering</span><select bind:value={settings.enable_js_rendering_for_delta} disabled={!isAdmin}><option value="inherit">inherit</option><option value="off">off</option><option value="auto">auto</option><option value="always">always</option></select></label>
-                <label><span>On limit reached</span><select bind:value={settings.on_limit_reached} disabled={!isAdmin}><option value="defer">defer</option><option value="stop">stop</option></select></label>
+                <label
+                  ><span>Requests per second</span><input
+                    type="number"
+                    min="0.1"
+                    step="0.1"
+                    bind:value={settings.rate_limit_requests_per_second}
+                    disabled={!isAdmin}
+                  /></label
+                >
+                <label
+                  ><span>Retry count</span><input
+                    type="number"
+                    min="0"
+                    bind:value={settings.retry_count}
+                    disabled={!isAdmin}
+                  /></label
+                >
+                <label
+                  ><span>Retry backoff seconds</span><input
+                    type="number"
+                    min="1"
+                    bind:value={settings.retry_backoff_seconds}
+                    disabled={!isAdmin}
+                  /></label
+                >
+                <label
+                  ><span>JS rendering</span><select
+                    bind:value={settings.enable_js_rendering_for_delta}
+                    disabled={!isAdmin}
+                    ><option value="inherit">inherit</option><option value="off">off</option><option
+                      value="auto">auto</option
+                    ><option value="always">always</option></select
+                  ></label
+                >
+                <label
+                  ><span>On limit reached</span><select
+                    bind:value={settings.on_limit_reached}
+                    disabled={!isAdmin}
+                    ><option value="defer">defer</option><option value="stop">stop</option></select
+                  ></label
+                >
               </div>
               <div class="checks-grid">
-                <label><input type="checkbox" bind:checked={settings.respect_robots_txt} disabled={!isAdmin} /> Respect robots.txt</label>
-                <label><input type="checkbox" bind:checked={settings.use_conditional_requests} disabled={!isAdmin} /> Conditional requests</label>
-                <label><input type="checkbox" bind:checked={settings.fallback_to_get_when_head_fails} disabled={!isAdmin} /> Fallback to GET</label>
-                <label><input type="checkbox" bind:checked={settings.recompute_pagerank_when_graph_changed} disabled={!isAdmin} /> Recompute PageRank on graph changes</label>
+                <label
+                  ><input
+                    type="checkbox"
+                    bind:checked={settings.respect_robots_txt}
+                    disabled={!isAdmin}
+                  /> Respect robots.txt</label
+                >
+                <label
+                  ><input
+                    type="checkbox"
+                    bind:checked={settings.use_conditional_requests}
+                    disabled={!isAdmin}
+                  /> Conditional requests</label
+                >
+                <label
+                  ><input
+                    type="checkbox"
+                    bind:checked={settings.fallback_to_get_when_head_fails}
+                    disabled={!isAdmin}
+                  /> Fallback to GET</label
+                >
+                <label
+                  ><input
+                    type="checkbox"
+                    bind:checked={settings.recompute_pagerank_when_graph_changed}
+                    disabled={!isAdmin}
+                  /> Recompute PageRank on graph changes</label
+                >
+                <label
+                  ><input
+                    type="checkbox"
+                    bind:checked={settings.include_footer_links_in_pagerank}
+                    disabled={!isAdmin}
+                  /> Include footer links in internal PageRank</label
+                >
               </div>
             </div>
 
@@ -306,18 +498,93 @@
                 <h4>URL Normalization</h4>
               </div>
               <div class="settings-grid">
-                <label><span>Canonical host policy</span><select bind:value={settings.canonical_host_policy} disabled={!isAdmin}><option value="project">project</option><option value="follow_redirect">follow redirect</option><option value="none">none</option></select></label>
-                <label><span>Keep history days</span><input type="number" min="1" bind:value={settings.keep_delta_history_days} disabled={!isAdmin} /></label>
+                <label
+                  ><span>Canonical host policy</span><select
+                    bind:value={settings.canonical_host_policy}
+                    disabled={!isAdmin}
+                    ><option value="project">project</option><option value="follow_redirect"
+                      >follow redirect</option
+                    ><option value="none">none</option></select
+                  ></label
+                >
+                <label
+                  ><span>Keep history days</span><input
+                    type="number"
+                    min="1"
+                    bind:value={settings.keep_delta_history_days}
+                    disabled={!isAdmin}
+                  /></label
+                >
+                <label
+                  ><span>Snapshot deltas kept</span><input
+                    type="number"
+                    min="1"
+                    bind:value={settings.current_snapshot_max_deltas}
+                    disabled={!isAdmin}
+                  /></label
+                >
+                <label
+                  ><span>Fold baseline every days</span><input
+                    type="number"
+                    min="1"
+                    bind:value={settings.current_snapshot_baseline_interval_days}
+                    disabled={!isAdmin}
+                  /></label
+                >
               </div>
               <div class="checks-grid">
-                <label><input type="checkbox" bind:checked={settings.normalize_trailing_slash} disabled={!isAdmin} /> Normalize trailing slash</label>
-                <label><input type="checkbox" bind:checked={settings.strip_fragments} disabled={!isAdmin} /> Strip fragments</label>
-                <label><input type="checkbox" bind:checked={settings.strip_tracking_params} disabled={!isAdmin} /> Strip tracking params</label>
+                <label
+                  ><input
+                    type="checkbox"
+                    bind:checked={settings.normalize_trailing_slash}
+                    disabled={!isAdmin}
+                  /> Normalize trailing slash</label
+                >
+                <label
+                  ><input
+                    type="checkbox"
+                    bind:checked={settings.strip_fragments}
+                    disabled={!isAdmin}
+                  /> Strip fragments</label
+                >
+                <label
+                  ><input
+                    type="checkbox"
+                    bind:checked={settings.strip_tracking_params}
+                    disabled={!isAdmin}
+                  /> Strip tracking params</label
+                >
               </div>
               <div class="textarea-grid">
-                <label><span>Allowed query params</span><textarea value={listValue(settings.allowed_query_params)} oninput={(e) => updateListField('allowed_query_params', e.target.value)} disabled={!isAdmin}></textarea></label>
-                <label><span>Blocked URL patterns</span><textarea value={listValue(settings.blocked_url_patterns)} oninput={(e) => updateListField('blocked_url_patterns', e.target.value)} disabled={!isAdmin}></textarea></label>
-                <label><span>Allowed URL patterns</span><textarea value={listValue(settings.allowed_url_patterns)} oninput={(e) => updateListField('allowed_url_patterns', e.target.value)} disabled={!isAdmin}></textarea></label>
+                <label
+                  ><span>Allowed query params</span><textarea
+                    value={listValue(settings.allowed_query_params)}
+                    oninput={(e) => updateListField('allowed_query_params', e.target.value)}
+                    disabled={!isAdmin}
+                  ></textarea></label
+                >
+                <label
+                  ><span>Blocked URL patterns</span><textarea
+                    value={listValue(settings.blocked_url_patterns)}
+                    oninput={(e) => updateListField('blocked_url_patterns', e.target.value)}
+                    disabled={!isAdmin}
+                  ></textarea></label
+                >
+                <label
+                  ><span>Allowed URL patterns</span><textarea
+                    value={listValue(settings.allowed_url_patterns)}
+                    oninput={(e) => updateListField('allowed_url_patterns', e.target.value)}
+                    disabled={!isAdmin}
+                  ></textarea></label
+                >
+                <label
+                  ><span>Footer selectors</span><textarea
+                    value={listValue(settings.footer_selector_patterns)}
+                    placeholder="footer&#10;.site-footer&#10;[data-section=&quot;footer&quot;]"
+                    oninput={(e) => updateListField('footer_selector_patterns', e.target.value)}
+                    disabled={!isAdmin}
+                  ></textarea></label
+                >
               </div>
             </div>
 
@@ -326,10 +593,34 @@
                 <h4>Safety</h4>
               </div>
               <div class="checks-grid">
-                <label><input type="checkbox" bind:checked={settings.require_confirmation_on_scope_change} disabled={!isAdmin} /> Confirm scope changes</label>
-                <label><input type="checkbox" bind:checked={settings.require_confirmation_on_full_recrawl} disabled={!isAdmin} /> Confirm full recrawl</label>
-                <label><input type="checkbox" bind:checked={settings.never_delete_previous_snapshot_before_success} disabled={!isAdmin} /> Preserve previous snapshot</label>
-                <label><input type="checkbox" bind:checked={settings.pause_delta_when_full_crawl_running} disabled={!isAdmin} /> Pause when crawl is running</label>
+                <label
+                  ><input
+                    type="checkbox"
+                    bind:checked={settings.require_confirmation_on_scope_change}
+                    disabled={!isAdmin}
+                  /> Confirm scope changes</label
+                >
+                <label
+                  ><input
+                    type="checkbox"
+                    bind:checked={settings.require_confirmation_on_full_recrawl}
+                    disabled={!isAdmin}
+                  /> Confirm full recrawl</label
+                >
+                <label
+                  ><input
+                    type="checkbox"
+                    bind:checked={settings.never_delete_previous_snapshot_before_success}
+                    disabled={!isAdmin}
+                  /> Preserve previous snapshot</label
+                >
+                <label
+                  ><input
+                    type="checkbox"
+                    bind:checked={settings.pause_delta_when_full_crawl_running}
+                    disabled={!isAdmin}
+                  /> Pause when crawl is running</label
+                >
               </div>
             </div>
           </div>
@@ -341,19 +632,26 @@
       <div class="side-card">
         <div class="side-heading">
           <h4>Preview Details</h4>
-          <button class="btn btn-sm" onclick={copyPreviewURLs} disabled={!preview?.sample_urls?.length}>Copy URLs</button>
+          <button
+            class="btn btn-sm"
+            onclick={copyPreviewURLs}
+            disabled={!preview?.sample_urls?.length}>Copy URLs</button
+          >
         </div>
 
         {#if preview?.deferred > 0}
           <div class="side-warning">
-            {formatInt(preview.deferred)} candidates will wait for a later run because current limits are reached.
+            {formatInt(preview.deferred)} candidates will wait for a later run because current limits
+            are reached.
           </div>
         {/if}
 
         <h5>Sources</h5>
         <div class="source-list">
           {#each Object.entries(preview?.by_source || {}) as [source, count]}
-            <div class="source-row"><span>{sourceLabel(source)}</span><strong>{formatInt(count)}</strong></div>
+            <div class="source-row">
+              <span>{sourceLabel(source)}</span><strong>{formatInt(count)}</strong>
+            </div>
           {/each}
         </div>
 
@@ -370,8 +668,14 @@
       {#if isAdmin}
         <div class="side-card">
           <h4>Manual Queue</h4>
-          <p>Add one URL per line. Queued URLs are consumed only after they are actually launched.</p>
-          <textarea class="manual-box" bind:value={manualURLs} placeholder="https://example.com/page"></textarea>
+          <p>
+            Add one URL per line. Queued URLs are consumed only after they are actually launched.
+          </p>
+          <textarea
+            class="manual-box"
+            bind:value={manualURLs}
+            placeholder="https://example.com/page"
+          ></textarea>
           <button class="btn btn-sm btn-primary" onclick={queueManualURLs}>Queue URLs</button>
         </div>
       {/if}
@@ -595,6 +899,51 @@
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
     margin: 16px 0 20px;
+  }
+
+  .sitemap-refresh {
+    display: grid;
+    gap: 10px;
+    margin: 16px 0;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+  }
+
+  .sitemap-refresh.warning {
+    border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+  }
+
+  .section-heading.compact {
+    margin: 0;
+  }
+
+  .refresh-metrics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  .refresh-metrics strong {
+    color: var(--text);
+  }
+
+  .refresh-roots,
+  .refresh-warning {
+    overflow: hidden;
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .refresh-warning {
+    color: var(--warning);
+    white-space: normal;
   }
 
   .delta-summary > div {

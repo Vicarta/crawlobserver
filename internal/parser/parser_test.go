@@ -73,6 +73,50 @@ func TestParse(t *testing.T) {
 	if len(data.H3) != 1 {
 		t.Errorf("H3 count = %d, want 1", len(data.H3))
 	}
+
+	wantOutline := []Heading{
+		{Level: 1, Text: "Main Heading"},
+		{Level: 2, Text: "Sub Heading 1"},
+		{Level: 2, Text: "Sub Heading 2"},
+		{Level: 3, Text: "Sub Sub Heading"},
+	}
+	if len(data.HeadingOutline) != len(wantOutline) {
+		t.Fatalf("HeadingOutline count = %d, want %d: %#v", len(data.HeadingOutline), len(wantOutline), data.HeadingOutline)
+	}
+	for i, want := range wantOutline {
+		if got := data.HeadingOutline[i]; got != want {
+			t.Errorf("HeadingOutline[%d] = %#v, want %#v", i, got, want)
+		}
+	}
+}
+
+func TestExtractHeadingOutlinePreservesOrderAndSkipsEmptyHeadings(t *testing.T) {
+	html := `<html><body>
+		<h2>First section</h2>
+		<h4>Nested detail</h4>
+		<h3>Second section</h3>
+		<h2>   </h2>
+		<h1>Page title</h1>
+	</body></html>`
+
+	outline, err := ExtractHeadingOutline([]byte(html))
+	if err != nil {
+		t.Fatalf("ExtractHeadingOutline() error = %v", err)
+	}
+	want := []Heading{
+		{Level: 2, Text: "First section"},
+		{Level: 4, Text: "Nested detail"},
+		{Level: 3, Text: "Second section"},
+		{Level: 1, Text: "Page title"},
+	}
+	if len(outline) != len(want) {
+		t.Fatalf("outline count = %d, want %d: %#v", len(outline), len(want), outline)
+	}
+	for i, expected := range want {
+		if outline[i] != expected {
+			t.Errorf("outline[%d] = %#v, want %#v", i, outline[i], expected)
+		}
+	}
 }
 
 func TestParseCaseInsensitiveSEOAttributes(t *testing.T) {
@@ -138,6 +182,48 @@ func TestParseCaseInsensitiveSEOAttributes(t *testing.T) {
 	}
 }
 
+func TestParsePageDatesPrefersJSONLD(t *testing.T) {
+	html := `<html><head>
+		<meta property="article:published_time" content="2025-01-02T03:04:05Z">
+		<meta property="article:modified_time" content="2025-02-03T04:05:06Z">
+		<script type="application/ld+json">{
+			"@type": "Article",
+			"datePublished": "2024-03-04T05:06:07+02:00",
+			"dateModified": "2024-04-05"
+		}</script>
+	</head><body></body></html>`
+
+	data, err := Parse([]byte(html), "https://example.com/article")
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if data.PublishedAt == nil || data.PublishedAt.Format("2006-01-02T15:04:05Z") != "2024-03-04T03:06:07Z" {
+		t.Errorf("PublishedAt = %v, want JSON-LD date in UTC", data.PublishedAt)
+	}
+	if data.ModifiedAt == nil || data.ModifiedAt.Format("2006-01-02") != "2024-04-05" {
+		t.Errorf("ModifiedAt = %v, want JSON-LD date", data.ModifiedAt)
+	}
+}
+
+func TestParsePageDatesFallsBackToMetaAndIgnoresInvalidValues(t *testing.T) {
+	html := `<html><head>
+		<script type="application/ld+json">{"datePublished":"not-a-date"}</script>
+		<meta itemprop="datePublished" content="2025-06-07">
+		<meta name="dateModified" content="2025-06-08T09:10:11Z">
+	</head><body></body></html>`
+
+	data, err := Parse([]byte(html), "https://example.com/article")
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if data.PublishedAt == nil || data.PublishedAt.Format("2006-01-02") != "2025-06-07" {
+		t.Errorf("PublishedAt = %v, want meta fallback", data.PublishedAt)
+	}
+	if data.ModifiedAt == nil || data.ModifiedAt.Format("2006-01-02T15:04:05Z") != "2025-06-08T09:10:11Z" {
+		t.Errorf("ModifiedAt = %v, want meta fallback", data.ModifiedAt)
+	}
+}
+
 func TestParseLinks(t *testing.T) {
 	data, err := Parse([]byte(testHTML), "https://example.com/page")
 	if err != nil {
@@ -182,6 +268,34 @@ func TestParseLinks(t *testing.T) {
 	}
 	if !found {
 		t.Error("external link not found")
+	}
+}
+
+func TestParseLinkLocations(t *testing.T) {
+	html := `<html><body>
+		<nav><a href="/menu">Menu link</a></nav>
+		<footer><a href="/footer-semantic">Footer semantic</a></footer>
+		<div role="contentinfo"><a href="/footer-role">Footer role</a></div>
+		<div id="site-footer"><a href="/footer-id">Footer id</a></div>
+		<div class="layout-footer-links"><a href="/footer-class">Footer class</a></div>
+	</body></html>`
+	data, err := Parse([]byte(html), "https://example.com/")
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	locations := map[string]string{}
+	for _, l := range data.Links {
+		locations[l.AnchorText] = l.Location
+	}
+
+	if locations["Menu link"] != "body" {
+		t.Errorf("Menu link location = %q, want body", locations["Menu link"])
+	}
+	for _, text := range []string{"Footer semantic", "Footer role", "Footer id", "Footer class"} {
+		if locations[text] != "footer" {
+			t.Errorf("%s location = %q, want footer", text, locations[text])
+		}
 	}
 }
 

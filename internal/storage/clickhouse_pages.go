@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/bits"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/SEObserver/crawlobserver/internal/applog"
+	"github.com/SEObserver/crawlobserver/internal/parser"
 	"github.com/google/uuid"
 )
 
@@ -32,6 +35,7 @@ func (s *Store) InsertPages(ctx context.Context, pages []PageRow) error {
 			word_count, internal_links_out, external_links_out,
 			images_count, images_no_alt, hreflang,
 			lang, og_title, og_description, og_image, schema_types,
+			page_created_at, page_modified_at,
 			headers, redirect_chain, body_size, fetch_duration_ms,
 			content_encoding, x_robots_tag,
 			error, depth, found_on, pagerank, content_hash, body_html, body_truncated, crawled_at,
@@ -40,6 +44,9 @@ func (s *Store) InsertPages(ctx context.Context, pages []PageRow) error {
 			rendered_word_count, rendered_links_count, rendered_images_count,
 			rendered_canonical, rendered_meta_robots, rendered_schema_types,
 			rendered_body_html,
+			static_title, static_meta_description, static_h1,
+			static_word_count, static_canonical, static_meta_robots,
+			static_links_count, static_images_count, static_content_hash, static_body_html,
 			js_changed_title, js_changed_description, js_changed_h1,
 			js_changed_canonical, js_changed_content,
 			js_added_links, js_added_images, js_added_schema,
@@ -71,6 +78,7 @@ func (s *Store) InsertPages(ctx context.Context, pages []PageRow) error {
 			p.WordCount, p.InternalLinksOut, p.ExternalLinksOut,
 			p.ImagesCount, p.ImagesNoAlt, hreflang,
 			p.Lang, p.OGTitle, p.OGDescription, p.OGImage, p.SchemaTypes,
+			p.PageCreatedAt, p.PageModifiedAt,
 			p.Headers, chain, p.BodySize, p.FetchDurationMs,
 			p.ContentEncoding, p.XRobotsTag,
 			p.Error, p.Depth, p.FoundOn, p.PageRank, p.ContentHash, p.BodyHTML, p.BodyTruncated, p.CrawledAt,
@@ -79,6 +87,9 @@ func (s *Store) InsertPages(ctx context.Context, pages []PageRow) error {
 			p.RenderedWordCount, p.RenderedLinksCount, p.RenderedImagesCount,
 			p.RenderedCanonical, p.RenderedMetaRobots, p.RenderedSchemaTypes,
 			p.RenderedBodyHTML,
+			p.StaticTitle, p.StaticMetaDescription, p.StaticH1,
+			p.StaticWordCount, p.StaticCanonical, p.StaticMetaRobots,
+			p.StaticLinksCount, p.StaticImagesCount, p.StaticContentHash, p.StaticBodyHTML,
 			p.JSChangedTitle, p.JSChangedDescription, p.JSChangedH1,
 			p.JSChangedCanonical, p.JSChangedContent,
 			p.JSAddedLinks, p.JSAddedImages, p.JSAddedSchema,
@@ -101,17 +112,45 @@ func (s *Store) CountPages(ctx context.Context, sessionID string) (uint64, error
 
 // ListPages retrieves pages for a session with pagination and optional filters.
 func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset int, filters []ParsedFilter, sort *SortParam) ([]PageRow, error) {
+	candidateSources, err := s.deltaCandidateSourcesForSession(ctx, sessionID)
+	if err != nil {
+		applog.Warnf("storage", "loading delta candidate sources for session %s: %v", sessionID, err)
+	}
 	query := `
 		SELECT p.crawl_session_id, p.url, p.final_url, p.status_code, p.content_type,
 			` + PageTypeSQLExpression + ` AS page_type,
 			title, title_length, canonical, canonical_is_self, is_indexable, index_reason,
 			meta_robots, meta_description, meta_desc_length, meta_keywords,
 			h1, h2, h3, h4, h5, h6,
-			word_count, ifNull(inlinks.internal_links_in, 0) AS internal_links_in, internal_links_out, external_links_out,
+			word_count, ifNull(inlinks.internal_links_in, 0) AS internal_links_in,
+			ifNull(inlinks.direct_internal_links_in, 0) AS direct_internal_links_in,
+			ifNull(inlinks.redirect_internal_links_in, 0) AS redirect_internal_links_in,
+			internal_links_out, external_links_out,
 			images_count, images_no_alt,
 			lang, og_title, og_description, og_image, schema_types,
+			page_created_at, page_modified_at,
 			body_size, fetch_duration_ms, content_encoding, x_robots_tag,
-			error, depth, found_on, pagerank, crawled_at,
+			error, depth, found_on,
+			multiIf(
+				ifNull(inlinks.direct_internal_links_in, 0) > 0, 'internal_link',
+				ifNull(inlinks.redirect_internal_links_in, 0) > 0, 'redirect_internal_link',
+				sm_exact.raw_loc != '' OR sm_decoded.raw_loc != '', 'sitemap',
+				p.depth = 0, 'seed',
+				p.found_on != '', 'found_on',
+				'unknown'
+			) AS discovery_source,
+			multiIf(
+				ifNull(inlinks.direct_internal_links_in, 0) > 0, concat(toString(ifNull(inlinks.internal_links_in, 0)), ' internal inlink(s)'),
+				ifNull(inlinks.redirect_internal_links_in, 0) > 0, concat(toString(ifNull(inlinks.internal_links_in, 0)), ' internal inlink(s) via redirect'),
+				sm_exact.raw_loc != '', sm_exact.sitemap_url,
+				sm_decoded.raw_loc != '', sm_decoded.sitemap_url,
+				p.depth = 0, 'seed URL',
+				p.found_on != '', p.found_on,
+				''
+			) AS discovery_detail,
+			(sm_exact.raw_loc != '' OR sm_decoded.raw_loc != '') AS is_in_sitemap,
+			sm_exact.sitemap_url, sm_exact.raw_loc, sm_decoded.sitemap_url, sm_decoded.raw_loc,
+			pagerank, crawled_at,
 			js_rendered, js_render_duration_ms, js_render_error,
 			js_changed_title, js_changed_description, js_changed_h1,
 			js_changed_canonical, js_changed_content,
@@ -120,14 +159,42 @@ func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset i
 			cwv_lcp_ms, cwv_cls, cwv_ttfb_ms, cwv_measured
 		FROM crawlobserver.pages AS p FINAL
 		LEFT JOIN (
-			SELECT crawl_session_id, target_url, countDistinct(source_url) AS internal_links_in
-			FROM crawlobserver.links
-			WHERE crawl_session_id = ? AND is_internal = true AND target_url != ''
-			GROUP BY crawl_session_id, target_url
+			SELECT
+				crawl_session_id,
+				resolved_target_url AS target_url,
+				countDistinct(source_url) AS internal_links_in,
+				countDistinctIf(source_url, original_target_url = resolved_target_url) AS direct_internal_links_in,
+				countDistinctIf(source_url, original_target_url != resolved_target_url) AS redirect_internal_links_in
+			FROM (
+				SELECT
+					l.crawl_session_id,
+					l.source_url,
+					l.target_url AS original_target_url,
+					if(target.final_url != '' AND target.final_url != target.url, target.final_url, l.target_url) AS resolved_target_url
+				FROM crawlobserver.links AS l
+				LEFT JOIN crawlobserver.pages AS target FINAL
+					ON target.crawl_session_id = l.crawl_session_id AND target.url = l.target_url
+				WHERE l.crawl_session_id = ? AND l.is_internal = true AND l.target_url != ''
+			)
+			GROUP BY crawl_session_id, resolved_target_url
 		) AS inlinks
 			ON inlinks.crawl_session_id = p.crawl_session_id AND inlinks.target_url = p.url
+		LEFT JOIN (
+			SELECT crawl_session_id, loc AS raw_loc, min(sitemap_url) AS sitemap_url
+			FROM crawlobserver.sitemap_urls FINAL
+			WHERE crawl_session_id = ? AND loc != ''
+			GROUP BY crawl_session_id, loc
+		) AS sm_exact
+			ON sm_exact.crawl_session_id = p.crawl_session_id AND sm_exact.raw_loc = p.url
+		LEFT JOIN (
+			SELECT crawl_session_id, loc AS raw_loc, min(sitemap_url) AS sitemap_url
+			FROM crawlobserver.sitemap_urls FINAL
+			WHERE crawl_session_id = ? AND loc != ''
+			GROUP BY crawl_session_id, loc
+		) AS sm_decoded
+			ON sm_decoded.crawl_session_id = p.crawl_session_id AND sm_decoded.raw_loc = decodeURLComponent(p.url)
 		WHERE p.crawl_session_id = ? AND (p.final_url = '' OR p.final_url = p.url)`
-	args := []interface{}{sessionID, sessionID}
+	args := []interface{}{sessionID, sessionID, sessionID, sessionID}
 
 	whereExtra, filterArgs, err := BuildWhereClause(filters)
 	if err != nil {
@@ -138,7 +205,9 @@ func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset i
 		args = append(args, filterArgs...)
 	}
 
-	query += BuildOrderByClause(sort, "crawled_at DESC") + ` LIMIT ? OFFSET ?`
+	query += BuildOrderByClause(sort, "crawled_at DESC") + ` LIMIT ? OFFSET ?
+		SETTINGS max_bytes_before_external_group_by = 100000000,
+			max_bytes_before_external_sort = 100000000`
 	args = append(args, limit, offset)
 
 	rows, err := s.conn.Query(ctx, query, args...)
@@ -150,16 +219,23 @@ func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset i
 	var pages []PageRow
 	for rows.Next() {
 		var p PageRow
+		var internalLinksIn, directInternalLinksIn, redirectInternalLinksIn uint64
+		var exactSitemapSourceURL, exactSitemapRawLoc string
+		var decodedSitemapSourceURL, decodedSitemapRawLoc string
 		if err := rows.Scan(
 			&p.CrawlSessionID, &p.URL, &p.FinalURL, &p.StatusCode, &p.ContentType, &p.PageType,
 			&p.Title, &p.TitleLength, &p.Canonical, &p.CanonicalIsSelf, &p.IsIndexable, &p.IndexReason,
 			&p.MetaRobots, &p.MetaDescription, &p.MetaDescLength, &p.MetaKeywords,
 			&p.H1, &p.H2, &p.H3, &p.H4, &p.H5, &p.H6,
-			&p.WordCount, &p.InternalLinksIn, &p.InternalLinksOut, &p.ExternalLinksOut,
+			&p.WordCount, &internalLinksIn, &directInternalLinksIn, &redirectInternalLinksIn,
+			&p.InternalLinksOut, &p.ExternalLinksOut,
 			&p.ImagesCount, &p.ImagesNoAlt,
 			&p.Lang, &p.OGTitle, &p.OGDescription, &p.OGImage, &p.SchemaTypes,
+			&p.PageCreatedAt, &p.PageModifiedAt,
 			&p.BodySize, &p.FetchDurationMs, &p.ContentEncoding, &p.XRobotsTag,
-			&p.Error, &p.Depth, &p.FoundOn, &p.PageRank, &p.CrawledAt,
+			&p.Error, &p.Depth, &p.FoundOn, &p.DiscoverySource, &p.DiscoveryDetail, &p.IsInSitemap,
+			&exactSitemapSourceURL, &exactSitemapRawLoc, &decodedSitemapSourceURL, &decodedSitemapRawLoc,
+			&p.PageRank, &p.CrawledAt,
 			&p.JSRendered, &p.JSRenderDurationMs, &p.JSRenderError,
 			&p.JSChangedTitle, &p.JSChangedDescription, &p.JSChangedH1,
 			&p.JSChangedCanonical, &p.JSChangedContent,
@@ -169,12 +245,255 @@ func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset i
 		); err != nil {
 			return nil, fmt.Errorf("scanning page: %w", err)
 		}
+		p.InternalLinksIn = uint32(min(internalLinksIn, uint64(^uint32(0))))
+		p.SitemapSourceURL, p.SitemapRawLoc = selectSitemapEvidence(
+			exactSitemapSourceURL,
+			exactSitemapRawLoc,
+			decodedSitemapSourceURL,
+			decodedSitemapRawLoc,
+		)
+		p.CandidateSources = pageCandidateSources(p.URL, p.DiscoverySource, candidateSources)
+		p.DiscoverySource, p.DiscoveryDetail = classifyDiscoverySource(
+			directInternalLinksIn,
+			redirectInternalLinksIn,
+			p.IsInSitemap,
+			p.Depth == 0,
+			p.FoundOn,
+			p.CandidateSources,
+			p.SitemapSourceURL,
+		)
+		p.ProblemOrigin = pageProblemOrigin(p)
 		pages = append(pages, p)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating pages: %w", err)
 	}
 	return pages, nil
+}
+
+func selectSitemapEvidence(exactSourceURL, exactRawLoc, decodedSourceURL, decodedRawLoc string) (string, string) {
+	if exactRawLoc != "" {
+		return exactSourceURL, exactRawLoc
+	}
+	if decodedRawLoc != "" {
+		return decodedSourceURL, decodedRawLoc
+	}
+	return "", ""
+}
+
+func (s *Store) deltaCandidateSourcesForSession(ctx context.Context, sessionID string) (map[string][]string, error) {
+	var configJSON string
+	if err := s.conn.QueryRow(ctx, `
+		SELECT config
+		FROM crawlobserver.crawl_sessions FINAL
+		WHERE id = ?`, sessionID).Scan(&configJSON); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(configJSON) == "" {
+		return nil, nil
+	}
+	var cfg struct {
+		Crawler struct {
+			DeltaPlan struct {
+				CandidateSources map[string][]string `json:"candidate_sources"`
+			} `json:"DeltaPlan"`
+		} `json:"Crawler"`
+	}
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		return nil, err
+	}
+	if len(cfg.Crawler.DeltaPlan.CandidateSources) == 0 {
+		return nil, nil
+	}
+	return cfg.Crawler.DeltaPlan.CandidateSources, nil
+}
+
+func pageCandidateSources(url, _ string, planned map[string][]string) []string {
+	if len(planned) > 0 {
+		if sources := planned[url]; len(sources) > 0 {
+			return sources
+		}
+	}
+	return []string{}
+}
+
+func pageProblemOrigin(p PageRow) string {
+	if p.StatusCode != 404 {
+		return ""
+	}
+	if p.InternalLinksIn > 0 {
+		return p.DiscoverySource
+	}
+	if p.IsInSitemap {
+		return "sitemap"
+	}
+	if len(p.CandidateSources) > 0 {
+		return "candidate"
+	}
+	return "orphan_problem_candidate"
+}
+
+const pageDiscoveryReferrersCTE = `
+	WITH redirect_aliases AS (
+		SELECT url
+		FROM crawlobserver.pages FINAL
+		WHERE crawl_session_id = ? AND final_url = ? AND url != ?
+	), deduped AS (
+		SELECT
+			source_url,
+			target_url,
+			anchor_text,
+			rel,
+			tag,
+			link_location,
+			min(crawled_at) AS crawled_at
+		FROM crawlobserver.links
+		WHERE crawl_session_id = ?
+			AND is_internal = true
+			AND (target_url = ? OR target_url IN (SELECT url FROM redirect_aliases))
+		GROUP BY source_url, target_url, anchor_text, rel, tag, link_location
+	)`
+
+// GetPageDiscovery returns direct and redirect-derived evidence for a page URL.
+func (s *Store) GetPageDiscovery(ctx context.Context, sessionID, url string, limit int) (*PageDiscoveryEvidence, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	evidence := &PageDiscoveryEvidence{
+		Availability:     "unavailable",
+		PrimarySource:    "unknown",
+		Detail:           "Historical discovery evidence is unavailable for this URL.",
+		CandidateSources: []string{},
+		Referrers:        []PageDiscoveryReferrer{},
+	}
+
+	var depth uint16
+	if err := s.conn.QueryRow(ctx, `
+		SELECT depth, found_on
+		FROM crawlobserver.pages FINAL
+		WHERE crawl_session_id = ? AND url = ?
+		LIMIT 1`, sessionID, url).Scan(&depth, &evidence.FoundOn); err != nil {
+		return nil, fmt.Errorf("querying page discovery base: %w", err)
+	}
+	evidence.IsSeed = depth == 0
+
+	var exactSourceURL, exactRawLoc, decodedSourceURL, decodedRawLoc string
+	if err := s.conn.QueryRow(ctx, `
+		SELECT
+			minIf(sitemap_url, loc = ?),
+			anyIf(loc, loc = ?),
+			minIf(sitemap_url, loc = decodeURLComponent(?)),
+			anyIf(loc, loc = decodeURLComponent(?))
+		FROM crawlobserver.sitemap_urls FINAL
+		WHERE crawl_session_id = ?`, url, url, url, url, sessionID).Scan(
+		&exactSourceURL,
+		&exactRawLoc,
+		&decodedSourceURL,
+		&decodedRawLoc,
+	); err != nil {
+		return nil, fmt.Errorf("querying page discovery sitemap evidence: %w", err)
+	}
+	evidence.SitemapSourceURL, evidence.SitemapRawLoc = selectSitemapEvidence(
+		exactSourceURL,
+		exactRawLoc,
+		decodedSourceURL,
+		decodedRawLoc,
+	)
+	evidence.IsInSitemap = evidence.SitemapRawLoc != ""
+
+	if planned, err := s.deltaCandidateSourcesForSession(ctx, sessionID); err != nil {
+		applog.Warnf("storage", "loading page discovery candidate sources for session %s: %v", sessionID, err)
+	} else if sources := planned[url]; len(sources) > 0 {
+		evidence.CandidateSources = append([]string(nil), sources...)
+	}
+
+	countQuery := pageDiscoveryReferrersCTE + `
+		SELECT count(), countIf(target_url = ?), countIf(target_url != ?)
+		FROM deduped`
+	if err := s.conn.QueryRow(ctx, countQuery,
+		sessionID, url, url, sessionID, url, url, url,
+	).Scan(
+		&evidence.ReferrersCount,
+		&evidence.DirectReferrersCount,
+		&evidence.RedirectReferrersCount,
+	); err != nil {
+		return nil, fmt.Errorf("querying page discovery referrer counts: %w", err)
+	}
+
+	rows, err := s.conn.Query(ctx, pageDiscoveryReferrersCTE+`
+		SELECT source_url, target_url, anchor_text, rel, tag, link_location, crawled_at
+		FROM deduped
+		ORDER BY target_url != ?, source_url, target_url, anchor_text, rel, tag, link_location, crawled_at
+		LIMIT ?`, sessionID, url, url, sessionID, url, url, limit)
+	if err != nil {
+		return nil, fmt.Errorf("querying page discovery referrers: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref PageDiscoveryReferrer
+		if err := rows.Scan(
+			&ref.SourceURL,
+			&ref.TargetURL,
+			&ref.AnchorText,
+			&ref.Rel,
+			&ref.Tag,
+			&ref.LinkLocation,
+			&ref.CrawledAt,
+		); err != nil {
+			return nil, fmt.Errorf("scanning page discovery referrer: %w", err)
+		}
+		ref.ViaRedirect = ref.TargetURL != url
+		if ref.ViaRedirect {
+			ref.RedirectURL = ref.TargetURL
+		}
+		evidence.Referrers = append(evidence.Referrers, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating page discovery referrers: %w", err)
+	}
+
+	classifyPageDiscovery(evidence)
+	return evidence, nil
+}
+
+func classifyPageDiscovery(evidence *PageDiscoveryEvidence) {
+	evidence.PrimarySource, evidence.Detail = classifyDiscoverySource(
+		evidence.DirectReferrersCount,
+		evidence.RedirectReferrersCount,
+		evidence.IsInSitemap,
+		evidence.IsSeed,
+		evidence.FoundOn,
+		evidence.CandidateSources,
+		evidence.SitemapSourceURL,
+	)
+	if evidence.PrimarySource == "unknown" {
+		evidence.Availability = "unavailable"
+		return
+	}
+	evidence.Availability = "derived"
+}
+
+func classifyDiscoverySource(directReferrers, redirectReferrers uint64, isInSitemap, isSeed bool, foundOn string, candidateSources []string, sitemapSourceURL string) (string, string) {
+	switch {
+	case directReferrers > 0:
+		return "internal_link", fmt.Sprintf("%d internal referring source(s)", directReferrers+redirectReferrers)
+	case redirectReferrers > 0:
+		return "redirect_internal_link", fmt.Sprintf("%d internal referring source(s) via redirect", redirectReferrers)
+	case isInSitemap:
+		return "sitemap", sitemapSourceURL
+	case isSeed:
+		return "seed", "Crawl seed URL"
+	case foundOn != "":
+		return "found_on", foundOn
+	case len(candidateSources) > 0:
+		return "candidate", strings.Join(candidateSources, ", ")
+	default:
+		return "unknown", "Historical discovery evidence is unavailable for this URL."
+	}
 }
 
 const pageIssuesQuery = `
@@ -186,13 +505,21 @@ WITH
 			content_type,
 			title,
 			meta_description,
+			static_title,
+			static_meta_description,
 			rendered_title,
+			rendered_meta_description,
 			rendered_h1,
 			rendered_word_count,
 			rendered_images_count,
 			word_count,
 			images_count,
-			rendered_body_html
+			rendered_body_html,
+			js_rendered,
+			js_render_error,
+			js_changed_h1,
+			js_changed_content,
+			content_hash
 		FROM crawlobserver.pages FINAL
 		WHERE crawl_session_id = ? AND ` + notRedirectedFilter + `
 	),
@@ -238,11 +565,46 @@ WITH
 		HAVING count() >= 3
 	),
 	repeated_static_metadata AS (
-		SELECT title, meta_description
+		SELECT static_title, static_meta_description
 		FROM auditable
-		WHERE title != '' OR meta_description != ''
-		GROUP BY title, meta_description
+		WHERE static_title != '' OR static_meta_description != ''
+		GROUP BY static_title, static_meta_description
 		HAVING count() >= 3
+	),
+	shared_rendered_metadata_shells AS (
+		SELECT
+			domain(url) AS host,
+			rendered_title,
+			rendered_meta_description,
+			countDistinct(url) AS pages_in_group,
+			uniqExact(arrayStringConcat(rendered_h1, '\x1f')) AS h1_variants,
+			uniqExactIf(content_hash, content_hash != 0) AS content_variants
+		FROM auditable
+		WHERE js_rendered
+			AND js_render_error = ''
+			AND rendered_title != ''
+			AND rendered_meta_description != ''
+			AND static_title = rendered_title
+			AND static_meta_description = rendered_meta_description
+		GROUP BY host, rendered_title, rendered_meta_description
+		HAVING countDistinct(url) >= 3
+			AND (
+				(h1_variants >= 2 AND countIf(js_changed_h1) >= 2)
+				OR (content_variants >= 2 AND countIf(js_changed_content) >= 2)
+			)
+	),
+	shared_shell_urls AS (
+		SELECT
+			a.url,
+			g.pages_in_group,
+			g.h1_variants,
+			g.content_variants
+		FROM auditable AS a
+		INNER JOIN shared_rendered_metadata_shells AS g
+			ON g.host = domain(a.url)
+			AND g.rendered_title = a.rendered_title
+			AND g.rendered_meta_description = a.rendered_meta_description
+		WHERE a.js_rendered AND a.js_render_error = ''
 	)
 SELECT
 	url,
@@ -251,7 +613,10 @@ SELECT
 	issue_detail,
 	status_code,
 	title,
+	static_title,
+	static_meta_description,
 	rendered_title,
+	rendered_meta_description,
 	rendered_h1,
 	word_count,
 	rendered_word_count,
@@ -263,10 +628,13 @@ FROM (
 		'error' AS severity,
 		'soft_404' AS issue_type,
 		'HTTP 2xx page renders not-found signals' AS issue_detail,
-		status_code,
-		title,
-		rendered_title,
-		rendered_h1,
+			status_code,
+			title,
+			static_title,
+			static_meta_description,
+			rendered_title,
+			rendered_meta_description,
+			rendered_h1,
 		word_count,
 		rendered_word_count,
 		images_count,
@@ -277,21 +645,55 @@ FROM (
 	UNION ALL
 
 	SELECT
+		a.url,
+		'error' AS severity,
+		'shared_rendered_metadata_shell' AS issue_type,
+		concat(
+			'Rendered title and meta description are shared by ',
+			toString(shell.pages_in_group),
+			' URLs while rendered content differs (',
+			toString(shell.h1_variants),
+			' H1 variants, ',
+			toString(shell.content_variants),
+			' content variants). The crawl may have captured a shared HTML shell.'
+		) AS issue_detail,
+		a.status_code,
+		a.title,
+		a.static_title,
+		a.static_meta_description,
+		a.rendered_title,
+		a.rendered_meta_description,
+		a.rendered_h1,
+		a.word_count,
+		a.rendered_word_count,
+		a.images_count,
+		a.rendered_images_count
+	FROM auditable AS a
+	INNER JOIN shared_shell_urls AS shell ON shell.url = a.url
+	WHERE a.url NOT IN (SELECT url FROM soft404)
+
+	UNION ALL
+
+	SELECT
 		url,
 		'warning' AS severity,
 		'generic_rendered_title' AS issue_type,
-		'Rendered title is reused across multiple HTML 2xx pages' AS issue_detail,
-		status_code,
-		title,
-		rendered_title,
-		rendered_h1,
+			'Rendered DOM title is duplicated across at least 3 HTML 2xx pages' AS issue_detail,
+			status_code,
+			title,
+			static_title,
+			static_meta_description,
+			rendered_title,
+			rendered_meta_description,
+			rendered_h1,
 		word_count,
 		rendered_word_count,
 		images_count,
 		rendered_images_count
 	FROM auditable
-	WHERE rendered_title IN (SELECT rendered_title FROM repeated_rendered_titles)
-		AND url NOT IN (SELECT url FROM soft404)
+		WHERE rendered_title IN (SELECT rendered_title FROM repeated_rendered_titles)
+			AND url NOT IN (SELECT url FROM soft404)
+			AND url NOT IN (SELECT url FROM shared_shell_urls)
 
 	UNION ALL
 
@@ -299,18 +701,24 @@ FROM (
 		url,
 		'warning' AS severity,
 		'generic_static_metadata' AS issue_type,
-		'Static title and meta description are reused across multiple HTML 2xx pages' AS issue_detail,
-		status_code,
-		title,
-		rendered_title,
-		rendered_h1,
+			'Server HTML title and meta description are duplicated across at least 3 HTML 2xx pages' AS issue_detail,
+			status_code,
+			title,
+			static_title,
+			static_meta_description,
+			rendered_title,
+			rendered_meta_description,
+			rendered_h1,
 		word_count,
 		rendered_word_count,
 		images_count,
 		rendered_images_count
 	FROM auditable
-	WHERE (title, meta_description) IN (SELECT title, meta_description FROM repeated_static_metadata)
-		AND url NOT IN (SELECT url FROM soft404)
+		WHERE (static_title, static_meta_description) IN (
+			SELECT static_title, static_meta_description FROM repeated_static_metadata
+		)
+			AND url NOT IN (SELECT url FROM soft404)
+			AND url NOT IN (SELECT url FROM shared_shell_urls)
 )
 `
 
@@ -345,7 +753,10 @@ LIMIT ? OFFSET ?`
 			&issue.IssueDetail,
 			&issue.StatusCode,
 			&issue.Title,
+			&issue.StaticTitle,
+			&issue.StaticMetaDescription,
 			&issue.RenderedTitle,
+			&issue.RenderedMetaDescription,
 			&issue.RenderedH1,
 			&issue.WordCount,
 			&issue.RenderedWordCount,
@@ -362,17 +773,18 @@ LIMIT ? OFFSET ?`
 	return issues, nil
 }
 
-func (s *Store) pageIssueCounts(ctx context.Context, sessionID string) (soft404, genericRenderedTitle, genericStaticMetadata uint64, err error) {
+func (s *Store) pageIssueCounts(ctx context.Context, sessionID string) (soft404, sharedRenderedMetadataShell, genericRenderedTitle, genericStaticMetadata uint64, err error) {
 	query := `SELECT
 		countIf(issue_type = 'soft_404'),
+		countIf(issue_type = 'shared_rendered_metadata_shell'),
 		countIf(issue_type = 'generic_rendered_title'),
 		countIf(issue_type = 'generic_static_metadata')
 	FROM (` + pageIssuesQuery + `)`
 	row := s.conn.QueryRow(ctx, query, sessionID)
-	if err := row.Scan(&soft404, &genericRenderedTitle, &genericStaticMetadata); err != nil {
-		return 0, 0, 0, fmt.Errorf("querying page issue counts: %w", err)
+	if err := row.Scan(&soft404, &sharedRenderedMetadataShell, &genericRenderedTitle, &genericStaticMetadata); err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("querying page issue counts: %w", err)
 	}
-	return soft404, genericRenderedTitle, genericStaticMetadata, nil
+	return soft404, sharedRenderedMetadataShell, genericRenderedTitle, genericStaticMetadata, nil
 }
 
 // GetPage retrieves all fields for a single page (excluding body_html).
@@ -380,6 +792,7 @@ func (s *Store) GetPage(ctx context.Context, sessionID, url string) (*PageRow, e
 	var p PageRow
 	var redirectChain []map[string]interface{}
 	var hreflang []map[string]interface{}
+	var bodyHTMLForOutline string
 
 	row := s.conn.QueryRow(ctx, `
 		SELECT crawl_session_id, url, final_url, status_code, content_type,
@@ -389,6 +802,7 @@ func (s *Store) GetPage(ctx context.Context, sessionID, url string) (*PageRow, e
 			word_count, internal_links_out, external_links_out,
 			images_count, images_no_alt, hreflang,
 			lang, og_title, og_description, og_image, schema_types,
+			page_created_at, page_modified_at,
 			headers, redirect_chain, body_size, fetch_duration_ms,
 			content_encoding, x_robots_tag,
 			error, depth, found_on, pagerank, crawled_at,
@@ -396,11 +810,15 @@ func (s *Store) GetPage(ctx context.Context, sessionID, url string) (*PageRow, e
 			rendered_title, rendered_meta_description, rendered_h1,
 			rendered_word_count, rendered_links_count, rendered_images_count,
 			rendered_canonical, rendered_meta_robots, rendered_schema_types,
+			static_title, static_meta_description, static_h1,
+			static_word_count, static_canonical, static_meta_robots,
+			static_links_count, static_images_count, static_content_hash,
 			js_changed_title, js_changed_description, js_changed_h1,
 			js_changed_canonical, js_changed_content,
 			js_added_links, js_added_images, js_added_schema,
 			schema_valid_count, schema_error_count, schema_warning_count,
-			cwv_lcp_ms, cwv_cls, cwv_ttfb_ms, cwv_measured
+			cwv_lcp_ms, cwv_cls, cwv_ttfb_ms, cwv_measured,
+			body_html
 		FROM crawlobserver.pages FINAL
 		WHERE crawl_session_id = ? AND url = ?
 		LIMIT 1`, sessionID, url)
@@ -413,6 +831,7 @@ func (s *Store) GetPage(ctx context.Context, sessionID, url string) (*PageRow, e
 		&p.WordCount, &p.InternalLinksOut, &p.ExternalLinksOut,
 		&p.ImagesCount, &p.ImagesNoAlt, &hreflang,
 		&p.Lang, &p.OGTitle, &p.OGDescription, &p.OGImage, &p.SchemaTypes,
+		&p.PageCreatedAt, &p.PageModifiedAt,
 		&p.Headers, &redirectChain, &p.BodySize, &p.FetchDurationMs,
 		&p.ContentEncoding, &p.XRobotsTag,
 		&p.Error, &p.Depth, &p.FoundOn, &p.PageRank, &p.CrawledAt,
@@ -420,11 +839,15 @@ func (s *Store) GetPage(ctx context.Context, sessionID, url string) (*PageRow, e
 		&p.RenderedTitle, &p.RenderedMetaDescription, &p.RenderedH1,
 		&p.RenderedWordCount, &p.RenderedLinksCount, &p.RenderedImagesCount,
 		&p.RenderedCanonical, &p.RenderedMetaRobots, &p.RenderedSchemaTypes,
+		&p.StaticTitle, &p.StaticMetaDescription, &p.StaticH1,
+		&p.StaticWordCount, &p.StaticCanonical, &p.StaticMetaRobots,
+		&p.StaticLinksCount, &p.StaticImagesCount, &p.StaticContentHash,
 		&p.JSChangedTitle, &p.JSChangedDescription, &p.JSChangedH1,
 		&p.JSChangedCanonical, &p.JSChangedContent,
 		&p.JSAddedLinks, &p.JSAddedImages, &p.JSAddedSchema,
 		&p.SchemaValidCount, &p.SchemaErrorCount, &p.SchemaWarningCount,
 		&p.CWVLCP, &p.CWVCLS, &p.CWVTTFB, &p.CWVMeasured,
+		&bodyHTMLForOutline,
 	); err != nil {
 		return nil, fmt.Errorf("querying page detail: %w", err)
 	}
@@ -450,10 +873,75 @@ func (s *Store) GetPage(ctx context.Context, sessionID, url string) (*PageRow, e
 		p.Hreflang = append(p.Hreflang, h)
 	}
 
+	p.HeadingOutline = headingOutlineFromHTML(bodyHTMLForOutline)
+	if len(p.HeadingOutline) == 0 {
+		p.HeadingOutline = fallbackHeadingOutline(&p)
+	}
+
+	if p.JSRendered &&
+		p.StaticTitle == "" &&
+		p.StaticMetaDescription == "" &&
+		len(p.StaticH1) == 0 &&
+		p.StaticWordCount == 0 &&
+		p.StaticCanonical == "" &&
+		p.StaticLinksCount == 0 &&
+		p.StaticImagesCount == 0 &&
+		p.StaticContentHash == 0 {
+		// Before static_* existed, primary fields held the raw response.
+		p.StaticTitle = p.Title
+		p.StaticMetaDescription = p.MetaDescription
+		p.StaticH1 = append([]string(nil), p.H1...)
+		p.StaticWordCount = p.WordCount
+		p.StaticCanonical = p.Canonical
+		p.StaticMetaRobots = p.MetaRobots
+	}
+
 	return &p, nil
 }
 
-// GetPageHTML retrieves the raw HTML for a specific page.
+func headingOutlineFromHTML(bodyHTML string) []HeadingRow {
+	if strings.TrimSpace(bodyHTML) == "" {
+		return nil
+	}
+
+	headings, err := parser.ExtractHeadingOutline([]byte(bodyHTML))
+	if err != nil || len(headings) == 0 {
+		return nil
+	}
+
+	outline := make([]HeadingRow, 0, len(headings))
+	for _, heading := range headings {
+		outline = append(outline, HeadingRow{Level: heading.Level, Text: heading.Text})
+	}
+	return outline
+}
+
+func fallbackHeadingOutline(page *PageRow) []HeadingRow {
+	groups := []struct {
+		level uint8
+		items []string
+	}{
+		{level: 1, items: page.H1},
+		{level: 2, items: page.H2},
+		{level: 3, items: page.H3},
+		{level: 4, items: page.H4},
+		{level: 5, items: page.H5},
+		{level: 6, items: page.H6},
+	}
+
+	var outline []HeadingRow
+	for _, group := range groups {
+		for _, text := range group.items {
+			if text = strings.TrimSpace(text); text != "" {
+				outline = append(outline, HeadingRow{Level: group.level, Text: text})
+			}
+		}
+	}
+	return outline
+}
+
+// GetPageHTML retrieves the effective HTML used for analysis. For successful
+// JS renders this is the stabilized rendered DOM; otherwise it is the response HTML.
 func (s *Store) GetPageHTML(ctx context.Context, sessionID, url string) (string, error) {
 	var html string
 	row := s.conn.QueryRow(ctx, `
@@ -505,6 +993,183 @@ func (s *Store) DeletePageOutgoingArtifacts(ctx context.Context, sessionID strin
 		return fmt.Errorf("deleting page resource refs: %w", err)
 	}
 	return nil
+}
+
+// DeletePagesAndReferences removes selected URLs from a session together with
+// graph and derived artifacts that would otherwise keep stale statistics alive.
+func (s *Store) DeletePagesAndReferences(ctx context.Context, sessionID string, urls []string) (int, error) {
+	if len(urls) == 0 {
+		return 0, nil
+	}
+	if !isValidUUID(sessionID) {
+		return 0, fmt.Errorf("invalid session ID: %s", sessionID)
+	}
+	urls = uniqueStrings(urls)
+	inClause := placeholders(len(urls))
+	args := make([]interface{}, 0, len(urls)+1)
+	args = append(args, sessionID)
+	for _, u := range urls {
+		args = append(args, u)
+	}
+
+	var cnt uint64
+	if err := s.conn.QueryRow(ctx,
+		fmt.Sprintf(`SELECT count() FROM crawlobserver.pages FINAL
+			WHERE crawl_session_id = ? AND url IN (%s)`, inClause),
+		args...,
+	).Scan(&cnt); err != nil {
+		return 0, fmt.Errorf("counting pages to delete: %w", err)
+	}
+	if cnt == 0 {
+		return 0, nil
+	}
+
+	if err := s.deleteURLSet(ctx, "pages", fmt.Sprintf("url IN (%s)", inClause), args...); err != nil {
+		return 0, err
+	}
+
+	linkArgs := make([]interface{}, 0, 1+len(urls)*2)
+	linkArgs = append(linkArgs, sessionID)
+	for _, u := range urls {
+		linkArgs = append(linkArgs, u)
+	}
+	for _, u := range urls {
+		linkArgs = append(linkArgs, u)
+	}
+	if err := s.deleteURLSet(ctx, "links",
+		fmt.Sprintf("source_url IN (%s) OR target_url IN (%s)", inClause, inClause),
+		linkArgs...,
+	); err != nil {
+		return 0, err
+	}
+
+	if err := s.deleteURLSet(ctx, "page_resource_refs",
+		fmt.Sprintf("page_url IN (%s) OR resource_url IN (%s)", inClause, inClause),
+		linkArgs...,
+	); err != nil {
+		return 0, err
+	}
+	if err := s.deleteURLSet(ctx, "page_resource_checks", fmt.Sprintf("url IN (%s)", inClause), args...); err != nil {
+		return 0, err
+	}
+	if err := s.deleteURLSet(ctx, "external_link_checks", fmt.Sprintf("url IN (%s)", inClause), args...); err != nil {
+		return 0, err
+	}
+	if err := s.deleteURLSet(ctx, "structured_data_items", fmt.Sprintf("url IN (%s)", inClause), args...); err != nil {
+		return 0, err
+	}
+	if err := s.deleteURLSet(ctx, "page_embeddings", fmt.Sprintf("url IN (%s)", inClause), args...); err != nil {
+		return 0, err
+	}
+	if err := s.deleteURLSet(ctx, "near_duplicate_pairs",
+		fmt.Sprintf("url_a IN (%s) OR url_b IN (%s)", inClause, inClause),
+		linkArgs...,
+	); err != nil {
+		return 0, err
+	}
+	if err := s.deleteURLSet(ctx, "interlinking_opportunities",
+		fmt.Sprintf("source_url IN (%s) OR target_url IN (%s)", inClause, inClause),
+		linkArgs...,
+	); err != nil {
+		return 0, err
+	}
+	if err := s.deleteURLSet(ctx, "hreflang_issues",
+		fmt.Sprintf("source_url IN (%s) OR target_url IN (%s)", inClause, inClause),
+		linkArgs...,
+	); err != nil {
+		return 0, err
+	}
+
+	var remaining uint64
+	if err := s.conn.QueryRow(ctx,
+		`SELECT count() FROM crawlobserver.pages FINAL WHERE crawl_session_id = ?`,
+		sessionID,
+	).Scan(&remaining); err != nil {
+		return 0, fmt.Errorf("counting remaining pages: %w", err)
+	}
+	if err := s.conn.Exec(ctx,
+		`ALTER TABLE crawlobserver.crawl_sessions UPDATE pages_crawled = ?
+		 WHERE id = ? SETTINGS mutations_sync = 1`,
+		remaining, sessionID,
+	); err != nil {
+		return 0, fmt.Errorf("updating session page count: %w", err)
+	}
+	return int(cnt), nil
+}
+
+func (s *Store) ListOrphan404CleanupCandidates(ctx context.Context, sessionID string, olderThan time.Time, limit int) ([]Orphan404CleanupCandidate, error) {
+	if limit <= 0 {
+		limit = 5000
+	}
+	rows, err := s.conn.Query(ctx, `
+		SELECT p.url, p.title, p.status_code, p.crawled_at, ifNull(inlinks.internal_links_in, 0) AS internal_links_in
+		FROM crawlobserver.pages AS p FINAL
+		LEFT JOIN (
+			SELECT crawl_session_id, target_url, countDistinct(source_url) AS internal_links_in
+			FROM crawlobserver.links
+			WHERE crawl_session_id = ? AND is_internal = true AND target_url != ''
+			GROUP BY crawl_session_id, target_url
+		) AS inlinks
+			ON inlinks.crawl_session_id = p.crawl_session_id AND inlinks.target_url = p.url
+		WHERE p.crawl_session_id = ?
+		  AND p.status_code = 404
+		  AND ifNull(inlinks.internal_links_in, 0) = 0
+		  AND p.url NOT IN (
+			SELECT loc FROM crawlobserver.sitemap_urls FINAL WHERE crawl_session_id = ? AND loc != ''
+		  )
+		  AND decodeURLComponent(p.url) NOT IN (
+			SELECT loc FROM crawlobserver.sitemap_urls FINAL WHERE crawl_session_id = ? AND loc != ''
+		  )
+		  AND p.crawled_at < ?
+		  AND (p.final_url = '' OR p.final_url = p.url)
+		ORDER BY p.crawled_at ASC
+		LIMIT ?`, sessionID, sessionID, sessionID, sessionID, olderThan, limit)
+	if err != nil {
+		return nil, fmt.Errorf("querying orphan 404 cleanup candidates: %w", err)
+	}
+	defer rows.Close()
+
+	out := []Orphan404CleanupCandidate{}
+	for rows.Next() {
+		var c Orphan404CleanupCandidate
+		var inlinks uint64
+		if err := rows.Scan(&c.URL, &c.Title, &c.StatusCode, &c.CrawledAt, &inlinks); err != nil {
+			return nil, fmt.Errorf("scanning orphan 404 cleanup candidate: %w", err)
+		}
+		c.InternalLinksIn = uint32(min(inlinks, uint64(^uint32(0))))
+		c.IsInSitemap = false
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating orphan 404 cleanup candidates: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) deleteURLSet(ctx context.Context, table, condition string, args ...interface{}) error {
+	query := fmt.Sprintf(`ALTER TABLE crawlobserver.%s DELETE
+		WHERE crawl_session_id = ? AND (%s)
+		SETTINGS mutations_sync = 1`, table, condition)
+	if err := s.conn.Exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("deleting from %s: %w", table, err)
+	}
+	return nil
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }
 
 // PageLinksResult holds outbound links, inbound links (paginated), and counts.
@@ -746,6 +1411,14 @@ func isValidUUID(s string) bool {
 //
 // Returns normalized scores in 0–100 range.
 func ComputePageRankIterations(n uint32, outLinks [][]uint32, totalOutLinks []uint32, edgeWeights ...[][]float64) []float64 {
+	rank := ComputePageRankRawIterations(n, outLinks, totalOutLinks, edgeWeights...)
+	return NormalizePageRankScores(rank, 0)
+}
+
+// ComputePageRankRawIterations runs the PageRank power method and returns
+// unscaled linear scores. Use this when comparing multiple scenarios; normalize
+// both result sets with the same reference max before computing user-facing diffs.
+func ComputePageRankRawIterations(n uint32, outLinks [][]uint32, totalOutLinks []uint32, edgeWeights ...[][]float64) []float64 {
 	const damping = 0.85
 	const iterations = 20
 	const tolerance = 1e-6
@@ -811,24 +1484,35 @@ func ComputePageRankIterations(n uint32, outLinks [][]uint32, totalOutLinks []ui
 			break
 		}
 	}
+	return rank
+}
 
+// NormalizePageRankScores converts raw PageRank scores to CrawlObserver's
+// 0-100-ish logarithmic display scale. When referenceMax is 0, the max score
+// from ranks is used. Pass a stable referenceMax when comparing before/after
+// scenarios so the two sets stay on the same scale.
+func NormalizePageRankScores(rank []float64, referenceMax float64) []float64 {
+	normalized := make([]float64, len(rank))
+	copy(normalized, rank)
 	// Normalize to 0–100 with logarithmic scale.
 	// Log scale spreads the distribution: a page at 10% of max goes from
 	// score 10 → ~52, a page at 1% goes from 1 → ~15. Max stays 100.
-	var maxRank float64
-	for _, r := range rank {
-		if r > maxRank {
-			maxRank = r
+	maxRank := referenceMax
+	if maxRank <= 0 {
+		for _, r := range normalized {
+			if r > maxRank {
+				maxRank = r
+			}
 		}
 	}
 	if maxRank > 0 {
 		logMax := math.Log1p(100.0)
-		for i := range rank {
-			linear := (rank[i] / maxRank) * 100.0
-			rank[i] = math.Log1p(linear) / logMax * 100.0
+		for i := range normalized {
+			linear := (normalized[i] / maxRank) * 100.0
+			normalized[i] = math.Log1p(linear) / logMax * 100.0
 		}
 	}
-	return rank
+	return normalized
 }
 
 // ComputePageRank computes internal PageRank for all pages in a session.
@@ -836,16 +1520,69 @@ func ComputePageRankIterations(n uint32, outLinks [][]uint32, totalOutLinks []ui
 // URL→ID mapping is done in ClickHouse via a Join-engine temp table,
 // so only uint32 pairs are transferred for the link graph.
 func (s *Store) ComputePageRank(ctx context.Context, sessionID string) error {
+	return s.ComputePageRankWithOptions(ctx, sessionID, PageRankOptions{IncludeFooterLinks: true})
+}
+
+// ComputePageRankWithOptions computes internal PageRank with project-level graph options.
+func (s *Store) ComputePageRankWithOptions(ctx context.Context, sessionID string, opts PageRankOptions) (retErr error) {
 	start := time.Now()
 	if !isValidUUID(sessionID) {
 		return fmt.Errorf("invalid session ID: %s", sessionID)
 	}
+	lock := pageRankAttemptLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
 
-	// 1. Load all crawled URLs with redirect/canonical resolution data
+	before, err := s.readPageRankSnapshot(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	predecessor := ""
+	if previous, err := s.LatestFinalizedPageRankEvidence(ctx, sessionID); err == nil {
+		predecessor = previous.AttemptID
+	} else if !errors.Is(err, ErrNoFinalizedPageRankEvidence) {
+		return fmt.Errorf("reading previous pagerank evidence: %w", err)
+	}
+	attempt := PageRankEvidence{
+		SessionID: sessionID, AttemptID: uuid.NewString(), PredecessorAttemptID: predecessor,
+		State: PageRankEvidenceStarted, Source: PageRankEvidenceComputed,
+		AlgorithmVersion: PageRankAlgorithmVersion, PredicateVersion: PageRankEligiblePredicateVersion,
+		OptionsSignature: PageRankOptionsSignature(opts), GraphFingerprint: before.Graph,
+		GraphPageCount: before.GraphPageCount, EligiblePageCount: before.Population.Eligible,
+		PositivePageCount: before.Population.Positive, ZeroPageCount: before.Population.Zero,
+		QueryIdentity: pageRankEvidenceQueryIdentity, OccurredAt: time.Now().UTC(),
+	}
+	if err := s.appendPageRankEvidence(ctx, &attempt); err != nil {
+		return fmt.Errorf("recording pagerank start: %w", err)
+	}
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		failed := attempt
+		failed.State = PageRankEvidenceFailed
+		failed.OccurredAt = time.Now().UTC()
+		failed.Failure = retErr.Error()
+		failureCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.appendPageRankEvidence(failureCtx, &failed); err != nil {
+			applog.Errorf("storage", "recording failed pagerank evidence for %s: %v", sessionID, err)
+		}
+	}()
+	if opts.RefreshLinkLocation && !opts.IncludeFooterLinks && len(opts.FooterSelectors) > 0 {
+		if err := s.refreshLinkLocations(ctx, sessionID, opts.FooterSelectors); err != nil {
+			return fmt.Errorf("refreshing link locations: %w", err)
+		}
+	}
+	linkLocationFilter := pageRankLinkLocationFilter(opts)
+
+	// 1. Only eligible rows become graph nodes. Ineligible redirects and
+	// canonicals may be retained only as aliases to an eligible final target.
 	urlRows, err := s.conn.Query(ctx, `
 		SELECT url, final_url, status_code, canonical, canonical_is_self,
-			length(redirect_chain) AS redirect_hops
-		FROM crawlobserver.pages FINAL WHERE crawl_session_id = ?`, sessionID)
+			length(redirect_chain) AS redirect_hops,
+			`+PageRankEligiblePredicate("p")+` AS pagerank_eligible
+		FROM crawlobserver.pages AS p FINAL WHERE p.crawl_session_id = ?`, sessionID)
 	if err != nil {
 		return fmt.Errorf("querying URLs: %w", err)
 	}
@@ -858,21 +1595,27 @@ func (s *Store) ComputePageRank(ctx context.Context, sessionID string) error {
 		canonical     string
 		canonicalSelf bool
 		redirectHops  uint64
+		eligible      bool
 	}
 
+	var discoveredPages []pageInfo
 	var allPages []pageInfo
 	for urlRows.Next() {
 		var p pageInfo
-		if err := urlRows.Scan(&p.url, &p.finalURL, &p.statusCode, &p.canonical, &p.canonicalSelf, &p.redirectHops); err != nil {
+		if err := urlRows.Scan(&p.url, &p.finalURL, &p.statusCode, &p.canonical, &p.canonicalSelf, &p.redirectHops, &p.eligible); err != nil {
 			return fmt.Errorf("scanning URL: %w", err)
 		}
-		allPages = append(allPages, p)
+		discoveredPages = append(discoveredPages, p)
+		if p.eligible {
+			allPages = append(allPages, p)
+		}
 	}
 	if err := urlRows.Err(); err != nil {
 		return fmt.Errorf("iterating URLs: %w", err)
 	}
 	if len(allPages) == 0 {
-		return nil
+		_, err := s.finalizeComputedPageRankEvidence(ctx, attempt, before.Graph)
+		return err
 	}
 
 	// 1b. Build redirect/canonical resolution map
@@ -883,11 +1626,10 @@ func (s *Store) ComputePageRank(ctx context.Context, sessionID string) error {
 		knownURLs[p.url] = true
 	}
 
-	resolveTarget := make(map[string]string, len(allPages))
-	resolveHops := make(map[string]uint64, len(allPages))
-	for _, p := range allPages {
-		// 3xx redirect: resolve to final_url
-		if p.statusCode >= 300 && p.statusCode < 400 && p.finalURL != "" && p.finalURL != p.url {
+	resolveTarget := make(map[string]string, len(discoveredPages))
+	resolveHops := make(map[string]uint64, len(discoveredPages))
+	for _, p := range discoveredPages {
+		if p.finalURL != "" && p.finalURL != p.url {
 			if knownURLs[p.finalURL] {
 				resolveTarget[p.url] = p.finalURL
 				resolveHops[p.url] = p.redirectHops
@@ -945,11 +1687,12 @@ func (s *Store) ComputePageRank(ctx context.Context, sessionID string) error {
 
 	n := uint32(len(idToURL))
 	if n == 0 {
-		return nil
+		_, err := s.finalizeComputedPageRankEvidence(ctx, attempt, before.Graph)
+		return err
 	}
 
-	applog.Infof("storage", "PageRank: loaded %d URLs (%d consolidated via redirect/canonical) in %s",
-		len(allPages), len(allPages)-int(n), time.Since(start))
+	applog.Infof("storage", "PageRank: loaded %d eligible URLs (%d aliases consolidated) in %s",
+		len(allPages), len(resolveTarget), time.Since(start))
 
 	// 2. Build URL→ID temp table in ClickHouse for server-side ID resolution
 	idTable := fmt.Sprintf("crawlobserver.tmp_urlids_%s", strings.ReplaceAll(sessionID, "-", ""))
@@ -970,7 +1713,7 @@ func (s *Store) ComputePageRank(ctx context.Context, sessionID string) error {
 		url string
 		id  uint32
 	}
-	allMappings := make([]urlIDPair, 0, len(allPages))
+	allMappings := make([]urlIDPair, 0, len(discoveredPages))
 	for j := 0; j < int(n); j++ {
 		allMappings = append(allMappings, urlIDPair{idToURL[j], uint32(j)})
 	}
@@ -1017,14 +1760,13 @@ func (s *Store) ComputePageRank(ctx context.Context, sessionID string) error {
 		FROM crawlobserver.links
 		WHERE crawl_session_id = ?
 			AND source_url IN (
-				SELECT url FROM crawlobserver.pages FINAL
-				WHERE crawl_session_id = ?
-				  AND status_code < 300
-				  AND (canonical_is_self OR canonical = '' OR canonical = url)
+				SELECT p.url FROM crawlobserver.pages AS p FINAL
+				WHERE p.crawl_session_id = ? AND `+PageRankEligiblePredicate("p")+`
 			)
 			AND source_url != target_url
+			%s
 		GROUP BY src_id`,
-		idTable), sessionID, sessionID)
+		idTable, linkLocationFilter), sessionID, sessionID)
 	if err != nil {
 		return fmt.Errorf("querying total outlink counts: %w", err)
 	}
@@ -1060,8 +1802,8 @@ func (s *Store) ComputePageRank(ctx context.Context, sessionID string) error {
 		url  string
 		hops uint64
 	}
-	hopEntries := make([]urlHopsPair, 0, len(allPages))
-	for _, p := range allPages {
+	hopEntries := make([]urlHopsPair, 0, len(discoveredPages))
+	for _, p := range discoveredPages {
 		hops := resolveHops[p.url] // 0 for non-redirected pages
 		hopEntries = append(hopEntries, urlHopsPair{p.url, hops})
 	}
@@ -1098,16 +1840,15 @@ func (s *Store) ComputePageRank(ctx context.Context, sessionID string) error {
 		FROM crawlobserver.links
 		WHERE crawl_session_id = ? AND is_internal = true
 			AND NOT hasAny(splitByString(' ', lower(rel)), ['nofollow', 'sponsored', 'ugc'])
+			%s
 			AND source_url IN (
-				SELECT url FROM crawlobserver.pages FINAL
-				WHERE crawl_session_id = ?
-				  AND status_code < 300
-				  AND (canonical_is_self OR canonical = '' OR canonical = url)
+				SELECT p.url FROM crawlobserver.pages AS p FINAL
+				WHERE p.crawl_session_id = ? AND `+PageRankEligiblePredicate("p")+`
 			)
 			AND target_url IN (SELECT url FROM %s)
 		GROUP BY src_id, tgt_id, tgt_hops
 		HAVING src_id != tgt_id`,
-		idTable, idTable, hopsTable, idTable), sessionID, sessionID)
+		idTable, idTable, hopsTable, linkLocationFilter, idTable), sessionID, sessionID)
 	if err != nil {
 		return fmt.Errorf("querying links: %w", err)
 	}
@@ -1178,7 +1919,7 @@ func (s *Store) ComputePageRank(ctx context.Context, sessionID string) error {
 		url string
 		pr  float64
 	}
-	prPairs := make([]urlPRPair, 0, len(allPages))
+	prPairs := make([]urlPRPair, 0, len(discoveredPages))
 	for j := 0; j < int(n); j++ {
 		prPairs = append(prPairs, urlPRPair{idToURL[j], rank[j]})
 	}
@@ -1216,16 +1957,99 @@ func (s *Store) ComputePageRank(ctx context.Context, sessionID string) error {
 	// Use joinGet to look up pagerank from the Join-engine temp table.
 	// Single mutation, no data copy, no correlated subquery.
 	query := fmt.Sprintf(`ALTER TABLE crawlobserver.pages UPDATE
-		pagerank = joinGet('%s', 'new_pagerank', url)
+		pagerank = joinGet('%s', 'new_pagerank', url),
+		pagerank_revision = toUUID(?)
 		WHERE crawl_session_id = ?
 		SETTINGS mutations_sync = 1`,
 		tmpTable)
-	if err := s.conn.Exec(ctx, query, sessionID); err != nil {
+	if err := s.conn.Exec(ctx, query, attempt.AttemptID, sessionID); err != nil {
 		return fmt.Errorf("updating pagerank via joinGet: %w", err)
 	}
+	if _, err := s.finalizeComputedPageRankEvidence(ctx, attempt, before.Graph); err != nil {
+		return fmt.Errorf("verifying pagerank evidence: %w", err)
+	}
 
-	applog.Infof("storage", "ComputePageRank: computed for %d pages in session %s in %s", n, sessionID, time.Since(start))
+	applog.Infof("storage", "ComputePageRank: computed for %d pages in session %s (include_footer_links=%t) in %s", n, sessionID, opts.IncludeFooterLinks, time.Since(start))
 	return nil
+}
+
+func (s *Store) refreshLinkLocations(ctx context.Context, sessionID string, footerSelectors []string) error {
+	rows, err := s.conn.Query(ctx, `
+		SELECT url, body_html, crawled_at
+		FROM crawlobserver.pages FINAL
+		WHERE crawl_session_id = ? AND body_html != ''`, sessionID)
+	if err != nil {
+		return fmt.Errorf("querying stored HTML: %w", err)
+	}
+	defer rows.Close()
+
+	var links []LinkRow
+	var pageURLs []string
+	for rows.Next() {
+		var pageURL, bodyHTML string
+		var crawledAt time.Time
+		if err := rows.Scan(&pageURL, &bodyHTML, &crawledAt); err != nil {
+			return fmt.Errorf("scanning stored HTML: %w", err)
+		}
+		pageURLs = append(pageURLs, pageURL)
+		data, err := parser.ParseWithOptions([]byte(bodyHTML), pageURL, parser.ParseOptions{
+			FooterSelectors: footerSelectors,
+		})
+		if err != nil {
+			return fmt.Errorf("parsing stored HTML for %s: %w", pageURL, err)
+		}
+		for _, l := range data.Links {
+			links = append(links, LinkRow{
+				CrawlSessionID: sessionID,
+				SourceURL:      pageURL,
+				TargetURL:      l.TargetURL,
+				AnchorText:     l.AnchorText,
+				Rel:            l.Rel,
+				IsInternal:     l.IsInternal,
+				Tag:            l.Tag,
+				LinkLocation:   l.Location,
+				CrawledAt:      crawledAt,
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating stored HTML: %w", err)
+	}
+	if len(pageURLs) == 0 {
+		applog.Warnf("storage", "Skipped link location refresh for session %s: no stored HTML available", sessionID)
+		return nil
+	}
+
+	const deleteChunkSize = 500
+	for start := 0; start < len(pageURLs); start += deleteChunkSize {
+		end := min(start+deleteChunkSize, len(pageURLs))
+		chunk := pageURLs[start:end]
+		args := make([]interface{}, 0, len(chunk)+1)
+		args = append(args, sessionID)
+		for _, pageURL := range chunk {
+			args = append(args, pageURL)
+		}
+		if err := s.conn.Exec(ctx,
+			fmt.Sprintf(`ALTER TABLE crawlobserver.links DELETE
+				WHERE crawl_session_id = ? AND source_url IN (%s)
+				SETTINGS mutations_sync = 1`, placeholders(len(chunk))),
+			args...,
+		); err != nil {
+			return fmt.Errorf("deleting old links for refreshed pages: %w", err)
+		}
+	}
+	if err := s.InsertLinks(ctx, links); err != nil {
+		return fmt.Errorf("inserting refreshed links: %w", err)
+	}
+	applog.Infof("storage", "Refreshed link locations for %d page(s), %d link(s) in session %s", len(pageURLs), len(links), sessionID)
+	return nil
+}
+
+func pageRankLinkLocationFilter(opts PageRankOptions) string {
+	if opts.IncludeFooterLinks {
+		return ""
+	}
+	return "AND link_location != 'footer'"
 }
 
 // UpdateContentHashes updates content_hash for pages via a temp Join table + mutation.
@@ -1534,28 +2358,44 @@ type PageRankBucket struct {
 
 // PageRankDistributionResult holds the full distribution response.
 type PageRankDistributionResult struct {
-	Buckets     []PageRankBucket `json:"buckets"`
-	TotalWithPR uint64           `json:"total_with_pr"`
-	Avg         float64          `json:"avg"`
-	Median      float64          `json:"median"`
-	P90         float64          `json:"p90"`
-	P99         float64          `json:"p99"`
+	Buckets     []PageRankBucket  `json:"buckets"`
+	TotalWithPR uint64            `json:"total_with_pr"`
+	Eligible    uint64            `json:"eligible_pages"`
+	Positive    uint64            `json:"positive_pages"`
+	Zero        uint64            `json:"zero_pages"`
+	Evidence    *PageRankEvidence `json:"evidence,omitempty"`
+	Avg         float64           `json:"avg"`
+	Median      float64           `json:"median"`
+	P90         float64           `json:"p90"`
+	P99         float64           `json:"p99"`
 }
 
 // PageRankDistribution returns a histogram of PageRank values for a session.
 func (s *Store) PageRankDistribution(ctx context.Context, sessionID string, buckets int) (*PageRankDistributionResult, error) {
+	lock := pageRankAttemptLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	if buckets <= 0 {
 		buckets = 20
 	}
 
 	result := &PageRankDistributionResult{}
+	evidence, snapshot, err := s.verifiedPageRankReportEvidence(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	result.Eligible = snapshot.Population.Eligible
+	result.Positive = snapshot.Population.Positive
+	result.Zero = snapshot.Population.Zero
+	result.Evidence = evidence
 
 	// Stats + percentiles
 	row := s.conn.QueryRow(ctx, `
 		SELECT count(), avg(pagerank),
 			quantile(0.5)(pagerank), quantile(0.9)(pagerank), quantile(0.99)(pagerank)
-		FROM crawlobserver.pages FINAL
-		WHERE crawl_session_id = ? AND pagerank > 0 AND `+notRedirectedFilter, sessionID)
+		FROM crawlobserver.pages AS p FINAL
+		WHERE p.crawl_session_id = ? AND `+PageRankEligiblePredicate("p")+` AND p.pagerank > 0`, sessionID)
 	if err := row.Scan(&result.TotalWithPR, &result.Avg, &result.Median, &result.P90, &result.P99); err != nil {
 		return nil, fmt.Errorf("querying pagerank stats: %w", err)
 	}
@@ -1575,8 +2415,8 @@ func (s *Store) PageRankDistribution(ctx context.Context, sessionID string, buck
 			floor(pagerank / %f) * %f + %f AS bucket_max,
 			count() AS cnt,
 			avg(pagerank) AS avg_pr
-		FROM crawlobserver.pages FINAL
-		WHERE crawl_session_id = ? AND pagerank > 0 AND `+notRedirectedFilter+`
+			FROM crawlobserver.pages AS p FINAL
+			WHERE p.crawl_session_id = ? AND `+PageRankEligiblePredicate("p")+` AND p.pagerank > 0
 		GROUP BY bucket_min, bucket_max
 		ORDER BY bucket_min`, width, width, width, width, width)
 	rows, err := s.conn.Query(ctx, distQuery, sessionID)
@@ -1618,6 +2458,13 @@ func (s *Store) PageRankTreemap(ctx context.Context, sessionID string, depth, mi
 	if minPages <= 0 {
 		minPages = 1
 	}
+	lock := pageRankAttemptLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if _, _, err := s.verifiedPageRankReportEvidence(ctx, sessionID); err != nil {
+		return nil, err
+	}
 
 	query := fmt.Sprintf(`
 		SELECT
@@ -1626,8 +2473,8 @@ func (s *Store) PageRankTreemap(ctx context.Context, sessionID string, depth, mi
 			sum(pagerank) AS total_pr,
 			avg(pagerank) AS avg_pr,
 			max(pagerank) AS max_pr
-		FROM crawlobserver.pages FINAL
-		WHERE crawl_session_id = ? AND pagerank > 0 AND `+notRedirectedFilter+`
+			FROM crawlobserver.pages AS p FINAL
+			WHERE p.crawl_session_id = ? AND `+PageRankEligiblePredicate("p")+`
 		GROUP BY dir_path
 		HAVING page_count >= %d
 		ORDER BY total_pr DESC
@@ -1669,20 +2516,36 @@ type PageRankTopPage struct {
 
 // PageRankTopResult holds the paginated top PageRank pages response.
 type PageRankTopResult struct {
-	Pages []PageRankTopPage `json:"pages"`
-	Total uint64            `json:"total"`
+	Pages    []PageRankTopPage `json:"pages"`
+	Total    uint64            `json:"total"`
+	Eligible uint64            `json:"eligible_pages"`
+	Positive uint64            `json:"positive_pages"`
+	Zero     uint64            `json:"zero_pages"`
+	Evidence *PageRankEvidence `json:"evidence,omitempty"`
 }
 
 // PageRankTop returns the top pages by PageRank with metadata, paginated.
 func (s *Store) PageRankTop(ctx context.Context, sessionID string, limit, offset int, directory string) (*PageRankTopResult, error) {
+	lock := pageRankAttemptLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	if limit <= 0 {
 		limit = 50
 	}
 
 	result := &PageRankTopResult{}
+	evidence, snapshot, err := s.verifiedPageRankReportEvidence(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	result.Eligible = snapshot.Population.Eligible
+	result.Positive = snapshot.Population.Positive
+	result.Zero = snapshot.Population.Zero
+	result.Evidence = evidence
 
 	// Count query
-	countQuery := `SELECT count() FROM crawlobserver.pages FINAL WHERE crawl_session_id = ? AND pagerank > 0 AND ` + notRedirectedFilter
+	countQuery := `SELECT count() FROM crawlobserver.pages AS p FINAL WHERE p.crawl_session_id = ? AND ` + PageRankEligiblePredicate("p")
 	countArgs := []interface{}{sessionID}
 	if directory != "" {
 		countQuery += ` AND url LIKE ?`
@@ -1695,8 +2558,8 @@ func (s *Store) PageRankTop(ctx context.Context, sessionID string, limit, offset
 
 	// Data query
 	query := `SELECT url, pagerank, depth, internal_links_out, external_links_out, word_count, status_code, title
-		FROM crawlobserver.pages FINAL
-		WHERE crawl_session_id = ? AND pagerank > 0 AND ` + notRedirectedFilter
+		FROM crawlobserver.pages AS p FINAL
+		WHERE p.crawl_session_id = ? AND ` + PageRankEligiblePredicate("p")
 	args := []interface{}{sessionID}
 	if directory != "" {
 		query += ` AND url LIKE ?`
@@ -2518,14 +3381,26 @@ var weightedPRSortColumns = map[string]string{
 
 // WeightedPageRankTop returns pages ranked by a weighted PageRank that fuses internal PR with SEObserver data.
 func (s *Store) WeightedPageRankTop(ctx context.Context, sessionID, projectID string, limit, offset int, directory, sort, order string) (*WeightedPageRankResult, error) {
+	lock := pageRankAttemptLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	if limit <= 0 {
 		limit = 50
 	}
 
 	result := &WeightedPageRankResult{}
+	evidence, snapshot, err := s.verifiedPageRankReportEvidence(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	result.Eligible = snapshot.Population.Eligible
+	result.Positive = snapshot.Population.Positive
+	result.Zero = snapshot.Population.Zero
+	result.Evidence = evidence
 
-	// Count pages with PR > 0
-	countQuery := `SELECT count() FROM crawlobserver.pages FINAL WHERE crawl_session_id = ? AND pagerank > 0 AND ` + notRedirectedFilter
+	// Count the same eligible population used by PageRank evidence.
+	countQuery := `SELECT count() FROM crawlobserver.pages AS p FINAL WHERE p.crawl_session_id = ? AND ` + PageRankEligiblePredicate("p")
 	countArgs := []interface{}{sessionID}
 	if directory != "" {
 		countQuery += ` AND url LIKE ?`
@@ -2560,8 +3435,8 @@ func (s *Store) WeightedPageRankTop(ctx context.Context, sessionID, projectID st
 			t.ttf_topic
 		FROM (
 			SELECT url, pagerank, depth, internal_links_out, status_code, title
-			FROM crawlobserver.pages FINAL
-			WHERE crawl_session_id = ? AND pagerank > 0 AND ` + notRedirectedFilter + `
+			FROM crawlobserver.pages AS p FINAL
+			WHERE p.crawl_session_id = ? AND ` + PageRankEligiblePredicate("p") + `
 		) AS p
 		CROSS JOIN (
 			SELECT

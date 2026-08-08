@@ -32,12 +32,16 @@ type SessionStore interface {
 type PageStore interface {
 	ListPages(ctx context.Context, sessionID string, limit, offset int, filters []storage.ParsedFilter, sort *storage.SortParam) ([]storage.PageRow, error)
 	ListPageIssues(ctx context.Context, sessionID string, limit, offset int, severity, issueType, urlFilter string) ([]storage.PageIssue, error)
+	CoreWebVitalsReport(ctx context.Context, sessionID string, limit, offset int, rating, sort, order string) (*storage.CoreWebVitalsReport, error)
 	GetPage(ctx context.Context, sessionID, url string) (*storage.PageRow, error)
+	GetPageDiscovery(ctx context.Context, sessionID, url string, limit int) (*storage.PageDiscoveryEvidence, error)
 	GetPageHTML(ctx context.Context, sessionID, url string) (string, error)
 	GetPageLinks(ctx context.Context, sessionID, url string, outLimit, outOffset, inLimit, inOffset int) (*storage.PageLinksResult, error)
 	StatusTimeline(ctx context.Context, sessionID string) ([]storage.StatusTimelineBucket, error)
 	StatusTimelineRecent(ctx context.Context, sessionID string) ([]storage.StatusTimelineBucket, error)
 	ListRedirectPages(ctx context.Context, sessionID string, limit, offset int, filters []storage.ParsedFilter, sort *storage.SortParam) ([]storage.RedirectPageRow, error)
+	DeletePagesAndReferences(ctx context.Context, sessionID string, urls []string) (int, error)
+	ListOrphan404CleanupCandidates(ctx context.Context, sessionID string, olderThan time.Time, limit int) ([]storage.Orphan404CleanupCandidate, error)
 }
 
 // LinkStore handles internal/external link browsing and expired domains.
@@ -52,6 +56,7 @@ type LinkStore interface {
 // PageRankStore handles PageRank computation, distribution, and weighted PR.
 type PageRankStore interface {
 	ComputePageRank(ctx context.Context, sessionID string) error
+	ComputePageRankWithOptions(ctx context.Context, sessionID string, opts storage.PageRankOptions) error
 	RecomputeDepths(ctx context.Context, sessionID string, seedURLs []string) error
 	PageRankDistribution(ctx context.Context, sessionID string, buckets int) (*storage.PageRankDistributionResult, error)
 	PageRankTreemap(ctx context.Context, sessionID string, depth, minPages int) ([]storage.PageRankTreemapEntry, error)
@@ -68,6 +73,7 @@ type SitemapRobotsStore interface {
 	GetSitemaps(ctx context.Context, sessionID string) ([]storage.SitemapRow, error)
 	GetSitemapURLs(ctx context.Context, sessionID, sitemapURL string, limit, offset int) ([]storage.SitemapURLRow, error)
 	GetSitemapCoverageURLs(ctx context.Context, sessionID, filter string, limit, offset int) ([]storage.SitemapURLRow, error)
+	CountSitemapURLs(ctx context.Context, sessionID string) (int, error)
 }
 
 // ContentAnalysisStore handles near-duplicates, content hashes, resources, audit, and HTML streaming.
@@ -127,10 +133,12 @@ type InterlinkingStore interface {
 	LoadInternalLinkSet(ctx context.Context, sessionID string) (map[[2]string]struct{}, error)
 	LoadPageMetadata(ctx context.Context, sessionID string) (map[string]storage.PageMetadata, error)
 	LoadPageRankGraph(ctx context.Context, sessionID string) (*storage.PageRankGraph, error)
+	ExistingLinkPairs(ctx context.Context, sessionID string, links []storage.VirtualLink) (map[storage.VirtualLink]bool, error)
+	ResolveExistingLinkPairs(ctx context.Context, sessionID string, links []storage.VirtualLink) (map[storage.VirtualLink]storage.VirtualLink, error)
 	InsertSimulation(ctx context.Context, sessionID string, simID string, virtualLinks []storage.VirtualLink, results []storage.SimulationResultRow, meta storage.SimulationMeta) error
 	ListSimulations(ctx context.Context, sessionID string) ([]storage.SimulationMeta, error)
 	GetSimulation(ctx context.Context, sessionID, simID string) (*storage.SimulationMeta, error)
-	ListSimulationResults(ctx context.Context, sessionID, simID string, limit, offset int, filters []storage.ParsedFilter, sort *storage.SortParam) ([]storage.SimulationResultRow, int, error)
+	ListSimulationResults(ctx context.Context, sessionID, simID string, limit, offset int, filters []storage.ParsedFilter, sort *storage.SortParam, htmlOnly bool) ([]storage.SimulationResultRow, int, error)
 }
 
 // CrawlStore handles core crawl data: sessions, pages, links, stats, and analysis.

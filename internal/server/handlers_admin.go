@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -76,46 +75,6 @@ func (s *Server) handleGlobalStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Auto-assign orphan sessions: create a project per hostname and associate
-	if s.keyStore != nil {
-		// Build reverse map: project name -> id
-		nameToID := make(map[string]string, len(projectMap))
-		for id, name := range projectMap {
-			nameToID[name] = id
-		}
-
-		for i, sess := range sessions {
-			if sess.ProjectID != nil {
-				continue
-			}
-			// Extract hostname from first seed URL
-			hostname := "unknown"
-			if len(sess.SeedURLs) > 0 {
-				if u, err := url.Parse(sess.SeedURLs[0]); err == nil && u.Hostname() != "" {
-					hostname = u.Hostname()
-				}
-			}
-			// Find or create project for this hostname
-			pid, exists := nameToID[hostname]
-			if !exists {
-				p, err := s.keyStore.CreateProject(hostname)
-				if err != nil {
-					applog.Warnf("server", "auto-assign: failed to create project %q: %v", hostname, err)
-					continue
-				}
-				pid = p.ID
-				nameToID[hostname] = pid
-				projectMap[pid] = hostname
-			}
-			// Associate session to project
-			if err := s.store.UpdateSessionProject(r.Context(), sess.ID, &pid); err != nil {
-				applog.Warnf("server", "auto-assign: failed to associate session %s: %v", sess.ID, err)
-				continue
-			}
-			sessions[i].ProjectID = &pid
-		}
-	}
-
 	// Build session-to-project mapping
 	type sessionInfo struct {
 		ProjectID *string
@@ -150,7 +109,13 @@ func (s *Server) handleGlobalStats(w http.ResponseWriter, r *http.Request) {
 	var globalFetchCount uint64
 
 	for _, gs := range sessionStats {
-		info := sessionMap[gs.SessionID]
+		info, ok := sessionMap[gs.SessionID]
+		if !ok {
+			// Data partitions without a visible crawl_sessions row are not user-facing
+			// sessions. They can be synthetic snapshots or stale orphaned partitions,
+			// and must not be grouped as "(No project)" in the Stats UI.
+			continue
+		}
 		key := ""
 		if info.ProjectID != nil {
 			key = *info.ProjectID
@@ -347,6 +312,10 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	if err := s.deleteProjectCurrentSnapshot(r.Context(), id); err != nil {
+		internalError(w, r, err)
+		return
+	}
 	if err := s.keyStore.DeleteProject(id); err != nil {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
@@ -359,6 +328,10 @@ func (s *Server) handleDeleteProjectWithSessions(w http.ResponseWriter, r *http.
 		return
 	}
 	id := r.PathValue("id")
+	if err := s.deleteProjectCurrentSnapshot(r.Context(), id); err != nil {
+		internalError(w, r, err)
+		return
+	}
 
 	// List all sessions belonging to this project
 	sessions, err := s.store.ListSessions(r.Context(), id)
@@ -474,14 +447,30 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	if s.UpdateStatus == nil {
-		writeJSON(w, map[string]interface{}{"available": false, "current_version": updater.Version})
+		writeJSON(w, map[string]interface{}{"available": false, "current_version": updater.Version, "update_supported": updater.IsSelfUpdateSupported()})
 		return
 	}
-	writeJSON(w, s.UpdateStatus.Snapshot())
+	snap := s.UpdateStatus.Snapshot()
+	if !updater.IsSelfUpdateSupported() {
+		snap.Available = false
+	}
+	writeJSON(w, map[string]interface{}{
+		"available":        snap.Available,
+		"current_version":  snap.CurrentVersion,
+		"latest_version":   snap.LatestVersion,
+		"release_url":      snap.ReleaseURL,
+		"checked_at":       snap.CheckedAt,
+		"error":            snap.Error,
+		"update_supported": updater.IsSelfUpdateSupported(),
+	})
 }
 
 func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	if !requireFullAccess(w, r) {
+		return
+	}
+	if updater.IsDockerBuild() {
+		writeError(w, http.StatusBadRequest, "self-update is not supported for this deployment; update via Docker Compose")
 		return
 	}
 	if s.UpdateStatus == nil {

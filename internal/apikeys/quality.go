@@ -21,6 +21,8 @@ type ProjectQualitySettings struct {
 	InternalLinksMinDelta         int       `json:"internal_links_min_delta"`
 	Status404Percent              float64   `json:"status_404_percent"`
 	Status404MinDelta             int       `json:"status_404_min_delta"`
+	Status5xxPercent              float64   `json:"status_5xx_percent"`
+	Status5xxMinDelta             int       `json:"status_5xx_min_delta"`
 	NoindexPercent                float64   `json:"noindex_percent"`
 	NoindexMinDelta               int       `json:"noindex_min_delta"`
 	RedirectPercent               float64   `json:"redirect_percent"`
@@ -31,6 +33,16 @@ type ProjectQualitySettings struct {
 	PageRankTopOverlapMinPercent  float64   `json:"pagerank_top_overlap_min_percent"`
 	PageRankZeroTopPagesMax       int       `json:"pagerank_zero_top_pages_max"`
 	CanaryMinInternalLinksDefault int       `json:"canary_min_internal_links_default"`
+	DeltaMinCrawledPages          int       `json:"delta_min_crawled_pages"`
+	DeltaMinCrawledPercent        float64   `json:"delta_min_crawled_percent"`
+	DeltaMinLaunchedCandidates    int       `json:"delta_min_launched_candidates"`
+	DeltaMinLaunchedPercent       float64   `json:"delta_min_launched_percent"`
+	DeltaMinSitemapCandidates     int       `json:"delta_min_sitemap_candidates"`
+	DeltaMinSitemapPercent        float64   `json:"delta_min_sitemap_percent"`
+	DeltaCandidateCoveragePercent float64   `json:"delta_candidate_coverage_percent"`
+	DeltaStatus5xxPercent         float64   `json:"delta_status_5xx_percent"`
+	DeltaStatus5xxMinPages        int       `json:"delta_status_5xx_min_pages"`
+	DeltaRequireCanaries          bool      `json:"delta_require_canaries"`
 	UpdatedAt                     time.Time `json:"updated_at"`
 }
 
@@ -62,6 +74,8 @@ func DefaultProjectQualitySettings(projectID string) ProjectQualitySettings {
 		InternalLinksMinDelta:         500,
 		Status404Percent:              10,
 		Status404MinDelta:             25,
+		Status5xxPercent:              5,
+		Status5xxMinDelta:             5,
 		NoindexPercent:                10,
 		NoindexMinDelta:               25,
 		RedirectPercent:               15,
@@ -72,6 +86,16 @@ func DefaultProjectQualitySettings(projectID string) ProjectQualitySettings {
 		PageRankTopOverlapMinPercent:  50,
 		PageRankZeroTopPagesMax:       2,
 		CanaryMinInternalLinksDefault: 1,
+		DeltaMinCrawledPages:          5,
+		DeltaMinCrawledPercent:        50,
+		DeltaMinLaunchedCandidates:    0,
+		DeltaMinLaunchedPercent:       0,
+		DeltaMinSitemapCandidates:     1,
+		DeltaMinSitemapPercent:        30,
+		DeltaCandidateCoveragePercent: 100,
+		DeltaStatus5xxPercent:         5,
+		DeltaStatus5xxMinPages:        5,
+		DeltaRequireCanaries:          false,
 		UpdatedAt:                     time.Now().UTC(),
 	}
 }
@@ -91,6 +115,7 @@ func sanitizeQualitySettings(in ProjectQualitySettings) ProjectQualitySettings {
 	out.CoverageGrowthPercent = clampPercent(out.CoverageGrowthPercent, 50)
 	out.InternalLinksDropPercent = clampPercent(out.InternalLinksDropPercent, 25)
 	out.Status404Percent = clampPercent(out.Status404Percent, 10)
+	out.Status5xxPercent = clampPercent(out.Status5xxPercent, 5)
 	out.NoindexPercent = clampPercent(out.NoindexPercent, 10)
 	out.RedirectPercent = clampPercent(out.RedirectPercent, 15)
 	out.CanonicalMismatchPercent = clampPercent(out.CanonicalMismatchPercent, 10)
@@ -103,6 +128,9 @@ func sanitizeQualitySettings(in ProjectQualitySettings) ProjectQualitySettings {
 	}
 	if out.Status404MinDelta < 0 {
 		out.Status404MinDelta = 0
+	}
+	if out.Status5xxMinDelta < 0 {
+		out.Status5xxMinDelta = 0
 	}
 	if out.NoindexMinDelta < 0 {
 		out.NoindexMinDelta = 0
@@ -122,6 +150,23 @@ func sanitizeQualitySettings(in ProjectQualitySettings) ProjectQualitySettings {
 	if out.CanaryMinInternalLinksDefault < 0 {
 		out.CanaryMinInternalLinksDefault = 0
 	}
+	if out.DeltaMinCrawledPages < 0 {
+		out.DeltaMinCrawledPages = 0
+	}
+	out.DeltaMinCrawledPercent = clampPercent(out.DeltaMinCrawledPercent, 50)
+	if out.DeltaMinLaunchedCandidates < 0 {
+		out.DeltaMinLaunchedCandidates = 0
+	}
+	out.DeltaMinLaunchedPercent = clampPercentAllowZero(out.DeltaMinLaunchedPercent)
+	if out.DeltaMinSitemapCandidates < 0 {
+		out.DeltaMinSitemapCandidates = 0
+	}
+	out.DeltaMinSitemapPercent = clampPercentAllowZero(out.DeltaMinSitemapPercent)
+	out.DeltaCandidateCoveragePercent = clampPercent(out.DeltaCandidateCoveragePercent, 100)
+	out.DeltaStatus5xxPercent = clampPercent(out.DeltaStatus5xxPercent, 5)
+	if out.DeltaStatus5xxMinPages < 0 {
+		out.DeltaStatus5xxMinPages = 0
+	}
 	return out
 }
 
@@ -132,28 +177,49 @@ func clampPercent(v, fallback float64) float64 {
 	return v
 }
 
+func clampPercentAllowZero(v float64) float64 {
+	if v < 0 || v > 100 {
+		return 0
+	}
+	return v
+}
+
 func (s *Store) GetProjectQualitySettings(projectID string) (*ProjectQualitySettings, error) {
 	defaults := DefaultProjectQualitySettings(projectID)
 	row := s.db.QueryRow(`
 		SELECT project_id, enabled, min_trusted_score, untrusted_score_below,
 			coverage_drop_percent, coverage_growth_percent, coverage_min_pages_delta,
 			internal_links_drop_percent, internal_links_min_delta,
-			status_404_percent, status_404_min_delta, noindex_percent, noindex_min_delta,
+			status_404_percent, status_404_min_delta, status_5xx_percent, status_5xx_min_delta,
+			noindex_percent, noindex_min_delta,
 			redirect_percent, redirect_min_delta, canonical_mismatch_percent, canonical_mismatch_min_delta,
 			pagerank_top_n, pagerank_top_overlap_min_percent, pagerank_zero_top_pages_max,
-			canary_min_internal_links_default, updated_at
+			canary_min_internal_links_default,
+			delta_min_crawled_pages, delta_min_crawled_percent,
+			delta_min_launched_candidates, delta_min_launched_percent,
+			delta_min_sitemap_candidates, delta_min_sitemap_percent,
+			delta_candidate_coverage_percent, delta_status_5xx_percent, delta_status_5xx_min_pages,
+			delta_require_canaries,
+			updated_at
 		FROM project_quality_settings WHERE project_id = ?`, projectID)
 
 	var st ProjectQualitySettings
-	var enabled int
+	var enabled, deltaRequireCanaries int
 	if err := row.Scan(
 		&st.ProjectID, &enabled, &st.MinTrustedScore, &st.UntrustedScoreBelow,
 		&st.CoverageDropPercent, &st.CoverageGrowthPercent, &st.CoverageMinPagesDelta,
 		&st.InternalLinksDropPercent, &st.InternalLinksMinDelta,
-		&st.Status404Percent, &st.Status404MinDelta, &st.NoindexPercent, &st.NoindexMinDelta,
+		&st.Status404Percent, &st.Status404MinDelta, &st.Status5xxPercent, &st.Status5xxMinDelta,
+		&st.NoindexPercent, &st.NoindexMinDelta,
 		&st.RedirectPercent, &st.RedirectMinDelta, &st.CanonicalMismatchPercent, &st.CanonicalMismatchMinDelta,
 		&st.PageRankTopN, &st.PageRankTopOverlapMinPercent, &st.PageRankZeroTopPagesMax,
-		&st.CanaryMinInternalLinksDefault, &st.UpdatedAt,
+		&st.CanaryMinInternalLinksDefault,
+		&st.DeltaMinCrawledPages, &st.DeltaMinCrawledPercent,
+		&st.DeltaMinLaunchedCandidates, &st.DeltaMinLaunchedPercent,
+		&st.DeltaMinSitemapCandidates, &st.DeltaMinSitemapPercent,
+		&st.DeltaCandidateCoveragePercent, &st.DeltaStatus5xxPercent, &st.DeltaStatus5xxMinPages,
+		&deltaRequireCanaries,
+		&st.UpdatedAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return &defaults, nil
@@ -161,6 +227,7 @@ func (s *Store) GetProjectQualitySettings(projectID string) (*ProjectQualitySett
 		return nil, err
 	}
 	st.Enabled = enabled != 0
+	st.DeltaRequireCanaries = deltaRequireCanaries != 0
 	return &st, nil
 }
 
@@ -175,11 +242,18 @@ func (s *Store) SaveProjectQualitySettings(settings ProjectQualitySettings) (*Pr
 			project_id, enabled, min_trusted_score, untrusted_score_below,
 			coverage_drop_percent, coverage_growth_percent, coverage_min_pages_delta,
 			internal_links_drop_percent, internal_links_min_delta,
-			status_404_percent, status_404_min_delta, noindex_percent, noindex_min_delta,
+			status_404_percent, status_404_min_delta, status_5xx_percent, status_5xx_min_delta,
+			noindex_percent, noindex_min_delta,
 			redirect_percent, redirect_min_delta, canonical_mismatch_percent, canonical_mismatch_min_delta,
 			pagerank_top_n, pagerank_top_overlap_min_percent, pagerank_zero_top_pages_max,
-			canary_min_internal_links_default, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			canary_min_internal_links_default,
+			delta_min_crawled_pages, delta_min_crawled_percent,
+			delta_min_launched_candidates, delta_min_launched_percent,
+			delta_min_sitemap_candidates, delta_min_sitemap_percent,
+			delta_candidate_coverage_percent, delta_status_5xx_percent, delta_status_5xx_min_pages,
+			delta_require_canaries,
+			updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id) DO UPDATE SET
 			enabled = excluded.enabled,
 			min_trusted_score = excluded.min_trusted_score,
@@ -191,6 +265,8 @@ func (s *Store) SaveProjectQualitySettings(settings ProjectQualitySettings) (*Pr
 			internal_links_min_delta = excluded.internal_links_min_delta,
 			status_404_percent = excluded.status_404_percent,
 			status_404_min_delta = excluded.status_404_min_delta,
+			status_5xx_percent = excluded.status_5xx_percent,
+			status_5xx_min_delta = excluded.status_5xx_min_delta,
 			noindex_percent = excluded.noindex_percent,
 			noindex_min_delta = excluded.noindex_min_delta,
 			redirect_percent = excluded.redirect_percent,
@@ -201,14 +277,31 @@ func (s *Store) SaveProjectQualitySettings(settings ProjectQualitySettings) (*Pr
 			pagerank_top_overlap_min_percent = excluded.pagerank_top_overlap_min_percent,
 			pagerank_zero_top_pages_max = excluded.pagerank_zero_top_pages_max,
 			canary_min_internal_links_default = excluded.canary_min_internal_links_default,
+			delta_min_crawled_pages = excluded.delta_min_crawled_pages,
+			delta_min_crawled_percent = excluded.delta_min_crawled_percent,
+			delta_min_launched_candidates = excluded.delta_min_launched_candidates,
+			delta_min_launched_percent = excluded.delta_min_launched_percent,
+			delta_min_sitemap_candidates = excluded.delta_min_sitemap_candidates,
+			delta_min_sitemap_percent = excluded.delta_min_sitemap_percent,
+			delta_candidate_coverage_percent = excluded.delta_candidate_coverage_percent,
+			delta_status_5xx_percent = excluded.delta_status_5xx_percent,
+			delta_status_5xx_min_pages = excluded.delta_status_5xx_min_pages,
+			delta_require_canaries = excluded.delta_require_canaries,
 			updated_at = excluded.updated_at`,
 		settings.ProjectID, boolInt(settings.Enabled), settings.MinTrustedScore, settings.UntrustedScoreBelow,
 		settings.CoverageDropPercent, settings.CoverageGrowthPercent, settings.CoverageMinPagesDelta,
 		settings.InternalLinksDropPercent, settings.InternalLinksMinDelta,
-		settings.Status404Percent, settings.Status404MinDelta, settings.NoindexPercent, settings.NoindexMinDelta,
+		settings.Status404Percent, settings.Status404MinDelta, settings.Status5xxPercent, settings.Status5xxMinDelta,
+		settings.NoindexPercent, settings.NoindexMinDelta,
 		settings.RedirectPercent, settings.RedirectMinDelta, settings.CanonicalMismatchPercent, settings.CanonicalMismatchMinDelta,
 		settings.PageRankTopN, settings.PageRankTopOverlapMinPercent, settings.PageRankZeroTopPagesMax,
-		settings.CanaryMinInternalLinksDefault, now,
+		settings.CanaryMinInternalLinksDefault,
+		settings.DeltaMinCrawledPages, settings.DeltaMinCrawledPercent,
+		settings.DeltaMinLaunchedCandidates, settings.DeltaMinLaunchedPercent,
+		settings.DeltaMinSitemapCandidates, settings.DeltaMinSitemapPercent,
+		settings.DeltaCandidateCoveragePercent, settings.DeltaStatus5xxPercent, settings.DeltaStatus5xxMinPages,
+		boolInt(settings.DeltaRequireCanaries),
+		now,
 	)
 	if err != nil {
 		return nil, err

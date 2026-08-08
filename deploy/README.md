@@ -149,6 +149,53 @@ sudo docker compose restart app
 
 For app deploys and rollbacks, prefer `./deploy-app.sh` and `./rollback-app.sh`.
 
+### Quality Evidence Rollout
+
+Quality/PageRank evidence schema changes are additive and are applied by the app
+startup migration. For a rollout or rollback:
+
+1. Run `CHECK_ONLY=1 ./restart-app-safe.sh` and stop if any crawl is active.
+2. Capture the current app image, health response, ClickHouse `SELECT 1`, Current
+   Snapshot binding, and the affected session's current quality/evidence revision.
+3. Build or select only the app image, run the safety check again, then restart
+   only the `app` service through `restart-app-safe.sh`. Never use `FORCE=1`.
+4. Verify health, ClickHouse continuity and recent app logs before invoking an
+   admin quality re-evaluation.
+
+Before production rollout, run the Phase 25.1 integration-tag tests against a
+real isolated ClickHouse with `CRAWLOBSERVER_REQUIRE_CLICKHOUSE=1`. The gate must
+execute rather than skip and covers mutation visibility, compaction, restart
+readback, pointer ordering, partial-publication recovery, and snapshot retry.
+
+Quality re-evaluation is a metadata/evaluation operation. It must use explicit
+confirmation and an audit reason, and must not be substituted with a new crawl,
+manual PageRank recomputation, threshold changes, or direct edits to historical
+rows. Repeating the request with the same expected revisions is idempotent and
+may retry only an incomplete Current Snapshot promotion.
+
+### ClickHouse Log Retention
+
+The ClickHouse container writes server logs to the
+`deploy_clickhouse_logs` Docker volume. Install the host policy once:
+
+```bash
+cd deploy
+./install-clickhouse-log-retention.sh
+```
+
+The policy:
+
+- rotates `clickhouse-server.log` and `clickhouse-server.err.log` daily;
+- compresses rotated files;
+- retains at most seven rotations and removes archives older than seven days;
+- uses `copytruncate`, so ClickHouse does not need to restart;
+- removes old numeric archives created by ClickHouse's native size-based
+  rotation.
+
+The default paths assume the Compose project name is `deploy`. If the project
+name changes, update `deploy/logrotate/crawlobserver-clickhouse` before
+installing it.
+
 ## JS Rendering
 
 The app image includes Alpine Chromium and sets `CRAWLOBSERVER_CHROME_BIN=/usr/bin/chromium-browser`.

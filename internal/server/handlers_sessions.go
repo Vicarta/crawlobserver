@@ -69,7 +69,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		if pages, _, running := s.manager.Progress(sess.ID); running {
 			pagesCrawled = uint64(pages)
 		}
-		resp = append(resp, map[string]interface{}{
+		item := map[string]interface{}{
 			"ID":           sess.ID,
 			"StartedAt":    sess.StartedAt,
 			"FinishedAt":   sess.FinishedAt,
@@ -82,9 +82,29 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			"Label":        sess.Label,
 			"is_running":   s.manager.IsRunning(sess.ID),
 			"is_queued":    s.manager.IsQueued(sess.ID),
-		})
+		}
+		enrichSessionStopMetadata(item, sess.Config)
+		resp = append(resp, item)
 	}
 	writeJSON(w, resp)
+}
+
+// handleSession returns a single session, including synthetic current and
+// baseline snapshots which are intentionally excluded from the session list.
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	if !s.requireSessionAccess(w, r, sessionID) {
+		return
+	}
+
+	sess, err := s.store.GetSession(r.Context(), sessionID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	payload := s.sessionListPayload([]storage.CrawlSession{*sess})
+	writeJSON(w, payload[0])
 }
 
 func (s *Server) handleScopedSessions(w http.ResponseWriter, r *http.Request, auth *apikeys.AuthInfo) {
@@ -169,6 +189,7 @@ func (s *Server) sessionListPayload(sessions []storage.CrawlSession) []map[strin
 			"is_running":   s.manager.IsRunning(sess.ID),
 			"is_queued":    s.manager.IsQueued(sess.ID),
 		}
+		enrichSessionStopMetadata(item, sess.Config)
 		if quality, ok := qualityBySession[sess.ID]; ok {
 			item["quality"] = map[string]interface{}{
 				"status":              quality.Status,
@@ -185,6 +206,18 @@ func (s *Server) sessionListPayload(sessions []storage.CrawlSession) []map[strin
 		resp = []map[string]interface{}{}
 	}
 	return resp
+}
+
+func enrichSessionStopMetadata(item map[string]interface{}, configJSON string) {
+	meta, ok := config.SessionStopMetadataFromJSON(configJSON)
+	if !ok {
+		return
+	}
+	item["StopReason"] = meta.Reason
+	item["StopMessage"] = meta.Message
+	if !meta.At.IsZero() {
+		item["StopAt"] = meta.At
+	}
 }
 
 func (s *Server) handlePages(w http.ResponseWriter, r *http.Request) {
@@ -223,6 +256,89 @@ func (s *Server) handlePageIssues(w http.ResponseWriter, r *http.Request) {
 		issues = []storage.PageIssue{}
 	}
 	writeJSON(w, issues)
+}
+
+func (s *Server) handleCoreWebVitalsReport(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	if !s.requireSessionAccess(w, r, sessionID) {
+		return
+	}
+	limit, offset := clampPagination(queryInt(r, "limit", 100), queryInt(r, "offset", 0))
+	rating := r.URL.Query().Get("rating")
+	sort := r.URL.Query().Get("sort")
+	order := r.URL.Query().Get("order")
+
+	report, err := s.store.CoreWebVitalsReport(r.Context(), sessionID, limit, offset, rating, sort, order)
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	writeJSON(w, report)
+}
+
+func (s *Server) handleDeletePages(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminAccess(w, r) {
+		return
+	}
+	sessionID := r.PathValue("id")
+	if !s.requireSessionAccess(w, r, sessionID) {
+		return
+	}
+	var body struct {
+		URLs    []string `json:"urls"`
+		Confirm bool     `json:"confirm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !body.Confirm {
+		writeError(w, http.StatusBadRequest, "confirm must be true")
+		return
+	}
+	urls := cleanURLList(body.URLs)
+	if len(urls) == 0 {
+		writeError(w, http.StatusBadRequest, "no URLs provided")
+		return
+	}
+	deleted, err := s.store.DeletePagesAndReferences(r.Context(), sessionID, urls)
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	if deleted > 0 {
+		opts, err := s.pageRankOptionsForSession(r.Context(), sessionID)
+		if err != nil {
+			applog.Warnf("server", "DeletePages %s: using default PageRank options: %v", sessionID, err)
+		}
+		go func() {
+			if err := s.store.ComputePageRankWithOptions(context.Background(), sessionID, opts); err != nil {
+				applog.Errorf("server", "DeletePages PageRank recompute %s: %v", sessionID, err)
+			}
+		}()
+	}
+	writeJSON(w, map[string]interface{}{
+		"status":                         "ok",
+		"deleted":                        deleted,
+		"pagerank_recalculation_started": deleted > 0,
+	})
+}
+
+func cleanURLList(urls []string) []string {
+	seen := make(map[string]struct{}, len(urls))
+	result := make([]string, 0, len(urls))
+	for _, raw := range urls {
+		u := strings.TrimSpace(raw)
+		if u == "" {
+			continue
+		}
+		if _, ok := seen[u]; ok {
+			continue
+		}
+		seen[u] = struct{}{}
+		result = append(result, u)
+	}
+	return result
 }
 
 func (s *Server) handleLinks(w http.ResponseWriter, r *http.Request) {
@@ -417,6 +533,26 @@ func (s *Server) handleStartCrawl(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if req.ProjectID != nil {
+		projectID := strings.TrimSpace(*req.ProjectID)
+		if projectID == "" {
+			req.ProjectID = nil
+		} else {
+			if s.keyStore == nil {
+				writeError(w, http.StatusServiceUnavailable, "project storage unavailable")
+				return
+			}
+			if _, err := s.keyStore.GetProject(projectID); err != nil {
+				writeError(w, http.StatusNotFound, "project not found")
+				return
+			}
+			req.ProjectID = &projectID
+		}
+	}
+	if err := s.applyProjectPageRankSettings(r.Context(), &req); err != nil {
+		internalError(w, r, err)
+		return
+	}
 
 	sessionID, err := s.manager.StartCrawl(req)
 	if err != nil {
@@ -513,9 +649,15 @@ func (s *Server) handlePageDetail(w http.ResponseWriter, r *http.Request) {
 		internalError(w, r, err)
 		return
 	}
+	discovery, err := s.store.GetPageDiscovery(r.Context(), sessionID, url, 10)
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
 	writeJSON(w, map[string]interface{}{
-		"page":  page,
-		"links": links,
+		"page":      page,
+		"links":     links,
+		"discovery": discovery,
 	})
 }
 
@@ -532,6 +674,10 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.DeleteSession(r.Context(), sessionID); err != nil {
+		if strings.Contains(err.Error(), "protected by current snapshot") {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		internalError(w, r, err)
 		return
 	}
@@ -543,38 +689,22 @@ func (s *Server) handleDeleteUnassignedSessions(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Get all sessions with metadata
 	sessions, err := s.store.ListSessions(r.Context())
 	if err != nil {
 		internalError(w, r, err)
 		return
 	}
 
-	// Build set of session IDs that have a project
-	sessionHasProject := map[string]bool{}
+	var deleted int
 	for _, sess := range sessions {
 		if sess.ProjectID != nil {
-			sessionHasProject[sess.ID] = true
-		}
-	}
-
-	// Get all session IDs from data tables (pages/links stats)
-	globalStats, _, err := s.store.GlobalStats(r.Context())
-	if err != nil {
-		internalError(w, r, err)
-		return
-	}
-
-	var deleted int
-	for _, gs := range globalStats {
-		if sessionHasProject[gs.SessionID] {
 			continue
 		}
-		if s.manager.IsRunning(gs.SessionID) {
+		if s.manager.IsRunning(sess.ID) {
 			continue
 		}
-		if err := s.store.DeleteSession(r.Context(), gs.SessionID); err != nil {
-			applog.Warnf("server", "delete unassigned session %s: %v", gs.SessionID, err)
+		if err := s.store.DeleteSession(r.Context(), sess.ID); err != nil {
+			applog.Warnf("server", "delete unassigned session %s: %v", sess.ID, err)
 			continue
 		}
 		deleted++
@@ -735,9 +865,13 @@ func (s *Server) handleComputePageRank(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.PathValue("id")
+	opts, err := s.pageRankOptionsForSession(r.Context(), sessionID)
+	if err != nil {
+		applog.Warnf("server", "ComputePageRank %s: using default PageRank options: %v", sessionID, err)
+	}
 
 	go func() {
-		if err := s.store.ComputePageRank(context.Background(), sessionID); err != nil {
+		if err := s.store.ComputePageRankWithOptions(context.Background(), sessionID, opts); err != nil {
 			applog.Errorf("server", "ComputePageRank %s: %v", sessionID, err)
 		}
 	}()
@@ -746,6 +880,59 @@ func (s *Server) handleComputePageRank(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"message": fmt.Sprintf("PageRank computation started for session %s", sessionID),
 	})
+}
+
+func (s *Server) pageRankOptionsForSession(ctx context.Context, sessionID string) (storage.PageRankOptions, error) {
+	opts := storage.PageRankOptions{IncludeFooterLinks: true}
+	sess, err := s.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return opts, err
+	}
+	if sess.ProjectID == nil || *sess.ProjectID == "" || s.keyStore == nil {
+		return opts, nil
+	}
+	settings, err := s.keyStore.GetProjectDeltaSettings(*sess.ProjectID)
+	if err != nil {
+		return opts, err
+	}
+	opts.IncludeFooterLinks = settings.IncludeFooterLinksInPageRank
+	opts.FooterSelectors = append([]string(nil), settings.FooterSelectorPatterns...)
+	opts.RefreshLinkLocation = true
+	return opts, nil
+}
+
+func (s *Server) applyProjectPageRankSettings(ctx context.Context, req *crawler.CrawlRequest) error {
+	if req == nil || req.ProjectID == nil || *req.ProjectID == "" || s.keyStore == nil {
+		return nil
+	}
+	settings, err := s.keyStore.GetProjectDeltaSettings(*req.ProjectID)
+	if err != nil {
+		return err
+	}
+	req.IncludeFooterLinksInPageRank = &settings.IncludeFooterLinksInPageRank
+	req.FooterSelectorPatterns = append([]string(nil), settings.FooterSelectorPatterns...)
+	req.ExcludePatterns = mergeStringLists(req.ExcludePatterns, settings.BlockedURLPatterns)
+	return nil
+}
+
+func mergeStringLists(base, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	out := make([]string, 0, len(base)+len(extra))
+	for _, value := range append(base, extra...) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func (s *Server) handleComputeNearDuplicates(w http.ResponseWriter, r *http.Request) {

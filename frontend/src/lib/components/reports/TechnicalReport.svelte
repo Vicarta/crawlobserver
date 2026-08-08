@@ -8,7 +8,15 @@
   import AreaChart from '../charts/AreaChart.svelte';
   import AnimatedNumber from '../AnimatedNumber.svelte';
 
-  let { stats, audit, sessionId, isRunning = false, onnavigate, statsVersion = 0 } = $props();
+  let {
+    stats,
+    audit,
+    sessionId,
+    isRunning = false,
+    onnavigate,
+    onreportnavigate,
+    statsVersion = 0,
+  } = $props();
 
   // Status timeline charts
   let timeline = $state(null);
@@ -152,6 +160,7 @@
   }
 
   const tech = $derived(audit?.technical);
+  const cwvSummary = $derived(tech?.core_web_vitals);
 
   function indexSegments(d) {
     if (!d) return [];
@@ -262,6 +271,38 @@
 </script>
 
 {#if tech}
+  {#if cwvSummary}
+    <div class="report-section technical-cwv-summary">
+      <div class="technical-cwv-heading">
+        <div>
+          <h3 class="chart-title">{t('report.technical.coreWebVitals')}</h3>
+          <p>
+            {t('report.technical.coreWebVitalsSummary', {
+              measured: fmtN(cwvSummary.measured_pages || 0),
+              eligible: fmtN(cwvSummary.eligible_pages || 0),
+            })}
+          </p>
+        </div>
+        <button class="btn btn-sm" onclick={() => onreportnavigate?.()}>
+          {t('report.technical.viewCoreWebVitals')}
+        </button>
+      </div>
+      <div class="technical-cwv-ratings" aria-label={t('report.technical.coreWebVitals')}>
+        <span class="badge badge-success"
+          >{t('report.coreWebVitals.good')}: {fmtN(cwvSummary.good || 0)}</span
+        >
+        <span class="badge badge-warning"
+          >{t('report.coreWebVitals.needsImprovement')}: {fmtN(
+            cwvSummary.needs_improvement || 0,
+          )}</span
+        >
+        <span class="badge badge-error"
+          >{t('report.coreWebVitals.poor')}: {fmtN(cwvSummary.poor || 0)}</span
+        >
+      </div>
+    </div>
+  {/if}
+
   <div class="report-section">
     <h3 class="chart-title">{t('report.technical.indexability')}</h3>
     <div class="report-grid">
@@ -351,8 +392,8 @@
         class="stat-card stat-card-link"
         role="button"
         tabindex="0"
-        onclick={() => nav('response', { status_code: '3' })}
-        onkeydown={a11yKeydown(() => nav('response', { status_code: '3' }))}
+        onclick={() => nav('response', { status_code: '300-399' })}
+        onkeydown={a11yKeydown(() => nav('response', { status_code: '300-399' }))}
       >
         <div class="stat-value"><AnimatedNumber value={tech.has_redirect || 0} /></div>
         <div class="stat-label">{t('report.technical.pagesWithRedirect')}</div>
@@ -361,8 +402,8 @@
         class="stat-card stat-card-link"
         role="button"
         tabindex="0"
-        onclick={() => nav('response', { status_code: '3' })}
-        onkeydown={a11yKeydown(() => nav('response', { status_code: '3' }))}
+        onclick={() => nav('response', { status_code: '300-399' })}
+        onkeydown={a11yKeydown(() => nav('response', { status_code: '300-399' }))}
       >
         <div class="stat-value text-warning">
           <AnimatedNumber value={tech.redirect_chains_over_2 || 0} />
@@ -373,8 +414,8 @@
         class="stat-card stat-card-link"
         role="button"
         tabindex="0"
-        onclick={() => nav('response', { status_code: '5' })}
-        onkeydown={a11yKeydown(() => nav('response', { status_code: '5' }))}
+        onclick={() => nav('response', { status_code: '500-599' })}
+        onkeydown={a11yKeydown(() => nav('response', { status_code: '500-599' }))}
       >
         <div class="stat-value text-error"><AnimatedNumber value={tech.error_pages || 0} /></div>
         <div class="stat-label">{t('report.technical.errorPages')}</div>
@@ -388,6 +429,20 @@
       >
         <div class="stat-value text-error"><AnimatedNumber value={tech.soft_404 || 0} /></div>
         <div class="stat-label">{t('report.technical.soft404')}</div>
+      </div>
+      <div
+        class="stat-card stat-card-link"
+        role="button"
+        tabindex="0"
+        onclick={() => nav('issues', { issue_type: 'shared_rendered_metadata_shell' })}
+        onkeydown={a11yKeydown(() =>
+          nav('issues', { issue_type: 'shared_rendered_metadata_shell' }),
+        )}
+      >
+        <div class="stat-value text-error">
+          <AnimatedNumber value={tech.shared_rendered_metadata_shell || 0} />
+        </div>
+        <div class="stat-label">{t('report.technical.sharedRenderedMetadataShell')}</div>
       </div>
     </div>
   </div>
@@ -451,9 +506,39 @@
 {/if}
 
 <style>
+  .technical-cwv-summary {
+    border-bottom: 1px solid var(--border-light);
+    padding-bottom: 20px;
+  }
+  .technical-cwv-heading {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .technical-cwv-heading p {
+    color: var(--text-muted);
+    font-size: 13px;
+    margin: 4px 0 0;
+  }
+  .technical-cwv-ratings {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+  }
   .noindex-heading {
     font-size: 14px;
     color: var(--text-secondary);
     margin-bottom: 12px;
+  }
+  @media (max-width: 560px) {
+    .technical-cwv-heading {
+      align-items: stretch;
+      flex-direction: column;
+    }
+    .technical-cwv-heading .btn {
+      align-self: flex-start;
+    }
   }
 </style>

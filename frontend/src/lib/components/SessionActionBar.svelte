@@ -8,6 +8,7 @@
   } from '../api.js';
   import { fmtN, a11yKeydown } from '../utils.js';
   import { t } from '../i18n/index.svelte.js';
+  import { sessionStopLabel, sessionStopTitle } from '../sessionStop.js';
 
   let {
     session,
@@ -212,6 +213,11 @@
       class:badge-warning={session.Status === 'stopped' ||
         session.Status === 'completed_with_errors'}>{session.Status}</span
     >
+    {#if sessionStopLabel(session)}
+      <span class="action-bar-stop-reason" title={sessionStopTitle(session)}
+        >{sessionStopLabel(session)}</span
+      >
+    {/if}
     {#if session.StartedAt && session.StartedAt !== '1970-01-01T00:00:00Z'}
       <span class="action-bar-meta">{fmtDate(session.StartedAt)} &middot; {elapsed()}</span>
     {/if}
@@ -679,6 +685,12 @@
     font-size: 12px;
     color: var(--text-muted);
     white-space: nowrap;
+  }
+
+  .action-bar-stop-reason {
+    color: var(--warning);
+    font-size: 12px;
+    font-weight: 600;
   }
   .action-bar-icons {
     display: flex;

@@ -1,7 +1,10 @@
 package renderer
 
 import (
+	"context"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +39,10 @@ type Pool struct {
 	opts    PoolOptions
 	mu      sync.Mutex
 	closed  bool
+
+	// originGates prevents parallel top-level renders from overwhelming one SPA
+	// origin while preserving concurrency across unrelated origins.
+	originGates sync.Map // map[string]chan struct{}
 }
 
 // NewPool launches a headless Chrome and creates a page pool.
@@ -97,6 +104,30 @@ func (p *Pool) Acquire() (*rod.Page, error) {
 	}
 
 	return page, nil
+}
+
+func (p *Pool) acquireOrigin(ctx context.Context, rawURL string) (func(), error) {
+	key := renderOrigin(rawURL)
+	if key == "" {
+		return func() {}, nil
+	}
+
+	value, _ := p.originGates.LoadOrStore(key, make(chan struct{}, 1))
+	gate := value.(chan struct{})
+	select {
+	case gate <- struct{}{}:
+		return func() { <-gate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func renderOrigin(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
 }
 
 // Release returns a page to the pool or closes it if the pool is full.

@@ -168,28 +168,28 @@
         value: groups['2xx'],
         color: 'var(--success)',
         label: t('report.overview.2xxSuccess'),
-        onclick: () => nav('overview', { status_code: '2' }),
+        onclick: () => nav('overview', { status_code: '200-299' }),
       });
     if (groups['3xx'] > 0)
       segs.push({
         value: groups['3xx'],
         color: 'var(--info)',
         label: t('report.overview.3xxRedirect'),
-        onclick: () => nav('overview', { status_code: '3' }),
+        onclick: () => nav('overview', { status_code: '300-399' }),
       });
     if (groups['4xx'] > 0)
       segs.push({
         value: groups['4xx'],
         color: 'var(--warning)',
         label: t('report.overview.4xxClientError'),
-        onclick: () => nav('overview', { status_code: '4' }),
+        onclick: () => nav('overview', { status_code: '400-499' }),
       });
     if (groups['5xx'] > 0)
       segs.push({
         value: groups['5xx'],
         color: 'var(--error)',
         label: t('report.overview.5xxServerError'),
-        onclick: () => nav('overview', { status_code: '5' }),
+        onclick: () => nav('overview', { status_code: '500-599' }),
       });
     if (groups['0'] > 0)
       segs.push({

@@ -1,6 +1,11 @@
 <script>
   import { onMount } from 'svelte';
-  import { getExternalLinkChecks, getExternalLinkCheckDomains, buildApiPath } from '../api.js';
+  import {
+    getExternalLinks,
+    getExternalLinkChecks,
+    getExternalLinkCheckDomains,
+    buildApiPath,
+  } from '../api.js';
   import { fetchAll, downloadCSV } from '../utils.js';
   import { t } from '../i18n/index.svelte.js';
   import SearchSelect from './SearchSelect.svelte';
@@ -10,7 +15,7 @@
 
   let {
     sessionId,
-    initialSubView = 'domains',
+    initialSubView = 'links',
     initialFilters = {},
     basePath = null,
     onpushurl,
@@ -28,12 +33,16 @@
     onnavigate?.(urlDetailHref(url));
   }
 
-  let view = $state(initialSubView); // 'domains' | 'urls'
+  const initialView = initialSubView === 'urls' ? 'checks' : initialSubView;
+  let view = $state(['links', 'domains', 'checks'].includes(initialView) ? initialView : 'links');
+  let links = $state([]);
   let domains = $state([]);
   let checks = $state([]);
   let loading = $state(false);
+  let linksOffset = $state(0);
   let domainsOffset = $state(0);
   let checksOffset = $state(0);
+  let hasMoreLinks = $state(false);
   let hasMoreDomains = $state(false);
   let hasMoreChecks = $state(false);
   let sortColumn = $state('');
@@ -41,6 +50,14 @@
 
   let domainFilters = $state({
     domain: initialFilters.domain || '',
+  });
+  let linkFilters = $state({
+    source_url: initialFilters.source_url || '',
+    target_url: initialFilters.target_url || '',
+    anchor_text: initialFilters.anchor_text || '',
+    rel: initialFilters.rel || '',
+    tag: initialFilters.tag || '',
+    link_location: initialFilters.link_location || '',
   });
   let urlFilters = $state({
     url: initialFilters.url || '',
@@ -53,12 +70,32 @@
   function pushFilters() {
     const base = `${basePath || `/sessions/${sessionId}/ext-checks`}/${view}`;
     const params = new URLSearchParams();
-    const f = view === 'domains' ? domainFilters : urlFilters;
+    const f = view === 'links' ? linkFilters : view === 'domains' ? domainFilters : urlFilters;
     for (const [k, v] of Object.entries(f)) {
       if (v) params.set(k, v);
     }
     const qs = params.toString();
     onpushurl?.(qs ? `${base}?${qs}` : base);
+  }
+
+  async function loadLinks() {
+    loading = true;
+    try {
+      const result = await getExternalLinks(
+        sessionId,
+        PAGE_SIZE,
+        linksOffset,
+        linkFilters,
+        sortColumn,
+        sortOrder,
+      );
+      links = result || [];
+      hasMoreLinks = links.length === PAGE_SIZE;
+    } catch (e) {
+      onerror?.(e.message);
+    } finally {
+      loading = false;
+    }
   }
 
   async function loadDomains() {
@@ -102,20 +139,30 @@
   }
 
   function loadData() {
-    if (view === 'domains') loadDomains();
+    if (view === 'links') loadLinks();
+    else if (view === 'domains') loadDomains();
     else loadChecks();
   }
 
-  function switchToUrls(domain) {
+  function switchToChecks(domain) {
     urlFilters = domain
       ? { url: domain, status_code: '', error: '', source_url: '' }
       : { url: '', status_code: '', error: '', source_url: '' };
     checksOffset = 0;
     sortColumn = '';
     sortOrder = '';
-    view = 'urls';
+    view = 'checks';
     pushFilters();
     loadChecks();
+  }
+
+  function switchToLinks() {
+    linksOffset = 0;
+    sortColumn = '';
+    sortOrder = '';
+    view = 'links';
+    pushFilters();
+    loadLinks();
   }
 
   function switchToDomains() {
@@ -146,13 +193,17 @@
   function handleSort(col, ord) {
     sortColumn = col;
     sortOrder = ord;
-    if (view === 'domains') domainsOffset = 0;
+    if (view === 'links') linksOffset = 0;
+    else if (view === 'domains') domainsOffset = 0;
     else checksOffset = 0;
     loadData();
   }
 
   function setFilter(key, val) {
-    if (view === 'domains') {
+    if (view === 'links') {
+      linkFilters[key] = val;
+      linkFilters = { ...linkFilters };
+    } else if (view === 'domains') {
       domainFilters[key] = val;
       domainFilters = { ...domainFilters };
     } else {
@@ -162,14 +213,25 @@
   }
 
   function applyFilters() {
-    if (view === 'domains') domainsOffset = 0;
+    if (view === 'links') linksOffset = 0;
+    else if (view === 'domains') domainsOffset = 0;
     else checksOffset = 0;
     pushFilters();
     loadData();
   }
 
   function clearFilters() {
-    if (view === 'domains') {
+    if (view === 'links') {
+      linkFilters = {
+        source_url: '',
+        target_url: '',
+        anchor_text: '',
+        rel: '',
+        tag: '',
+        link_location: '',
+      };
+      linksOffset = 0;
+    } else if (view === 'domains') {
       domainFilters = { domain: '' };
       domainsOffset = 0;
     } else {
@@ -181,7 +243,7 @@
   }
 
   function hasActiveFilters() {
-    const f = view === 'domains' ? domainFilters : urlFilters;
+    const f = view === 'links' ? linkFilters : view === 'domains' ? domainFilters : urlFilters;
     return Object.values(f).some((v) => v && v !== '');
   }
 
@@ -191,7 +253,17 @@
     if (exporting) return;
     exporting = true;
     try {
-      if (view === 'domains') {
+      if (view === 'links') {
+        const allData = await fetchAll((limit, offset) =>
+          getExternalLinks(sessionId, limit, offset, linkFilters, sortColumn, sortOrder),
+        );
+        downloadCSV(
+          'links-external.csv',
+          ['Source URL', 'External URL', 'Anchor Text', 'Rel', 'Tag', 'Location'],
+          ['SourceURL', 'TargetURL', 'AnchorText', 'Rel', 'Tag', 'LinkLocation'],
+          allData,
+        );
+      } else if (view === 'domains') {
         const allData = await fetchAll((limit, offset) =>
           getExternalLinkCheckDomains(
             sessionId,
@@ -263,6 +335,15 @@
   }
 
   let apiPath = $derived.by(() => {
+    if (view === 'links') {
+      return buildApiPath(`/sessions/${sessionId}/links`, {
+        limit: PAGE_SIZE,
+        offset: 0,
+        ...linkFilters,
+        sort: sortColumn,
+        order: sortOrder,
+      });
+    }
     if (view === 'domains') {
       return buildApiPath(`/sessions/${sessionId}/external-checks/domains`, {
         limit: PAGE_SIZE,
@@ -289,11 +370,12 @@
 <div class="ext-checks">
   <div class="ext-checks-header">
     <div class="ext-checks-views">
+      <button class="btn-view" class:active={view === 'links'} onclick={switchToLinks}>Links</button>
       <button class="btn-view" class:active={view === 'domains'} onclick={switchToDomains}
         >{t('extChecks.domains')}</button
       >
-      <button class="btn-view" class:active={view === 'urls'} onclick={() => switchToUrls('')}
-        >{t('extChecks.urls')}</button
+      <button class="btn-view" class:active={view === 'checks'} onclick={() => switchToChecks('')}
+        >Checks</button
       >
     </div>
     <div class="ext-export">
@@ -303,8 +385,66 @@
 
   {#if loading}
     <div class="ext-loading">{t('common.loading')}</div>
+  {:else if view === 'links'}
+    <DataTable
+      tableId="links-external"
+      columns={[
+        { label: 'Source', sortKey: 'source_url', defaultWidth: 380 },
+        { label: 'External URL', sortKey: 'target_url', defaultWidth: 460 },
+        { label: t('session.anchorText'), sortKey: 'anchor_text', defaultWidth: 220 },
+        { label: 'Rel', sortKey: 'rel', defaultWidth: 130 },
+        { label: t('session.tag'), sortKey: 'tag', defaultWidth: 100 },
+        { label: 'Location', sortKey: 'link_location', defaultWidth: 110 },
+      ]}
+      filterKeys={['source_url', 'target_url', 'anchor_text', 'rel', 'tag', 'link_location']}
+      filters={linkFilters}
+      data={links}
+      offset={linksOffset}
+      pageSize={PAGE_SIZE}
+      hasMore={hasMoreLinks}
+      hasActiveFilters={hasActiveFilters()}
+      onsetfilter={setFilter}
+      onapplyfilters={applyFilters}
+      onclearfilters={clearFilters}
+      onnextpage={() => {
+        linksOffset += PAGE_SIZE;
+        loadLinks();
+      }}
+      onprevpage={() => {
+        linksOffset = Math.max(0, linksOffset - PAGE_SIZE);
+        loadLinks();
+      }}
+      {sortColumn}
+      {sortOrder}
+      onsort={handleSort}
+    >
+      {#snippet row(link)}
+        <tr>
+          <td class="cell-url" title={link.SourceURL}
+            ><span class="cell-url-inner"
+              ><a
+                href={urlDetailHref(link.SourceURL)}
+                onclick={(e) => goToUrlDetail(e, link.SourceURL)}>{link.SourceURL}</a
+              ><UrlActions url={link.SourceURL} /></span
+            ></td
+          >
+          <td class="cell-url" title={link.TargetURL}
+            ><span class="cell-url-inner"
+              ><a href={link.TargetURL} target="_blank" rel="noopener">{link.TargetURL}</a><UrlActions
+                url={link.TargetURL}
+              /></span
+            ></td
+          >
+          <td class="cell-title" title={link.AnchorText}>{link.AnchorText || '-'}</td>
+          <td>{link.Rel || '-'}</td>
+          <td>{link.Tag || '-'}</td>
+          <td>{link.LinkLocation || '-'}</td>
+        </tr>
+      {/snippet}
+    </DataTable>
   {:else if view === 'domains'}
     <DataTable
+      tableId="external-check-domains"
       columns={[
         { label: t('extChecks.domain'), sortKey: 'domain' },
         { label: t('extChecks.urls'), sortKey: 'total_urls' },
@@ -343,7 +483,7 @@
         <tr>
           <td class="cell-url"
             ><span class="cell-url-inner"
-              ><button class="link-btn" onclick={() => switchToUrls(d.domain)}>{d.domain}</button
+              ><button class="link-btn" onclick={() => switchToChecks(d.domain)}>{d.domain}</button
               ><UrlActions url={`https://${d.domain}`} /></span
             ></td
           >
@@ -392,6 +532,7 @@
     </DataTable>
   {:else}
     <DataTable
+      tableId="external-link-checks"
       columns={[
         { label: t('common.url'), sortKey: 'url' },
         { label: t('common.status'), sortKey: 'status_code' },

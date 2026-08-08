@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/SEObserver/crawlobserver/internal/applog"
@@ -21,14 +22,17 @@ func (s *Store) InsertSession(ctx context.Context, session *CrawlSession) error 
 	)
 }
 
+const nonSyntheticSessionFilter = `(label NOT IN ('Current Snapshot', 'Current Baseline Snapshot'))`
+
 // ListSessions retrieves crawl sessions, optionally filtered by project ID.
 func (s *Store) ListSessions(ctx context.Context, projectID ...string) ([]CrawlSession, error) {
 	query := `
 		SELECT id, started_at, finished_at, status, seed_urls, config, pages_crawled, user_agent, project_id, label
-		FROM crawlobserver.crawl_sessions FINAL`
+		FROM crawlobserver.crawl_sessions FINAL
+		WHERE ` + nonSyntheticSessionFilter
 	var args []interface{}
 	if len(projectID) > 0 && projectID[0] != "" {
-		query += ` WHERE project_id = ?`
+		query += ` AND project_id = ?`
 		args = append(args, projectID[0])
 	}
 	query += ` ORDER BY started_at DESC`
@@ -57,9 +61,110 @@ func (s *Store) ListSessions(ctx context.Context, projectID ...string) ([]CrawlS
 	return sessions, nil
 }
 
+// RetentionProtectedSessionIDs returns sessions that must not be pruned by
+// automatic retention because other read models still reference them.
+func (s *Store) RetentionProtectedSessionIDs(ctx context.Context) (map[string]struct{}, error) {
+	protected := map[string]struct{}{}
+	add := func(id string) {
+		if isValidUUID(id) {
+			protected[id] = struct{}{}
+		}
+	}
+
+	rows, err := s.conn.Query(ctx, `
+		SELECT toString(current_session_id), baseline_session_id, last_delta_session_id
+		FROM crawlobserver.project_current_snapshots FINAL`)
+	if err != nil {
+		return nil, fmt.Errorf("querying protected current snapshots: %w", err)
+	}
+	for rows.Next() {
+		var currentID, baselineID, lastDeltaID string
+		if err := rows.Scan(&currentID, &baselineID, &lastDeltaID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scanning protected current snapshots: %w", err)
+		}
+		add(currentID)
+		add(baselineID)
+		add(lastDeltaID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterating protected current snapshots: %w", err)
+	}
+	rows.Close()
+
+	rows, err = s.conn.Query(ctx, `
+		SELECT toString(delta_session_id), toString(current_session_id)
+		FROM crawlobserver.project_current_snapshot_deltas FINAL`)
+	if err != nil {
+		return nil, fmt.Errorf("querying protected current snapshot deltas: %w", err)
+	}
+	for rows.Next() {
+		var deltaID, currentID string
+		if err := rows.Scan(&deltaID, &currentID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scanning protected current snapshot deltas: %w", err)
+		}
+		add(deltaID)
+		add(currentID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterating protected current snapshot deltas: %w", err)
+	}
+	rows.Close()
+
+	rows, err = s.conn.Query(ctx, `
+		SELECT toString(qr.session_id), qr.baseline_session_id
+		FROM crawlobserver.crawl_quality_current_pointers AS pointer FINAL
+		INNER JOIN crawlobserver.crawl_quality_evaluations AS qr
+			ON qr.session_id = pointer.session_id AND qr.evaluation_revision = pointer.evaluation_revision
+		WHERE qr.trusted = true AND qr.is_full_crawl = true`)
+	if err != nil {
+		return nil, fmt.Errorf("querying protected immutable quality baselines: %w", err)
+	}
+	for rows.Next() {
+		var sessionID, baselineID string
+		if err := rows.Scan(&sessionID, &baselineID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scanning protected immutable quality baselines: %w", err)
+		}
+		add(sessionID)
+		add(baselineID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterating protected immutable quality baselines: %w", err)
+	}
+	rows.Close()
+
+	// Keep legacy baselines protected until their first pointer-selected read
+	// imports them into the immutable quality history.
+	rows, err = s.conn.Query(ctx, `
+		SELECT session_id, baseline_session_id
+		FROM crawlobserver.crawl_quality_results FINAL
+		WHERE trusted = true AND is_full_crawl = true`)
+	if err != nil {
+		return nil, fmt.Errorf("querying protected quality baselines: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sessionID, baselineID string
+		if err := rows.Scan(&sessionID, &baselineID); err != nil {
+			return nil, fmt.Errorf("scanning protected quality baselines: %w", err)
+		}
+		add(sessionID)
+		add(baselineID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating protected quality baselines: %w", err)
+	}
+	return protected, nil
+}
+
 // ListSessionsPaginated retrieves crawl sessions with pagination, optional project and search filters.
 func (s *Store) ListSessionsPaginated(ctx context.Context, limit, offset int, projectID, search string) ([]CrawlSession, int, error) {
-	where := " WHERE 1=1"
+	where := " WHERE " + nonSyntheticSessionFilter
 	var args []interface{}
 	if projectID != "" {
 		where += ` AND project_id = ?`
@@ -154,6 +259,20 @@ func (s *Store) UpdateSessionLabel(ctx context.Context, sessionID, label string)
 // DeleteSession deletes a crawl session and all its associated data.
 // Uses DROP PARTITION for instant deletion on partitioned tables.
 func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
+	return s.deleteSession(ctx, sessionID, false)
+}
+
+func (s *Store) deleteSession(ctx context.Context, sessionID string, allowSnapshotProtected bool) error {
+	if !allowSnapshotProtected {
+		protected, reason, err := s.isSessionSnapshotProtected(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		if protected {
+			return fmt.Errorf("cannot delete session %s: protected by current snapshot (%s)", sessionID, reason)
+		}
+	}
+
 	// Drop partition on data tables (partitioned by crawl_session_id)
 	dataTables := []string{
 		"pages",
@@ -174,6 +293,10 @@ func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
 		"interlinking_simulations",
 		"page_embeddings",
 		"crawl_quality_findings",
+		"crawl_quality_evaluations",
+		"crawl_quality_evaluation_findings",
+		"crawl_quality_promotion_events",
+		"crawl_quality_action_events",
 	}
 	for _, table := range dataTables {
 		q := fmt.Sprintf("ALTER TABLE crawlobserver.%s DROP PARTITION ?", table)
@@ -189,8 +312,53 @@ func (s *Store) DeleteSession(ctx context.Context, sessionID string) error {
 	if err := s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_quality_results DELETE WHERE session_id = ?`, sessionID); err != nil {
 		return fmt.Errorf("deleting quality result row: %w", err)
 	}
+	if err := s.conn.Exec(ctx, `ALTER TABLE crawlobserver.crawl_quality_current_pointers DELETE WHERE session_id = ?`, sessionID); err != nil {
+		return fmt.Errorf("deleting quality current pointer: %w", err)
+	}
 
 	return nil
+}
+
+func (s *Store) isSessionSnapshotProtected(ctx context.Context, sessionID string) (bool, string, error) {
+	if !isValidUUID(sessionID) {
+		return false, "", nil
+	}
+	if sess, err := s.GetSession(ctx, sessionID); err == nil {
+		label := strings.TrimSpace(sess.Label)
+		if label == CurrentSnapshotLabel || label == CurrentBaselineSnapshotLabel {
+			return true, label, nil
+		}
+	}
+
+	var currentRefs uint64
+	if err := s.conn.QueryRow(ctx, `
+		SELECT count()
+		FROM crawlobserver.project_current_snapshots FINAL
+		WHERE toString(current_session_id) = ?
+		   OR baseline_session_id = ?
+		   OR last_delta_session_id = ?`,
+		sessionID, sessionID, sessionID,
+	).Scan(&currentRefs); err != nil {
+		return false, "", fmt.Errorf("checking current snapshot references: %w", err)
+	}
+	if currentRefs > 0 {
+		return true, "project_current_snapshots", nil
+	}
+
+	var deltaRefs uint64
+	if err := s.conn.QueryRow(ctx, `
+		SELECT count()
+		FROM crawlobserver.project_current_snapshot_deltas FINAL
+		WHERE toString(delta_session_id) = ?
+		   OR toString(current_session_id) = ?`,
+		sessionID, sessionID,
+	).Scan(&deltaRefs); err != nil {
+		return false, "", fmt.Errorf("checking current snapshot delta references: %w", err)
+	}
+	if deltaRefs > 0 {
+		return true, "project_current_snapshot_deltas", nil
+	}
+	return false, "", nil
 }
 
 // PageRankEntry holds a URL and its PageRank score.
@@ -400,21 +568,23 @@ type ContentTypeCount struct {
 
 // AuditTechnical holds technical audit metrics.
 type AuditTechnical struct {
-	Indexable           uint64             `json:"indexable"`
-	NonIndexable        uint64             `json:"non_indexable"`
-	Soft404             uint64             `json:"soft_404"`
-	CanonicalSelf       uint64             `json:"canonical_self"`
-	CanonicalOther      uint64             `json:"canonical_other"`
-	CanonicalMissing    uint64             `json:"canonical_missing"`
-	HasRedirect         uint64             `json:"has_redirect"`
-	RedirectChainsOver2 uint64             `json:"redirect_chains_over_2"`
-	ResponseFast        uint64             `json:"response_fast"`
-	ResponseOK          uint64             `json:"response_ok"`
-	ResponseSlow        uint64             `json:"response_slow"`
-	ResponseVerySlow    uint64             `json:"response_very_slow"`
-	ErrorPages          uint64             `json:"error_pages"`
-	NoindexReasons      []NoindexReason    `json:"noindex_reasons"`
-	ContentTypes        []ContentTypeCount `json:"content_types"`
+	Indexable                   uint64                `json:"indexable"`
+	NonIndexable                uint64                `json:"non_indexable"`
+	Soft404                     uint64                `json:"soft_404"`
+	SharedRenderedMetadataShell uint64                `json:"shared_rendered_metadata_shell"`
+	CanonicalSelf               uint64                `json:"canonical_self"`
+	CanonicalOther              uint64                `json:"canonical_other"`
+	CanonicalMissing            uint64                `json:"canonical_missing"`
+	HasRedirect                 uint64                `json:"has_redirect"`
+	RedirectChainsOver2         uint64                `json:"redirect_chains_over_2"`
+	ResponseFast                uint64                `json:"response_fast"`
+	ResponseOK                  uint64                `json:"response_ok"`
+	ResponseSlow                uint64                `json:"response_slow"`
+	ResponseVerySlow            uint64                `json:"response_very_slow"`
+	ErrorPages                  uint64                `json:"error_pages"`
+	NoindexReasons              []NoindexReason       `json:"noindex_reasons"`
+	ContentTypes                []ContentTypeCount    `json:"content_types"`
+	CoreWebVitals               *CoreWebVitalsSummary `json:"core_web_vitals"`
 }
 
 // ExternalDomain is a domain + link count.
@@ -580,13 +750,40 @@ func (s *Store) SessionAudit(ctx context.Context, sessionID string) (*AuditResul
 		return nil, fmt.Errorf("audit technical: %w", err)
 	}
 
-	soft404, genericRenderedTitle, genericStaticMetadata, err := s.pageIssueCounts(ctx, sessionID)
+	soft404, sharedRenderedMetadataShell, genericRenderedTitle, genericStaticMetadata, err := s.pageIssueCounts(ctx, sessionID)
 	if err != nil {
 		applog.Warnf("audit", "scan page issues: %v", err)
 	} else {
 		tech.Soft404 = soft404
+		tech.SharedRenderedMetadataShell = sharedRenderedMetadataShell
 		content.GenericRenderedTitle = genericRenderedTitle
 		content.GenericStaticMetadata = genericStaticMetadata
+	}
+
+	tech.CoreWebVitals = &CoreWebVitalsSummary{}
+	cwvRow := s.conn.QueryRow(ctx, `
+		SELECT
+			count() AS eligible_pages,
+			countIf(`+cwvValidMeasurementFilter+`) AS measured_pages,
+			countIf(`+cwvValidMeasurementFilter+` AND cwv_lcp_ms <= 2500 AND cwv_cls <= 0.1 AND cwv_ttfb_ms <= 800) AS good,
+			countIf(`+cwvValidMeasurementFilter+` AND NOT (cwv_lcp_ms > 4000 OR cwv_cls > 0.25 OR cwv_ttfb_ms > 1800)
+				AND (cwv_lcp_ms > 2500 OR cwv_cls > 0.1 OR cwv_ttfb_ms > 800)) AS needs_improvement,
+			countIf(`+cwvValidMeasurementFilter+` AND (cwv_lcp_ms > 4000 OR cwv_cls > 0.25 OR cwv_ttfb_ms > 1800)) AS poor
+		FROM crawlobserver.pages FINAL
+		WHERE crawl_session_id = ?
+			AND content_type LIKE '%html%'
+			AND status_code >= 200 AND status_code < 300
+			AND `+notRedirectedFilter, sessionID)
+	if err := cwvRow.Scan(
+		&tech.CoreWebVitals.EligiblePages,
+		&tech.CoreWebVitals.MeasuredPages,
+		&tech.CoreWebVitals.Good,
+		&tech.CoreWebVitals.NeedsImprovement,
+		&tech.CoreWebVitals.Poor,
+	); err != nil {
+		applog.Warnf("audit", "scan core web vitals summary: %v", err)
+	} else if tech.CoreWebVitals.EligiblePages > tech.CoreWebVitals.MeasuredPages {
+		tech.CoreWebVitals.UnmeasuredPages = tech.CoreWebVitals.EligiblePages - tech.CoreWebVitals.MeasuredPages
 	}
 
 	// Noindex reasons — restricted to HTML 2xx so non-HTML resources don't
@@ -887,7 +1084,13 @@ func (s *Store) SessionStorageStats(ctx context.Context) (map[string]uint64, err
 		SELECT partition AS session_id, sum(bytes_on_disk) AS bytes
 		FROM system.parts
 		WHERE database = 'crawlobserver' AND active = 1 AND table != 'crawl_sessions'
-		GROUP BY partition`)
+			AND match(partition, '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+			AND partition IN (
+				SELECT toString(id)
+				FROM crawlobserver.crawl_sessions FINAL
+			)
+		GROUP BY partition
+		SETTINGS max_bytes_before_external_group_by = 100000000`)
 	if err != nil {
 		return nil, fmt.Errorf("querying session storage stats: %w", err)
 	}
@@ -923,7 +1126,8 @@ func (s *Store) GlobalStats(ctx context.Context) ([]GlobalSessionStats, *Storage
 	pageRows, err := s.conn.Query(ctx, `
 		SELECT crawl_session_id, count(), countIf(error != ''), avg(fetch_duration_ms)
 		FROM crawlobserver.pages FINAL
-		GROUP BY crawl_session_id`)
+		GROUP BY crawl_session_id
+		SETTINGS max_bytes_before_external_group_by = 100000000`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("querying global page stats: %w", err)
 	}
@@ -945,7 +1149,8 @@ func (s *Store) GlobalStats(ctx context.Context) ([]GlobalSessionStats, *Storage
 	linkRows, err := s.conn.Query(ctx, `
 		SELECT crawl_session_id, count()
 		FROM crawlobserver.links
-		GROUP BY crawl_session_id`)
+		GROUP BY crawl_session_id
+		SETTINGS max_bytes_before_external_group_by = 100000000`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("querying global link stats: %w", err)
 	}

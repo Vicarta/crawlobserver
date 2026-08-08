@@ -57,6 +57,21 @@ func NewUpdateStatus() *UpdateStatus {
 	return &UpdateStatus{CurrentVersion: Version}
 }
 
+// IsSelfUpdateSupported reports whether the current binary can safely replace itself.
+func IsSelfUpdateSupported() bool {
+	return isSelfUpdateSupportedVersion(Version)
+}
+
+// IsDockerBuild reports whether this binary is intended to be updated by rebuilding a container image.
+func IsDockerBuild() bool {
+	return strings.TrimPrefix(strings.TrimSpace(Version), "v") == "docker"
+}
+
+func isSelfUpdateSupportedVersion(version string) bool {
+	current := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	return current != "" && current != "dev" && current != "docker"
+}
+
 // Check performs a background update check and updates the status.
 func (s *UpdateStatus) Check() {
 	release, available, err := CheckUpdate()
@@ -121,7 +136,7 @@ func CheckUpdate() (*Release, bool, error) {
 	latest := strings.TrimPrefix(release.TagName, "v")
 	current := strings.TrimPrefix(Version, "v")
 
-	if latest != current && current != "dev" {
+	if latest != current && isSelfUpdateSupportedVersion(current) {
 		return &release, true, nil
 	}
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/SEObserver/crawlobserver/internal/apikeys"
+	"github.com/SEObserver/crawlobserver/internal/applog"
 	"github.com/SEObserver/crawlobserver/internal/config"
 	"github.com/SEObserver/crawlobserver/internal/crawler"
 	"github.com/SEObserver/crawlobserver/internal/normalizer"
@@ -20,22 +21,28 @@ import (
 )
 
 type deltaPreview struct {
-	ProjectID         string         `json:"project_id"`
-	BaselineSessionID string         `json:"baseline_session_id"`
-	TotalCandidates   int            `json:"total_candidates"`
-	LaunchLimit       int            `json:"launch_limit"`
-	WillLaunch        int            `json:"will_launch"`
-	Deferred          int            `json:"deferred"`
-	BySource          map[string]int `json:"by_source"`
-	SampleURLs        []string       `json:"sample_urls"`
+	ProjectID         string                      `json:"project_id"`
+	BaselineSessionID string                      `json:"baseline_session_id"`
+	TotalCandidates   int                         `json:"total_candidates"`
+	LaunchLimit       int                         `json:"launch_limit"`
+	WillLaunch        int                         `json:"will_launch"`
+	Deferred          int                         `json:"deferred"`
+	BySource          map[string]int              `json:"by_source"`
+	SampleURLs        []string                    `json:"sample_urls"`
+	SitemapRefresh    *config.DeltaSitemapRefresh `json:"sitemap_refresh,omitempty"`
 }
 
 type deltaCandidateResult struct {
-	settings *apikeys.ProjectDeltaSettings
-	baseline *storage.CrawlSession
-	urls     []string
-	manual   []string
-	preview  deltaPreview
+	settings             *apikeys.ProjectDeltaSettings
+	baseline             *storage.CrawlSession
+	urls                 []string
+	manual               []string
+	candidateSources     map[string][]string
+	baselineSitemapCount int
+	sitemapRows          []storage.SitemapRow
+	sitemapURLRows       []storage.SitemapURLRow
+	sitemapRefresh       *config.DeltaSitemapRefresh
+	preview              deltaPreview
 }
 
 func (s *Server) handleProjectDeltaSettings(w http.ResponseWriter, r *http.Request) {
@@ -64,13 +71,243 @@ func (s *Server) handleUpdateProjectDeltaSettings(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	var previous *apikeys.ProjectDeltaSettings
+	if s.keyStore != nil {
+		previous, _ = s.keyStore.GetProjectDeltaSettings(projectID)
+	}
 	body.ProjectID = projectID
 	settings, err := s.keyStore.SaveProjectDeltaSettings(body)
 	if err != nil {
 		internalError(w, r, err)
 		return
 	}
+	if projectPageRankSettingsChanged(previous, settings) {
+		s.startProjectPageRankRecompute(projectID, storage.PageRankOptions{
+			IncludeFooterLinks:  settings.IncludeFooterLinksInPageRank,
+			FooterSelectors:     append([]string(nil), settings.FooterSelectorPatterns...),
+			RefreshLinkLocation: true,
+		})
+	}
 	writeJSON(w, settings)
+}
+
+func projectPageRankSettingsChanged(previous, current *apikeys.ProjectDeltaSettings) bool {
+	if previous == nil || current == nil {
+		return false
+	}
+	if previous.IncludeFooterLinksInPageRank != current.IncludeFooterLinksInPageRank {
+		return true
+	}
+	return !equalStringSlices(previous.FooterSelectorPatterns, current.FooterSelectorPatterns)
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) handleProjectPageRankRecomputeStatus(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
+	writeJSON(w, s.getProjectPageRankRecomputeStatus(projectID))
+}
+
+func (s *Server) handleProjectOrphan404CleanupPreview(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminAccess(w, r) {
+		return
+	}
+	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
+	result, err := s.projectOrphan404CleanupCandidates(r.Context(), projectID, queryInt(r, "limit", 5000))
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	writeJSON(w, result)
+}
+
+func (s *Server) handleProjectOrphan404Cleanup(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminAccess(w, r) {
+		return
+	}
+	projectID := r.PathValue("id")
+	if !requireProjectAccess(w, r, projectID) {
+		return
+	}
+	var body struct {
+		Confirm bool `json:"confirm"`
+		Limit   int  `json:"limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !body.Confirm {
+		writeError(w, http.StatusBadRequest, "confirm must be true")
+		return
+	}
+	result, err := s.projectOrphan404CleanupCandidates(r.Context(), projectID, body.Limit)
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	urls := make([]string, 0, len(result.Candidates))
+	for _, c := range result.Candidates {
+		urls = append(urls, c.URL)
+	}
+	deleted, err := s.store.DeletePagesAndReferences(r.Context(), result.CurrentSessionID, urls)
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	if deleted > 0 {
+		opts := storage.PageRankOptions{}
+		if settings, settingsErr := s.keyStore.GetProjectDeltaSettings(projectID); settingsErr == nil {
+			opts.IncludeFooterLinks = settings.IncludeFooterLinksInPageRank
+			opts.FooterSelectors = append([]string(nil), settings.FooterSelectorPatterns...)
+		} else {
+			applog.Warnf("server", "Orphan404Cleanup %s: using default PageRank options: %v", projectID, settingsErr)
+		}
+		go func(sessionID string) {
+			if err := s.store.ComputePageRankWithOptions(context.Background(), sessionID, opts); err != nil {
+				applog.Errorf("server", "Orphan404Cleanup PageRank recompute %s/%s: %v", projectID, sessionID, err)
+			}
+		}(result.CurrentSessionID)
+	}
+	writeJSON(w, map[string]interface{}{
+		"status":                         "ok",
+		"current_session_id":             result.CurrentSessionID,
+		"deleted":                        deleted,
+		"pagerank_recalculation_started": deleted > 0,
+	})
+}
+
+type orphan404CleanupPreview struct {
+	ProjectID        string                              `json:"project_id"`
+	CurrentSessionID string                              `json:"current_session_id"`
+	OlderThanDays    int                                 `json:"older_than_days"`
+	OlderThan        time.Time                           `json:"older_than"`
+	Count            int                                 `json:"count"`
+	Candidates       []storage.Orphan404CleanupCandidate `json:"candidates"`
+}
+
+func (s *Server) projectOrphan404CleanupCandidates(ctx context.Context, projectID string, limit int) (*orphan404CleanupPreview, error) {
+	settings, err := s.keyStore.GetProjectDeltaSettings(projectID)
+	if err != nil {
+		return nil, err
+	}
+	days := settings.Orphan404CleanupDays
+	if days <= 0 {
+		days = 30
+	}
+	cs, ok := s.currentSnapshotStore()
+	if !ok {
+		return nil, fmt.Errorf("current snapshot storage is not available")
+	}
+	snap, err := cs.GetProjectCurrentSnapshot(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	olderThan := time.Now().UTC().AddDate(0, 0, -days)
+	candidates, err := s.store.ListOrphan404CleanupCandidates(ctx, snap.CurrentSessionID, olderThan, limit)
+	if err != nil {
+		return nil, err
+	}
+	return &orphan404CleanupPreview{
+		ProjectID:        projectID,
+		CurrentSessionID: snap.CurrentSessionID,
+		OlderThanDays:    days,
+		OlderThan:        olderThan,
+		Count:            len(candidates),
+		Candidates:       candidates,
+	}, nil
+}
+
+func (s *Server) startProjectPageRankRecompute(projectID string, opts storage.PageRankOptions) {
+	started := time.Now().UTC()
+	s.setProjectPageRankRecomputeStatus(projectID, pageRankRecomputeStatus{
+		Status:    "running",
+		Message:   "Internal PageRank recalculation started.",
+		StartedAt: &started,
+	})
+
+	go func() {
+		sessionID, err := s.recomputeProjectCurrentSnapshotPageRank(context.Background(), projectID, opts)
+		finished := time.Now().UTC()
+		if err != nil {
+			s.setProjectPageRankRecomputeStatus(projectID, pageRankRecomputeStatus{
+				Status:     "failed",
+				Message:    "Internal PageRank recalculation failed.",
+				SessionID:  sessionID,
+				StartedAt:  &started,
+				FinishedAt: &finished,
+				Error:      err.Error(),
+			})
+			return
+		}
+		s.setProjectPageRankRecomputeStatus(projectID, pageRankRecomputeStatus{
+			Status:     "completed",
+			Message:    "Internal PageRank recalculation completed.",
+			SessionID:  sessionID,
+			StartedAt:  &started,
+			FinishedAt: &finished,
+		})
+	}()
+}
+
+func (s *Server) setProjectPageRankRecomputeStatus(projectID string, status pageRankRecomputeStatus) {
+	s.pageRankRecomputeMu.Lock()
+	defer s.pageRankRecomputeMu.Unlock()
+	if s.pageRankRecomputeStatus == nil {
+		s.pageRankRecomputeStatus = make(map[string]*pageRankRecomputeStatus)
+	}
+	cp := status
+	s.pageRankRecomputeStatus[projectID] = &cp
+}
+
+func (s *Server) getProjectPageRankRecomputeStatus(projectID string) pageRankRecomputeStatus {
+	s.pageRankRecomputeMu.Lock()
+	defer s.pageRankRecomputeMu.Unlock()
+	if s.pageRankRecomputeStatus == nil || s.pageRankRecomputeStatus[projectID] == nil {
+		return pageRankRecomputeStatus{Status: "idle"}
+	}
+	return *s.pageRankRecomputeStatus[projectID]
+}
+
+func (s *Server) recomputeProjectCurrentSnapshotPageRank(ctx context.Context, projectID string, opts storage.PageRankOptions) (string, error) {
+	cs, ok := s.currentSnapshotStore()
+	if !ok {
+		err := fmt.Errorf("current snapshot storage unavailable")
+		applog.Warnf("server", "ProjectPageRankRecompute %s: %v", projectID, err)
+		return "", err
+	}
+	snap, err := cs.GetProjectCurrentSnapshot(ctx, projectID)
+	if err != nil {
+		if isNotFoundErr(err) {
+			snap, err = s.initializeCurrentSnapshotFromTrustedBaseline(ctx, projectID, cs)
+		}
+		if err != nil {
+			applog.Warnf("server", "ProjectPageRankRecompute %s: current snapshot lookup failed: %v", projectID, err)
+			return "", err
+		}
+	}
+	if err := s.store.ComputePageRankWithOptions(ctx, snap.CurrentSessionID, opts); err != nil {
+		applog.Errorf("server", "ProjectPageRankRecompute %s/%s: %v", projectID, snap.CurrentSessionID, err)
+		return snap.CurrentSessionID, err
+	}
+	applog.Infof("server", "ProjectPageRankRecompute %s/%s complete", projectID, snap.CurrentSessionID)
+	return snap.CurrentSessionID, nil
 }
 
 func (s *Server) handleProjectDeltaManualQueue(w http.ResponseWriter, r *http.Request) {
@@ -274,7 +511,7 @@ func (s *Server) buildDeltaCandidates(ctx context.Context, projectID string) (*d
 	if err != nil {
 		return nil, err
 	}
-	baseline, err := s.store.LatestProjectSession(ctx, projectID)
+	baseline, err := s.deltaBaselineSession(ctx, projectID)
 	if err != nil {
 		if strings.Contains(err.Error(), sql.ErrNoRows.Error()) {
 			return nil, fmt.Errorf("no baseline session found for project")
@@ -283,20 +520,48 @@ func (s *Server) buildDeltaCandidates(ctx context.Context, projectID string) (*d
 	}
 
 	bySource := map[string]int{}
+	sourceSets := map[string]map[string]struct{}{}
 	candidates := make([]string, 0)
 	manualRaw := []string{}
 	addSource := func(source string, urls []string) {
 		bySource[source] += len(urls)
 		candidates = append(candidates, urls...)
+		for _, raw := range urls {
+			norm, err := normalizeDeltaURL(raw, settings)
+			if err != nil || norm == "" {
+				continue
+			}
+			if _, ok := sourceSets[norm]; !ok {
+				sourceSets[norm] = map[string]struct{}{}
+			}
+			sourceSets[norm][source] = struct{}{}
+		}
 	}
 
 	perSourceLimit := max(1, settings.MaxCandidatesPerRun)
+	var sitemapRows []storage.SitemapRow
+	var sitemapURLRows []storage.SitemapURLRow
+	var sitemapRefresh *config.DeltaSitemapRefresh
 	if settings.SourceSitemap {
-		urls, err := s.store.DeltaSitemapCandidateURLs(ctx, baseline.ID, perSourceLimit)
-		if err != nil {
-			return nil, err
+		refreshed, refreshErr := s.refreshDeltaSitemap(ctx, baseline, settings, perSourceLimit)
+		if refreshErr != nil {
+			return nil, refreshErr
 		}
-		addSource("sitemap", urls)
+		sitemapRefresh = refreshed.Refresh
+		sitemapRows = refreshed.SitemapRows
+		sitemapURLRows = refreshed.SitemapURLRows
+		switch sitemapRefresh.Mode {
+		case deltaSitemapRefreshFresh:
+			addSource("sitemap_fresh", refreshed.Candidates)
+			delete(bySource, "sitemap_fresh")
+			// Keep this aggregate key for existing quality/dashboard consumers. The
+			// candidate provenance itself remains sitemap_fresh.
+			bySource["sitemap"] = len(refreshed.Candidates)
+		case deltaSitemapRefreshSnapshotFallback:
+			addSource("sitemap_snapshot_fallback", refreshed.Candidates)
+			delete(bySource, "sitemap_snapshot_fallback")
+			bySource["sitemap"] = len(refreshed.Candidates)
+		}
 	}
 	if settings.SourceGSC {
 		urls, err := s.store.DeltaGSCCandidateURLs(ctx, projectID, perSourceLimit)
@@ -336,10 +601,19 @@ func (s *Server) buildDeltaCandidates(ctx context.Context, projectID string) (*d
 		return nil, err
 	}
 	filtered, deferred := boundDeltaCandidates(filteredAll, knownSet, settings)
+	candidateSources := deltaCandidateSourcesForLaunched(filtered, sourceSets)
 	manual := launchedManualURLs(manualRaw, filtered, settings)
 	launchLimit := len(filtered) + settings.MaxDiscoveredPagesPerRun
 	if launchLimit <= 0 {
 		launchLimit = len(filtered)
+	}
+	baselineSitemapCount := 0
+	if settings.SourceSitemap {
+		if count, countErr := s.store.CountSitemapURLs(ctx, baseline.ID); countErr == nil {
+			baselineSitemapCount = count
+		} else {
+			applog.Warnf("server", "delta baseline sitemap count failed for session %s: %v", baseline.ID, countErr)
+		}
 	}
 	sample := filtered
 	if len(sample) > 20 {
@@ -354,14 +628,39 @@ func (s *Server) buildDeltaCandidates(ctx context.Context, projectID string) (*d
 		Deferred:          deferred,
 		BySource:          bySource,
 		SampleURLs:        sample,
+		SitemapRefresh:    cloneDeltaSitemapRefresh(sitemapRefresh),
 	}
 	return &deltaCandidateResult{
-		settings: settings,
-		baseline: baseline,
-		urls:     filtered,
-		manual:   manual,
-		preview:  preview,
+		settings:             settings,
+		baseline:             baseline,
+		urls:                 filtered,
+		manual:               manual,
+		candidateSources:     candidateSources,
+		baselineSitemapCount: baselineSitemapCount,
+		sitemapRows:          sitemapRows,
+		sitemapURLRows:       sitemapURLRows,
+		sitemapRefresh:       cloneDeltaSitemapRefresh(sitemapRefresh),
+		preview:              preview,
 	}, nil
+}
+
+func (s *Server) deltaBaselineSession(ctx context.Context, projectID string) (*storage.CrawlSession, error) {
+	if cs, ok := s.currentSnapshotStore(); ok {
+		snap, err := cs.GetProjectCurrentSnapshot(ctx, projectID)
+		if err != nil && isNotFoundErr(err) {
+			if initialized, initErr := s.initializeCurrentSnapshotFromTrustedBaseline(ctx, projectID, cs); initErr == nil {
+				snap = initialized
+				err = nil
+			}
+		}
+		if err == nil && snap != nil && snap.CurrentSessionID != "" {
+			current, currentErr := s.store.GetSession(ctx, snap.CurrentSessionID)
+			if currentErr == nil && current.ProjectID != nil && *current.ProjectID == projectID && current.PagesCrawled > 0 {
+				return current, nil
+			}
+		}
+	}
+	return s.store.LatestProjectSession(ctx, projectID)
 }
 
 func (s *Server) deltaCrawlRequest(result *deltaCandidateResult) (crawler.CrawlRequest, error) {
@@ -414,8 +713,25 @@ func (s *Server) deltaCrawlRequest(result *deltaCandidateResult) (crawler.CrawlR
 		ExcludePatterns:     append([]string{}, result.settings.BlockedURLPatterns...),
 		MeasureCWV:          cfg.Crawler.MeasureCWV,
 		Label:               "Daily Delta Crawl",
-		RetryMaxRetries:     &retries,
-		RetryBackoffSeconds: result.settings.RetryBackoffSeconds,
+		DeltaPlannedPages:   len(result.urls),
+		DeltaPlan: &config.DeltaPlanConfig{
+			BaselineSessionID:       result.baseline.ID,
+			TotalCandidates:         result.preview.TotalCandidates,
+			LaunchedCandidates:      len(result.urls),
+			DeferredCandidates:      result.preview.Deferred,
+			LaunchLimit:             result.preview.LaunchLimit,
+			SourceCounts:            copyStringIntMap(result.preview.BySource),
+			BaselineSitemapURLCount: result.baselineSitemapCount,
+			LaunchedURLs:            append([]string(nil), result.urls...),
+			CandidateSources:        copyStringSliceMap(result.candidateSources),
+			SitemapRefresh:          cloneDeltaSitemapRefresh(result.sitemapRefresh),
+		},
+		InitialSitemaps:              copySitemapRows(result.sitemapRows),
+		InitialSitemapURLs:           copySitemapURLRows(result.sitemapURLRows),
+		RetryMaxRetries:              &retries,
+		RetryBackoffSeconds:          result.settings.RetryBackoffSeconds,
+		IncludeFooterLinksInPageRank: &result.settings.IncludeFooterLinksInPageRank,
+		FooterSelectorPatterns:       append([]string(nil), result.settings.FooterSelectorPatterns...),
 	}
 	if result.settings.EnableJSRenderingForDelta == "off" ||
 		result.settings.EnableJSRenderingForDelta == "auto" ||
@@ -423,6 +739,71 @@ func (s *Server) deltaCrawlRequest(result *deltaCandidateResult) (crawler.CrawlR
 		req.JSRenderMode = result.settings.EnableJSRenderingForDelta
 	}
 	return req, nil
+}
+
+func copyStringIntMap(in map[string]int) map[string]int {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]int, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func copyStringSliceMap(in map[string][]string) map[string][]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for k, v := range in {
+		out[k] = append([]string(nil), v...)
+	}
+	return out
+}
+
+func deltaCandidateSourcesForLaunched(launched []string, sourceSets map[string]map[string]struct{}) map[string][]string {
+	if len(launched) == 0 || len(sourceSets) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(launched))
+	for _, u := range launched {
+		sources := orderedDeltaCandidateSources(sourceSets[u])
+		if len(sources) > 0 {
+			out[u] = sources
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func orderedDeltaCandidateSources(set map[string]struct{}) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	order := []string{"manual_queue", "sitemap_fresh", "sitemap_snapshot_fallback", "sitemap", "problem_pages", "stale_pages", "gsc", "discovered"}
+	out := make([]string, 0, len(set))
+	for _, source := range order {
+		if _, ok := set[source]; ok {
+			out = append(out, source)
+		}
+	}
+	for source := range set {
+		known := false
+		for _, ordered := range order {
+			if source == ordered {
+				known = true
+				break
+			}
+		}
+		if !known {
+			out = append(out, source)
+		}
+	}
+	return out
 }
 
 func (s *Server) deltaKnownURLSet(ctx context.Context, sessionID string, settings *apikeys.ProjectDeltaSettings) (map[string]struct{}, error) {

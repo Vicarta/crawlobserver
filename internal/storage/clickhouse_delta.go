@@ -16,6 +16,7 @@ func (s *Store) LatestProjectSession(ctx context.Context, projectID string) (*Cr
 		SELECT id, started_at, finished_at, status, seed_urls, config, pages_crawled, user_agent, project_id, label
 		FROM crawlobserver.crawl_sessions FINAL
 		WHERE project_id = ?
+		  AND `+nonSyntheticSessionFilter+`
 		  AND status = 'completed'
 		  AND pages_crawled > 0
 		  AND id IN (
@@ -37,6 +38,7 @@ func (s *Store) LatestProjectSession(ctx context.Context, projectID string) (*Cr
 		SELECT id, started_at, finished_at, status, seed_urls, config, pages_crawled, user_agent, project_id, label
 		FROM crawlobserver.crawl_sessions FINAL
 		WHERE project_id = ?
+		  AND `+nonSyntheticSessionFilter+`
 		ORDER BY started_at DESC
 		LIMIT 1`, projectID)
 }
@@ -69,6 +71,18 @@ func (s *Store) DeltaSitemapCandidateURLs(ctx context.Context, sessionID string,
 	}
 	defer rows.Close()
 	return scanStringColumn(rows)
+}
+
+func (s *Store) CountSitemapURLs(ctx context.Context, sessionID string) (int, error) {
+	row := s.conn.QueryRow(ctx, `
+		SELECT count(DISTINCT loc)
+		FROM crawlobserver.sitemap_urls FINAL
+		WHERE crawl_session_id = ? AND loc != ''`, sessionID)
+	var count uint64
+	if err := row.Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting sitemap urls: %w", err)
+	}
+	return int(count), nil
 }
 
 func (s *Store) DeltaGSCCandidateURLs(ctx context.Context, projectID string, limit int) ([]string, error) {

@@ -4,6 +4,7 @@
     getPageRankTreemap,
     getPageRankDistribution,
     getPageRankWeightedTop,
+    getSessionPageRankEvidence,
     computePageRank,
     buildApiPath,
   } from '../api.js';
@@ -48,6 +49,17 @@
   let prTooltip = $state(null);
   let hasData = $state(null); // null = unknown, true/false after first load
   let computingPR = $state(false);
+  let prEvidence = $state(null);
+
+  async function loadPageRankEvidence() {
+    try {
+      prEvidence = await getSessionPageRankEvidence(sessionId);
+    } catch (e) {
+      // Evidence can be absent for legacy sessions that have not been adopted yet.
+      if (e.status !== 404) onerror?.(e.message);
+      prEvidence = null;
+    }
+  }
 
   async function loadPRSubView(view) {
     prLoading = true;
@@ -112,7 +124,7 @@
     try {
       await computePageRank(sessionId);
       hasData = true;
-      loadPRSubView(prSubView);
+      await Promise.all([loadPRSubView(prSubView), loadPageRankEvidence()]);
     } catch (e) {
       onerror?.(e.message);
     } finally {
@@ -172,9 +184,27 @@
   });
 
   loadPRSubView(prSubView);
+  loadPageRankEvidence();
 </script>
 
 <div class="pr-container">
+  {#if prEvidence}
+    <section class="pr-evidence" aria-label={t('pagerank.evidence')}>
+      <div class="pr-evidence-heading">
+        <strong>{t('pagerank.evidence')}</strong>
+        <span class="badge" class:badge-success={prEvidence.state === 'finalized'} class:badge-warning={prEvidence.state === 'started'} class:badge-error={prEvidence.state === 'failed'}>{prEvidence.state || 'unknown'}</span>
+      </div>
+      <div class="pr-evidence-grid">
+        <div><span>{t('pagerank.evidenceRevision')}</span><code>{prEvidence.attempt_id || '-'}</code></div>
+        <div><span>{t('pagerank.evidenceSource')}</span><strong>{prEvidence.source || '-'}</strong></div>
+        <div><span>{t('pagerank.evidencePredicate')}</span><code>{prEvidence.predicate_version || '-'}</code></div>
+        <div><span>{t('pagerank.evidenceEligible')}</span><strong>{prEvidence.eligible_page_count ?? '-'}</strong></div>
+        <div><span>{t('pagerank.evidencePositive')}</span><strong>{prEvidence.positive_page_count ?? '-'}</strong></div>
+        <div><span>{t('pagerank.evidenceZero')}</span><strong>{prEvidence.zero_page_count ?? '-'}</strong></div>
+      </div>
+    </section>
+  {/if}
+
   <div class="pr-subview-header">
     <div class="pr-subview-bar">
       <button
@@ -225,7 +255,7 @@
             d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"
           /></svg
         >
-        {computingPR ? t('actionBar.computing') : t('actionBar.computePageRank')}
+        {computingPR ? t('actionBar.computing') : 'Re-calculate internal PR'}
       </button>
     {/if}
   </div>
@@ -288,7 +318,7 @@
             d="M11 11l2-7M11 11l9-1M11 11l5 6M11 11l-6 6M20 10l-4 7M20 10l-7-6"
           /></svg
         >
-        {computingPR ? t('actionBar.computing') : t('actionBar.computePageRank')}
+        {computingPR ? t('actionBar.computing') : 'Re-calculate internal PR'}
       </button>
     </div>
   {:else if prSubView === 'top'}
@@ -421,5 +451,36 @@
   }
   .pr-recalc-btn {
     margin-left: auto;
+  }
+  .pr-evidence {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+    padding: 12px;
+    margin-bottom: 16px;
+  }
+  .pr-evidence-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .pr-evidence-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 8px 12px;
+  }
+  .pr-evidence-grid span {
+    display: block;
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-bottom: 2px;
+  }
+  .pr-evidence-grid strong,
+  .pr-evidence-grid code {
+    display: block;
+    font-size: 12px;
+    overflow-wrap: anywhere;
   }
 </style>

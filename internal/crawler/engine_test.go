@@ -16,6 +16,7 @@ import (
 	"github.com/SEObserver/crawlobserver/internal/frontier"
 	"github.com/SEObserver/crawlobserver/internal/normalizer"
 	"github.com/SEObserver/crawlobserver/internal/parser"
+	"github.com/SEObserver/crawlobserver/internal/renderer"
 	"github.com/SEObserver/crawlobserver/internal/schema"
 	"github.com/SEObserver/crawlobserver/internal/storage"
 )
@@ -41,6 +42,149 @@ func TestNewSession(t *testing.T) {
 	}
 	if sess.StartedAt.IsZero() {
 		t.Error("StartedAt should not be zero")
+	}
+}
+
+func TestNeedsBrowserRenderMeasuresCWVRegardlessOfDetectionMode(t *testing.T) {
+	staticPage := &parser.PageData{
+		Title:     "Complete static page",
+		H1:        []string{"Complete static page"},
+		WordCount: 500,
+	}
+	body := []byte("<html><body><main>Fully rendered static page</main></body></html>")
+
+	if needsBrowserRender(false, renderer.ModeAuto, body, staticPage) {
+		t.Fatal("auto mode unexpectedly selected the static fixture without CWV")
+	}
+	if !needsBrowserRender(true, renderer.ModeAuto, body, staticPage) {
+		t.Fatal("CWV measurement must render pages skipped by auto detection")
+	}
+	if !needsBrowserRender(true, renderer.ModeOff, body, staticPage) {
+		t.Fatal("CWV measurement must request a browser even when normal JS rendering is off")
+	}
+}
+
+func TestEngineDoneClosesAfterFinalization(t *testing.T) {
+	cfg := &config.Config{}
+	engine := NewEngine(cfg, nil)
+	finalizerStarted := make(chan struct{})
+	allowFinalizerToReturn := make(chan struct{})
+	runDone := make(chan error, 1)
+
+	go func() {
+		runDone <- engine.runFinalization(func() error {
+			close(finalizerStarted)
+			<-allowFinalizerToReturn
+			return nil
+		})
+	}()
+
+	<-finalizerStarted
+	select {
+	case <-engine.Done():
+		t.Fatal("Done closed before terminal finalization completed")
+	default:
+	}
+
+	close(allowFinalizerToReturn)
+	if err := <-runDone; err != nil {
+		t.Fatalf("finish returned error: %v", err)
+	}
+	select {
+	case <-engine.Done():
+	default:
+		t.Fatal("Done did not close after terminal finalization completed")
+	}
+}
+
+func TestFinalizationStatus(t *testing.T) {
+	tests := []struct {
+		name        string
+		stopped     bool
+		bufferState storage.BufferErrorState
+		pageRankErr error
+		want        string
+	}{
+		{name: "clean crawl", want: "completed"},
+		{name: "lost pages", bufferState: storage.BufferErrorState{LostPages: 1}, want: "completed_with_errors"},
+		{name: "lost links", bufferState: storage.BufferErrorState{LostLinks: 1}, want: "completed_with_errors"},
+		{name: "pagerank error", pageRankErr: fmt.Errorf("evidence unavailable"), want: "completed_with_errors"},
+		{name: "stop wins over pagerank error", stopped: true, pageRankErr: fmt.Errorf("evidence unavailable"), want: "stopped"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := finalizationStatus(tt.stopped, tt.bufferState, tt.pageRankErr); got != tt.want {
+				t.Fatalf("finalizationStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTerminalCompletionWaitsForFinalizedPageRankEvidenceAcrossRenderModes
+// protects the completion barrier shared by static and JS-rendered crawls.
+// A renderer changes how pages arrive in the pipeline, not the requirement
+// that the terminal status and Done signal follow PageRank finalization.
+func TestTerminalCompletionWaitsForFinalizedPageRankEvidenceAcrossRenderModes(t *testing.T) {
+	tests := []struct {
+		name             string
+		renderJavaScript bool
+		pageRankErr      error
+		wantStatus       string
+	}{
+		{name: "static crawl", renderJavaScript: false, wantStatus: "completed"},
+		{name: "JS rendered crawl", renderJavaScript: true, wantStatus: "completed"},
+		{name: "static crawl PageRank failure", renderJavaScript: false, pageRankErr: fmt.Errorf("evidence unavailable"), wantStatus: "completed_with_errors"},
+		{name: "JS rendered crawl PageRank failure", renderJavaScript: true, pageRankErr: fmt.Errorf("evidence unavailable"), wantStatus: "completed_with_errors"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{Crawler: config.CrawlerConfig{}}
+			if tt.renderJavaScript {
+				cfg.Crawler.JSRender.Mode = "always"
+			}
+			engine := NewEngine(cfg, nil)
+			evidenceFinalized := make(chan struct{})
+			allowFinalizerToReturn := make(chan struct{})
+			runDone := make(chan error, 1)
+			var persistedStatus string
+
+			go func() {
+				runDone <- engine.runFinalization(func() error {
+					// Model the durable PageRank-evidence write which must complete
+					// before the terminal session status is persisted.
+					close(evidenceFinalized)
+					<-allowFinalizerToReturn
+					persistedStatus = finalizationStatus(false, storage.BufferErrorState{}, tt.pageRankErr)
+					return tt.pageRankErr
+				})
+			}()
+
+			<-evidenceFinalized
+			select {
+			case <-engine.Done():
+				t.Fatal("Done closed before finalized PageRank evidence and terminal status persistence")
+			default:
+			}
+			if persistedStatus != "" {
+				t.Fatalf("terminal status %q persisted before PageRank evidence finalizer returned", persistedStatus)
+			}
+
+			close(allowFinalizerToReturn)
+			err := <-runDone
+			if (err != nil) != (tt.pageRankErr != nil) {
+				t.Fatalf("runFinalization error = %v, PageRank error = %v", err, tt.pageRankErr)
+			}
+			if persistedStatus != tt.wantStatus {
+				t.Fatalf("terminal status = %q, want %q", persistedStatus, tt.wantStatus)
+			}
+			select {
+			case <-engine.Done():
+			default:
+				t.Fatal("Done did not close after PageRank evidence finalization and terminal status persistence")
+			}
+		})
 	}
 }
 
@@ -2208,6 +2352,108 @@ func TestComputeJSDiffs_TitleWhitespace(t *testing.T) {
 
 	if row.JSChangedTitle {
 		t.Error("JSChangedTitle should be false (whitespace difference only)")
+	}
+}
+
+func TestPromoteRenderedDataMakesRenderedDOMAuthoritative(t *testing.T) {
+	static := &parser.PageData{
+		Title:           "Shared SPA shell",
+		MetaDescription: "Shell description",
+		MetaRobots:      "noindex",
+		Canonical:       "https://example.com/",
+		H1:              []string{"Shell heading"},
+		WordCount:       100,
+		ContentHash:     11,
+		Links: []parser.Link{
+			{TargetURL: "https://example.com/from-shell", IsInternal: true},
+		},
+		Images: []parser.Image{{Src: "https://example.com/shell.png"}},
+	}
+	rendered := &parser.PageData{
+		Title:           "Rendered route",
+		MetaDescription: "Rendered description",
+		Canonical:       "https://example.com/route",
+		H1:              []string{"Rendered heading"},
+		H2:              []string{"Rendered section"},
+		WordCount:       420,
+		ContentHash:     42,
+		Lang:            "en",
+		Links: []parser.Link{
+			{TargetURL: "https://example.com/internal", IsInternal: true, Location: "body"},
+			{TargetURL: "https://external.example/path", IsInternal: false, Location: "footer"},
+		},
+		Images: []parser.Image{
+			{Src: "https://example.com/with-alt.png", Alt: "Alt"},
+			{Src: "https://example.com/no-alt.png"},
+		},
+	}
+	row := &storage.PageRow{
+		URL:        "https://example.com/route",
+		StatusCode: 200,
+		BodyHTML:   "<html>static</html>",
+	}
+
+	computeJSDiffs(row, static, rendered)
+	promoteRenderedData(row, static, rendered, "<html>rendered</html>", row.URL)
+	rows, internalOut, externalOut := buildLinkRows("session", row.URL, rendered.Links, time.Now())
+	row.InternalLinksOut = internalOut
+	row.ExternalLinksOut = externalOut
+
+	if row.Title != rendered.Title || row.MetaDescription != rendered.MetaDescription {
+		t.Fatalf("primary metadata was not promoted: title=%q description=%q", row.Title, row.MetaDescription)
+	}
+	if row.StaticTitle != static.Title || row.StaticMetaDescription != static.MetaDescription {
+		t.Fatalf("static metadata was not retained: title=%q description=%q", row.StaticTitle, row.StaticMetaDescription)
+	}
+	if row.WordCount != 420 || row.StaticWordCount != 100 || row.ContentHash != 42 || row.StaticContentHash != 11 {
+		t.Fatalf("content fields are not authoritative: %+v", row)
+	}
+	if row.BodyHTML != "<html>rendered</html>" || row.StaticBodyHTML != "<html>static</html>" {
+		t.Fatalf("HTML variants not retained: body=%q static=%q", row.BodyHTML, row.StaticBodyHTML)
+	}
+	if len(row.H1) != 1 || row.H1[0] != "Rendered heading" || len(row.H2) != 1 {
+		t.Fatalf("rendered headings were not promoted: h1=%v h2=%v", row.H1, row.H2)
+	}
+	if !row.CanonicalIsSelf || !row.IsIndexable {
+		t.Fatalf("rendered canonical/indexability not applied: canonical_self=%v indexable=%v reason=%q",
+			row.CanonicalIsSelf, row.IsIndexable, row.IndexReason)
+	}
+	if len(rows) != 2 || internalOut != 1 || externalOut != 1 {
+		t.Fatalf("rendered links were not used: rows=%d internal=%d external=%d", len(rows), internalOut, externalOut)
+	}
+	if row.ImagesCount != 2 || row.ImagesNoAlt != 1 {
+		t.Fatalf("rendered image metrics not applied: images=%d no_alt=%d", row.ImagesCount, row.ImagesNoAlt)
+	}
+}
+
+func TestSEOTextLengthCountsUnicodeCharacters(t *testing.T) {
+	const value = "Продажі є"
+	if got, want := seoTextLength(value), uint16(len([]rune(value))); got != want {
+		t.Fatalf("seoTextLength(%q) = %d, want %d", value, got, want)
+	}
+	if got := seoTextLength(value); got == uint16(len(value)) {
+		t.Fatalf("seoTextLength(%q) still counts UTF-8 bytes: %d", value, got)
+	}
+}
+
+func TestBuildLinkRowsPreservesRenderedLinkLocation(t *testing.T) {
+	at := time.Now()
+	rows, internalOut, externalOut := buildLinkRows("session", "https://example.com/", []parser.Link{
+		{
+			TargetURL:  "https://example.com/about",
+			AnchorText: "About",
+			Rel:        "nofollow",
+			IsInternal: true,
+			Tag:        "a",
+			Location:   "footer",
+		},
+	}, at)
+
+	if len(rows) != 1 || internalOut != 1 || externalOut != 0 {
+		t.Fatalf("unexpected link summary: rows=%d internal=%d external=%d", len(rows), internalOut, externalOut)
+	}
+	if rows[0].LinkLocation != "footer" || rows[0].AnchorText != "About" || !rows[0].IsInternal {
+		t.Fatalf("rendered link fields not preserved: %+v", rows[0])
 	}
 }
 

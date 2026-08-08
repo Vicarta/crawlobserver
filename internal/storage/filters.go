@@ -14,6 +14,7 @@ const (
 	FilterBool                    // Bool → = true/false
 	FilterArray                   // Array(String) → arrayExists(x -> x ILIKE '%val%', col)
 	FilterFloat                   // Float → =N, >N, <N, >=N, <=N (decimal)
+	FilterExact                   // String → = val
 )
 
 type FilterDef struct {
@@ -49,6 +50,27 @@ const PageTypeSQLExpression = `multiIf(
 	'other'
 )`
 
+// PageRankEligiblePredicateVersion names the stable population used by PageRank
+// computation, reports, and quality evidence.
+const PageRankEligiblePredicateVersion = "pagerank-eligible-v1"
+
+const pageRankEligiblePredicateTemplate = `(
+	positionCaseInsensitiveUTF8({page}.content_type, 'html') > 0
+	AND {page}.status_code >= 200 AND {page}.status_code < 300
+	AND ({page}.final_url = '' OR {page}.final_url = {page}.url)
+	AND ({page}.canonical = '' OR {page}.canonical_is_self OR {page}.canonical = {page}.url)
+)`
+
+// PageRankEligiblePredicate returns the versioned PageRank population predicate
+// for a pages-table alias. It intentionally includes noindex pages and never
+// tests pagerank itself, so zero-rank pages remain observable.
+func PageRankEligiblePredicate(pageAlias string) string {
+	if pageAlias == "" {
+		pageAlias = "p"
+	}
+	return strings.ReplaceAll(pageRankEligiblePredicateTemplate, "{page}", pageAlias)
+}
+
 // PageFilters defines the allowed filter columns for the pages table.
 var PageFilters = map[string]FilterDef{
 	"url":                {Column: "url", Type: FilterLike},
@@ -65,6 +87,8 @@ var PageFilters = map[string]FilterDef{
 	"index_reason":       {Column: "index_reason", Type: FilterLike},
 	"error":              {Column: "error", Type: FilterLike},
 	"found_on":           {Column: "found_on", Type: FilterLike},
+	"discovery_source":   {Column: "discovery_source", Type: FilterLike},
+	"discovery_detail":   {Column: "discovery_detail", Type: FilterLike},
 	"status_code":        {Column: "status_code", Type: FilterUint},
 	"title_length":       {Column: "title_length", Type: FilterUint},
 	"meta_desc_length":   {Column: "meta_desc_length", Type: FilterUint},
@@ -108,11 +132,12 @@ var ProviderDataSortColumns = map[string]string{
 
 // LinkFilters defines the allowed filter columns for the links table.
 var LinkFilters = map[string]FilterDef{
-	"source_url":  {Column: "source_url", Type: FilterLike},
-	"target_url":  {Column: "target_url", Type: FilterLike},
-	"anchor_text": {Column: "anchor_text", Type: FilterLike},
-	"rel":         {Column: "rel", Type: FilterLike},
-	"tag":         {Column: "tag", Type: FilterLike},
+	"source_url":    {Column: "source_url", Type: FilterLike},
+	"target_url":    {Column: "target_url", Type: FilterLike},
+	"anchor_text":   {Column: "anchor_text", Type: FilterLike},
+	"rel":           {Column: "rel", Type: FilterLike},
+	"tag":           {Column: "tag", Type: FilterLike},
+	"link_location": {Column: "link_location", Type: FilterLike},
 }
 
 // ExternalCheckFilters defines the allowed filter columns for the external_link_checks table.
@@ -233,6 +258,7 @@ var PageSortColumns = map[string]string{
 	"fetch_duration_ms":  "fetch_duration_ms",
 	"depth":              "depth",
 	"pagerank":           "pagerank",
+	"discovery_source":   "discovery_source",
 	"content_type":       "content_type",
 	"page_type":          "page_type",
 	"meta_description":   "meta_description",
@@ -248,17 +274,20 @@ var PageSortColumns = map[string]string{
 	"content_encoding":   "content_encoding",
 	"lang":               "lang",
 	"og_title":           "og_title",
+	"page_created_at":    "page_created_at",
+	"page_modified_at":   "page_modified_at",
 	"crawled_at":         "crawled_at",
 }
 
 // LinkSortColumns maps query param names to DB column names for links.
 var LinkSortColumns = map[string]string{
-	"source_url":  "source_url",
-	"target_url":  "target_url",
-	"anchor_text": "anchor_text",
-	"rel":         "rel",
-	"tag":         "tag",
-	"crawled_at":  "crawled_at",
+	"source_url":    "source_url",
+	"target_url":    "target_url",
+	"anchor_text":   "anchor_text",
+	"rel":           "rel",
+	"tag":           "tag",
+	"link_location": "link_location",
+	"crawled_at":    "crawled_at",
 }
 
 // HreflangIssueFilters defines the allowed filter columns for hreflang_issues.
@@ -318,10 +347,21 @@ func BuildWhereClause(filters []ParsedFilter) (string, []interface{}, error) {
 		if val == "" {
 			continue
 		}
+		negatedText := false
+		if f.Def.Type == FilterLike || f.Def.Type == FilterArray || f.Def.Type == FilterExact {
+			negatedText, val = parseTextNegation(val)
+			if val == "" {
+				continue
+			}
+		}
 
 		switch f.Def.Type {
 		case FilterLike:
-			clauses = append(clauses, fmt.Sprintf("%s ILIKE ?", f.Def.Column))
+			if negatedText {
+				clauses = append(clauses, fmt.Sprintf("NOT (%s ILIKE ?)", f.Def.Column))
+			} else {
+				clauses = append(clauses, fmt.Sprintf("%s ILIKE ?", f.Def.Column))
+			}
 			args = append(args, "%"+val+"%")
 
 		case FilterUint:
@@ -365,8 +405,21 @@ func BuildWhereClause(filters []ParsedFilter) (string, []interface{}, error) {
 			args = append(args, fv)
 
 		case FilterArray:
-			clauses = append(clauses, fmt.Sprintf("arrayExists(x -> x ILIKE ?, %s)", f.Def.Column))
+			arrayMatch := fmt.Sprintf("arrayExists(x -> x ILIKE ?, %s)", f.Def.Column)
+			if negatedText {
+				clauses = append(clauses, "NOT ("+arrayMatch+")")
+			} else {
+				clauses = append(clauses, arrayMatch)
+			}
 			args = append(args, "%"+val+"%")
+
+		case FilterExact:
+			if negatedText {
+				clauses = append(clauses, fmt.Sprintf("NOT (%s = ?)", f.Def.Column))
+			} else {
+				clauses = append(clauses, fmt.Sprintf("%s = ?", f.Def.Column))
+			}
+			args = append(args, val)
 		}
 	}
 
@@ -374,6 +427,16 @@ func BuildWhereClause(filters []ParsedFilter) (string, []interface{}, error) {
 		return "", nil, nil
 	}
 	return strings.Join(clauses, " AND "), args, nil
+}
+
+// parseTextNegation interprets the documented !value text-filter form.
+// It is deliberately limited to textual filter types so numeric comparisons
+// such as >=400 retain their existing syntax.
+func parseTextNegation(val string) (negated bool, text string) {
+	if !strings.HasPrefix(val, "!") {
+		return false, val
+	}
+	return true, strings.TrimSpace(strings.TrimPrefix(val, "!"))
 }
 
 // parseUintRange tries to parse "N-M" range syntax. Returns lo, hi, ok.
@@ -456,16 +519,17 @@ var InterlinkingSortColumns = map[string]string{
 
 // SimulationResultFilters defines the allowed filter columns for interlinking_simulation_results.
 var SimulationResultFilters = map[string]FilterDef{
-	"url":             {Column: "url", Type: FilterLike},
-	"pagerank_before": {Column: "pagerank_before", Type: FilterFloat},
-	"pagerank_after":  {Column: "pagerank_after", Type: FilterFloat},
-	"pagerank_diff":   {Column: "pagerank_diff", Type: FilterFloat},
+	"url":             {Column: "r.url", Type: FilterLike},
+	"url_exact":       {Column: "r.url", Type: FilterExact},
+	"pagerank_before": {Column: "r.pagerank_before", Type: FilterFloat},
+	"pagerank_after":  {Column: "r.pagerank_after", Type: FilterFloat},
+	"pagerank_diff":   {Column: "r.pagerank_diff", Type: FilterFloat},
 }
 
 // SimulationResultSortColumns maps query param names to DB column names for simulation results.
 var SimulationResultSortColumns = map[string]string{
-	"url":             "url",
-	"pagerank_before": "pagerank_before",
-	"pagerank_after":  "pagerank_after",
-	"pagerank_diff":   "pagerank_diff",
+	"url":             "r.url",
+	"pagerank_before": "r.pagerank_before",
+	"pagerank_after":  "r.pagerank_after",
+	"pagerank_diff":   "r.pagerank_diff",
 }

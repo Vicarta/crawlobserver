@@ -1,11 +1,15 @@
 <script>
   import { t } from '../i18n/index.svelte.js';
   import { fmtN, fmtSize, timeAgo } from '../utils.js';
+  import { exportSelectedCSV } from '../selectedCsv.js';
   import { importSession, importCSVSession, batchAssignSessions } from '../api.js';
+  import { sessionStopLabel, sessionStopTitle } from '../sessionStop.js';
+  import ExportSelectedButton from './ExportSelectedButton.svelte';
 
   let {
     sessions,
     projects,
+    currentSnapshots = {},
     liveProgress,
     sessionStorageMap,
     loading,
@@ -23,6 +27,29 @@
   let selectedIds = $state(new Set());
   let showBulkAssignMenu = $state(false);
   let lastClickedIdx = $state(-1);
+
+  const snapshots = $derived(
+    projects
+      .map((project) => ({ project, snapshot: currentSnapshots[project.id] }))
+      .filter(({ snapshot }) => snapshot?.current_session_id || snapshot?.baseline_session_id),
+  );
+
+  function openSnapshot(project, snapshot, kind) {
+    const sessionId =
+      kind === 'baseline' ? snapshot?.baseline_session_id : snapshot?.current_session_id;
+    if (!sessionId) return;
+    onselectsession?.({
+      ID: sessionId,
+      ProjectID: project.id,
+      Label: kind === 'baseline' ? 'Current Baseline Snapshot' : 'Current Snapshot',
+      Status: 'completed',
+      SeedURLs: [kind === 'baseline' ? 'Current Baseline Snapshot' : 'Current Snapshot'],
+    });
+  }
+
+  function canResumeSession(session) {
+    return ['stopped', 'failed', 'crashed', 'completed_with_errors'].includes(session?.Status);
+  }
 
   function toggleSelect(id, e) {
     e.stopPropagation();
@@ -51,6 +78,59 @@
     } else {
       selectedIds = new Set(sessions.map((s) => s.ID));
     }
+  }
+
+  function handleExportSelected() {
+    const selectedSessions = sessions.filter((session) => selectedIds.has(session.ID));
+    if (selectedSessions.length === 0) return;
+
+    exportSelectedCSV(
+      'crawl-sessions-selected.csv',
+      {
+        headers: [
+          'Session ID',
+          'Seed URLs',
+          'Label',
+          'Project',
+          'Status',
+          'Pages',
+          'Storage Bytes',
+          'Started At',
+          'Finished At',
+          'Stop Reason',
+          'Stop Message',
+        ],
+        keys: [
+          'id',
+          'seed_urls',
+          'label',
+          'project',
+          'status',
+          'pages',
+          'storage_bytes',
+          'started_at',
+          'finished_at',
+          'stop_reason',
+          'stop_message',
+        ],
+        transform: (session) => ({
+          id: session.ID,
+          seed_urls: session.SeedURLs?.join(' | ') || '',
+          label: session.Label || '',
+          project:
+            projects.find((project) => project.id === session.ProjectID)?.name ||
+            t('session.noProject'),
+          status: session.Status || '',
+          pages: session.PagesCrawled ?? 0,
+          storage_bytes: sessionStorageMap[session.ID] ?? 0,
+          started_at: session.StartedAt || '',
+          finished_at: session.FinishedAt || '',
+          stop_reason: session.StopReason || '',
+          stop_message: session.StopMessage || '',
+        }),
+      },
+      selectedSessions,
+    );
   }
 
   async function handleBulkAssign(projectId) {
@@ -134,7 +214,7 @@
 
 {#if loading}
   <p class="loading-msg">{t('common.loading')}</p>
-{:else if sessions.length === 0}
+{:else if sessions.length === 0 && snapshots.length === 0}
   <div class="empty-state">
     <h2>{t('sessions.noSessions')}</h2>
     <p>{t('sessions.noSessionsDesc')}</p>
@@ -145,6 +225,43 @@
     {/if}
   </div>
 {:else}
+  {#if snapshots.length > 0}
+    <section class="snapshot-overview" aria-label="Project snapshots">
+      {#each snapshots as { project, snapshot }}
+        <div class="snapshot-overview-card">
+          <div class="snapshot-overview-main">
+            <span class="snapshot-kicker">{project.name}</span>
+            <strong>Current site data</strong>
+            <span>
+              Baseline {snapshot.baseline_session_id
+                ? timeAgo(snapshot.baseline_created_at)
+                : 'missing'}
+              {#if snapshot.delta_count}
+                · {fmtN(snapshot.delta_count)} promoted delta{snapshot.delta_count === 1 ? '' : 's'}
+              {/if}
+            </span>
+          </div>
+          <div class="snapshot-overview-actions">
+            <button
+              class="btn btn-sm"
+              onclick={() => openSnapshot(project, snapshot, 'current')}
+              disabled={!snapshot.current_session_id}
+            >
+              Current Snapshot
+            </button>
+            <button
+              class="btn btn-sm btn-primary"
+              onclick={() => openSnapshot(project, snapshot, 'baseline')}
+              disabled={!snapshot.baseline_session_id}
+            >
+              Baseline
+            </button>
+          </div>
+        </div>
+      {/each}
+    </section>
+  {/if}
+
   <!-- Bulk action bar -->
   {#if isAdmin && selectedIds.size > 0}
     <div class="bulk-bar">
@@ -173,8 +290,9 @@
         {/if}
       </div>
       <button class="btn btn-sm" onclick={() => (selectedIds = new Set())}
-        >{t('common.cancel')}</button
+        >{t('common.clear')}</button
       >
+      <ExportSelectedButton onclick={handleExportSelected} />
     </div>
   {/if}
 
@@ -238,6 +356,9 @@
                 >{s.Status}</span
               >
             {/if}
+            {#if sessionStopLabel(s)}
+              <span class="stop-reason" title={sessionStopTitle(s)}>{sessionStopLabel(s)}</span>
+            {/if}
             {#if s.ProjectID}
               <span class="badge badge-project"
                 >{projects.find((p) => p.id === s.ProjectID)?.name || 'Project'}</span
@@ -259,9 +380,11 @@
                 >{t('common.stop')}</button
               >
             {:else}
-              <button class="btn btn-sm" onclick={() => onresume?.(s.ID)}
-                >{t('sessions.resume')}</button
-              >
+              {#if canResumeSession(s)}
+                <button class="btn btn-sm" onclick={() => onresume?.(s.ID)}
+                  >{t('sessions.resume')}</button
+                >
+              {/if}
               <button
                 class="btn-ghost btn-delete-icon"
                 onclick={() => ondelete?.(s.ID)}
@@ -289,6 +412,70 @@
 {/if}
 
 <style>
+  .snapshot-overview {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .snapshot-overview-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    box-shadow: var(--shadow-sm);
+    padding: 14px 16px;
+  }
+
+  .snapshot-overview-main {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .snapshot-kicker {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+
+  .snapshot-overview-main strong {
+    color: var(--text);
+    font-size: 14px;
+  }
+
+  .snapshot-overview-main span:not(.snapshot-kicker) {
+    color: var(--text-muted);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .snapshot-overview-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  @media (max-width: 720px) {
+    .snapshot-overview-card {
+      align-items: stretch;
+      flex-direction: column;
+    }
+    .snapshot-overview-actions {
+      justify-content: flex-start;
+    }
+  }
+
   /* Bulk bar */
   .bulk-bar {
     display: flex;
@@ -393,6 +580,12 @@
     display: flex;
     align-items: center;
     gap: 12px;
+  }
+
+  .stop-reason {
+    color: var(--warning);
+    font-size: 12px;
+    font-weight: 600;
   }
   .session-actions {
     display: flex;

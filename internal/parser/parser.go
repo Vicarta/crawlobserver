@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/url"
 	"strings"
+	"time"
 	"unicode"
 
 	readability "codeberg.org/readeck/go-readability/v2"
@@ -24,6 +25,7 @@ type PageData struct {
 	H4              []string
 	H5              []string
 	H6              []string
+	HeadingOutline  []Heading
 	Links           []Link
 	Images          []Image
 	Hreflang        []HreflangEntry
@@ -33,9 +35,21 @@ type PageData struct {
 	OGImage         string
 	SchemaTypes     []string
 	JSONLDBlocks    []string // raw JSON-LD block contents
+	PublishedAt     *time.Time
+	ModifiedAt      *time.Time
 	WordCount       int
 	ContentHash     uint64 // SimHash fingerprint of visible body text
 	Resources       []PageResource
+}
+
+type ParseOptions struct {
+	FooterSelectors []string
+}
+
+// Heading preserves a heading tag in document order.
+type Heading struct {
+	Level uint8  `json:"level"`
+	Text  string `json:"text"`
 }
 
 // Image represents an image found on a page.
@@ -54,6 +68,11 @@ type HreflangEntry struct {
 
 // Parse parses HTML body and extracts SEO signals.
 func Parse(body []byte, pageURL string) (*PageData, error) {
+	return ParseWithOptions(body, pageURL, ParseOptions{})
+}
+
+// ParseWithOptions parses HTML body and extracts SEO signals using parser options.
+func ParseWithOptions(body []byte, pageURL string, opts ParseOptions) (*PageData, error) {
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -76,7 +95,8 @@ func Parse(body []byte, pageURL string) (*PageData, error) {
 	data.H4 = extractHeadings(doc, "h4")
 	data.H5 = extractHeadings(doc, "h5")
 	data.H6 = extractHeadings(doc, "h6")
-	data.Links = extractLinks(doc, baseURL)
+	data.HeadingOutline = extractHeadingOutline(doc)
+	data.Links = extractLinks(doc, baseURL, opts.FooterSelectors)
 	data.Images = extractImages(doc, baseURL)
 	data.Hreflang = extractHreflang(doc)
 	data.Lang = extractLang(doc)
@@ -85,11 +105,21 @@ func Parse(body []byte, pageURL string) (*PageData, error) {
 	data.OGImage = extractMetaProperty(doc, "og:image")
 	data.SchemaTypes = extractSchemaTypes(doc)
 	data.JSONLDBlocks = extractJSONLDBlocks(doc)
+	data.PublishedAt, data.ModifiedAt = extractPageDates(doc, data.JSONLDBlocks)
 	data.WordCount = countWords(doc)
 	data.ContentHash = SimHash(ExtractMainContent(body, baseURL))
 	data.Resources = ExtractResources(doc, baseURL)
 
 	return data, nil
+}
+
+// ExtractHeadingOutline parses only heading tags and preserves their document order.
+func ExtractHeadingOutline(body []byte) ([]Heading, error) {
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	return extractHeadingOutline(doc), nil
 }
 
 // countWords counts visible text words in the body.
