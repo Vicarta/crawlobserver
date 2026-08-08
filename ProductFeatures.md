@@ -518,6 +518,11 @@ shared rendered metadata shell diagnostics без site-specific правил.
 - Admin може синхронно й ідемпотентно переоцінити завершену сесію через API/UI
   з explicit confirmation, audit reason та optimistic revision checks; операція
   не створює crawl, не перераховує PageRank і не послаблює thresholds.
+- Після успішного re-evaluate modal і session badge перечитують authoritative
+  quality, immutable history та PageRank evidence через GET; частковий POST
+  result не може тимчасово приховати наявні findings. Idempotent response
+  проходить той самий refresh path; 409 оновлює authoritative quality без
+  success-state, а інші помилки зберігають попередній повний modal/badge state.
 - Admin repair має durable `started -> applied/failed` audit lifecycle з
   монотонною sequence, redaction credential-like values і fail-closed записом
   до будь-якої quality/snapshot mutation.

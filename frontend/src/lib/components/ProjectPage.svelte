@@ -17,7 +17,7 @@
   import { pushURL } from '../router.js';
   import { t } from '../i18n/index.svelte.js';
   import { sessionStopLabel, sessionStopTitle } from '../sessionStop.js';
-  import { qualityRepairOutcome } from '../quality-repair.js';
+  import { runQualityReevaluationFlow } from '../quality-repair.js';
   import GSCTab from './GSCTab.svelte';
   import ProvidersTab from './ProvidersTab.svelte';
   import DeltaCrawlTab from './DeltaCrawlTab.svelte';
@@ -166,18 +166,6 @@
     }
   }
 
-  async function refreshQualityDetail() {
-    if (!qualityDetailSession) return;
-    const [result, history, evidence] = await Promise.all([
-      getSessionQuality(qualityDetailSession.ID),
-      getSessionQualityHistory(qualityDetailSession.ID),
-      loadQualityPageRankEvidence(qualityDetailSession.ID),
-    ]);
-    qualityDetail = result;
-    qualityHistory = history || [];
-    qualityPageRankEvidence = evidence;
-  }
-
   function refreshQualityBadge(result) {
     if (!result || !qualityDetailSession) return;
     projSessions = projSessions.map((session) =>
@@ -199,42 +187,43 @@
     qualityRepairLoading = true;
     qualityRepairMessage = '';
     qualityRepairState = '';
+    const request = {
+      confirm: true,
+      reason: qualityRepairReason.trim(),
+    };
+    if (qualityDetail?.evaluation_revision) {
+      request.expected_evaluation_revision = qualityDetail.evaluation_revision;
+    }
+    const expectedEvidenceRevision =
+      qualityPageRankEvidence?.attempt_id || qualityDetail?.pagerank_evidence_revision;
+    if (expectedEvidenceRevision) {
+      request.expected_pagerank_evidence_revision = expectedEvidenceRevision;
+    }
     try {
-      const request = {
-        confirm: true,
-        reason: qualityRepairReason.trim(),
-      };
-      if (qualityDetail?.evaluation_revision) {
-        request.expected_evaluation_revision = qualityDetail.evaluation_revision;
-      }
-      const expectedEvidenceRevision =
-        qualityPageRankEvidence?.attempt_id || qualityDetail?.pagerank_evidence_revision;
-      if (expectedEvidenceRevision) {
-        request.expected_pagerank_evidence_revision = expectedEvidenceRevision;
-      }
-      const response = await reevaluateSessionQuality(qualityDetailSession.ID, request);
-      qualityDetail = response.result || qualityDetail;
-      qualityPageRankEvidence = response.evidence || qualityPageRankEvidence;
-      refreshQualityBadge(response.result);
-      qualityHistory = await getSessionQualityHistory(qualityDetailSession.ID);
-      await loadCurrentSnapshot();
-      const outcome = qualityRepairOutcome(response);
-      qualityRepairMessage = t(outcome.messageKey);
-      qualityRepairState = outcome.state;
-    } catch (e) {
-      if (e.status === 409) {
+      const result = await runQualityReevaluationFlow(qualityDetailSession.ID, request, {
+        reevaluate: reevaluateSessionQuality,
+        loadQuality: getSessionQuality,
+        loadHistory: getSessionQualityHistory,
+        loadEvidence: loadQualityPageRankEvidence,
+        refreshSnapshot: loadCurrentSnapshot,
+        applyAuthoritativeState: (state) => {
+          qualityDetail = state.result;
+          qualityHistory = state.history;
+          qualityPageRankEvidence = state.evidence;
+        },
+        updateBadge: refreshQualityBadge,
+        reportError: (message) => onerror?.(message),
+      });
+
+      if (result.kind === 'success') {
+        qualityRepairMessage = t(result.outcome.messageKey);
+        qualityRepairState = result.outcome.state;
+      } else if (result.kind === 'conflict') {
         qualityRepairMessage = t('quality.repairConflict');
         qualityRepairState = 'conflict';
-        try {
-          await refreshQualityDetail();
-          refreshQualityBadge(qualityDetail);
-        } catch (refreshError) {
-          onerror?.(refreshError.message);
-        }
       } else {
-        qualityRepairMessage = e.message;
+        qualityRepairMessage = result.error.message;
         qualityRepairState = 'error';
-        onerror?.(e.message);
       }
     } finally {
       qualityRepairLoading = false;

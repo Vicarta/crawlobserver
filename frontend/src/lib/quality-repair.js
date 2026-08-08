@@ -16,3 +16,74 @@ export function qualityRepairOutcome(response = {}) {
   }
   return { state: 'success', messageKey: 'quality.repairUnchanged' };
 }
+
+export async function loadAuthoritativeQualityRepairState(
+  sessionId,
+  { loadQuality, loadHistory, loadEvidence },
+) {
+  const [result, history, evidence] = await Promise.all([
+    loadQuality(sessionId),
+    loadHistory(sessionId),
+    loadEvidence(sessionId),
+  ]);
+  return { result, history: history || [], evidence: evidence || null };
+}
+
+export async function runQualityReevaluationFlow(
+  sessionId,
+  request,
+  {
+    reevaluate,
+    loadQuality,
+    loadHistory,
+    loadEvidence,
+    refreshSnapshot,
+    applyAuthoritativeState,
+    updateBadge,
+    reportError,
+  },
+) {
+  let response;
+  try {
+    response = await reevaluate(sessionId, request);
+  } catch (error) {
+    if (error.status !== 409) {
+      reportError?.(error.message);
+      return { kind: 'error', error };
+    }
+
+    try {
+      const state = await loadAuthoritativeQualityRepairState(sessionId, {
+        loadQuality,
+        loadHistory,
+        loadEvidence,
+      });
+      applyAuthoritativeState(state);
+      updateBadge(state.result);
+      return { kind: 'conflict', error, state };
+    } catch (refreshError) {
+      reportError?.(refreshError.message);
+      return { kind: 'conflict', error, refreshError };
+    }
+  }
+
+  try {
+    const state = await loadAuthoritativeQualityRepairState(sessionId, {
+      loadQuality,
+      loadHistory,
+      loadEvidence,
+    });
+    await refreshSnapshot();
+    applyAuthoritativeState(state);
+    updateBadge(state.result);
+    return {
+      kind: 'success',
+      response,
+      state,
+      outcome: qualityRepairOutcome(response),
+    };
+  } catch (error) {
+    reportError?.(error.message);
+    return { kind: 'error', error };
+  }
+}
