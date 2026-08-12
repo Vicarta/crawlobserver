@@ -131,21 +131,24 @@ func runServe(cmd *cobra.Command, args []string) error {
 func runBackupScheduler(ctx context.Context, cfg *config.Config, opts *backup.SQLBackupOptions, store *storage.Store) {
 	interval, err := time.ParseDuration(cfg.Backup.Interval)
 	if err != nil || interval < 1*time.Hour {
-		interval = 6 * time.Hour
+		interval = 24 * time.Hour
 	}
 
 	retain := cfg.Backup.Retain
 	if retain < 1 {
-		retain = 5
+		retain = 2
 	}
 
 	exportDir := filepath.Join(opts.BackupDir, "exports")
 
 	applog.Infof("cli", "Auto-backup enabled: every %s, retaining %d backups in %s", interval, retain, opts.BackupDir)
 
-	// Run first backup shortly after startup, after the app has settled.
+	// Preserve the interval across app restarts. A recent backup postpones the
+	// first run until it is actually due; a missing or overdue backup runs after
+	// the app has had a short time to settle.
+	firstDelay := nextScheduledBackupDelay(opts.BackupDir, interval, time.Now())
 	select {
-	case <-time.After(90 * time.Second):
+	case <-time.After(firstDelay):
 	case <-ctx.Done():
 		return
 	}
@@ -163,12 +166,41 @@ func runBackupScheduler(ctx context.Context, cfg *config.Config, opts *backup.SQ
 	}
 }
 
+const scheduledBackupStartupDelay = 90 * time.Second
+
+func nextScheduledBackupDelay(backupDir string, interval time.Duration, now time.Time) time.Duration {
+	backups, err := backup.ListBackups(backupDir)
+	if err != nil || len(backups) == 0 {
+		return scheduledBackupStartupDelay
+	}
+
+	remaining := interval - now.Sub(backups[0].CreatedAt)
+	if remaining < scheduledBackupStartupDelay {
+		return scheduledBackupStartupDelay
+	}
+	return remaining
+}
+
 func performBackup(ctx context.Context, opts *backup.SQLBackupOptions, retain int, store *storage.Store, exportDir string) {
 	if ctx.Err() != nil {
 		return
 	}
+
+	// Create the independent recovery copy first. If it fails, keep
+	// gsc_analytics in the full archive so the scheduled backup remains
+	// self-contained rather than trading disk usage for recoverability.
+	applog.Info("cli", "Exporting critical tables...")
+	criticalExported := true
+	if err := store.ExportCriticalTables(ctx, exportDir, retain); err != nil {
+		criticalExported = false
+		applog.Errorf("cli", "Critical table export failed; scheduled full backup will retain critical table data: %v", err)
+	} else {
+		applog.Info("cli", "Critical table export complete")
+	}
+
 	applog.Info("cli", "Starting scheduled backup...")
-	info, err := backup.CreateSQLBackup(ctx, *opts, updater.Version)
+	scheduledOpts := scheduledSQLBackupOptions(opts, criticalExported)
+	info, err := backup.CreateSQLBackup(ctx, scheduledOpts, updater.Version)
 	if err != nil {
 		applog.Errorf("cli", "Scheduled backup failed: %v", err)
 	} else {
@@ -177,14 +209,15 @@ func performBackup(ctx context.Context, opts *backup.SQLBackupOptions, retain in
 			applog.Infof("cli", "Pruned %d old backup(s)", pruned)
 		}
 	}
+}
 
-	// Export critical non-regenerable tables
-	applog.Info("cli", "Exporting critical tables...")
-	if err := store.ExportCriticalTables(ctx, exportDir, retain); err != nil {
-		applog.Errorf("cli", "Critical table export failed: %v", err)
-	} else {
-		applog.Info("cli", "Critical table export complete")
+func scheduledSQLBackupOptions(opts *backup.SQLBackupOptions, criticalExported bool) backup.SQLBackupOptions {
+	scheduled := *opts
+	scheduled.ExcludeTableData = append([]string(nil), opts.ExcludeTableData...)
+	if criticalExported {
+		scheduled.ExcludeTableData = append(scheduled.ExcludeTableData, "gsc_analytics")
 	}
+	return scheduled
 }
 
 func runSessionRetentionScheduler(ctx context.Context, cfg *config.Config, store *storage.Store) {

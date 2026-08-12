@@ -17,4 +17,4 @@ install -m 0644 \
 logrotate -d /etc/logrotate.d/crawlobserver-clickhouse
 
 echo "CrawlObserver ClickHouse log retention installed."
-echo "Rotation: daily; retention: 7 rotations and at most 7 days."
+echo "Rotation: daily or at 100 MB; retention: 3 rotations and at most 3 days."

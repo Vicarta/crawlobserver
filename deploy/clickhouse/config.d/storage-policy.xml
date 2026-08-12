@@ -1,0 +1,51 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <logger>
+        <level>information</level>
+        <size>100M</size>
+        <count>3</count>
+    </logger>
+
+    <!-- High-volume diagnostic logs are opt-in, not persisted continuously. -->
+    <trace_log remove="1"/>
+    <processors_profile_log remove="1"/>
+
+    <!-- Operational system logs keep only the evidence needed for recent incidents. -->
+    <query_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_log>
+    <query_thread_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_thread_log>
+    <query_views_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_views_log>
+    <text_log>
+        <level>information</level>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </text_log>
+    <part_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </part_log>
+    <metric_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </metric_log>
+    <latency_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </latency_log>
+    <error_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </error_log>
+    <query_metric_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </query_metric_log>
+    <asynchronous_metric_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </asynchronous_metric_log>
+    <opentelemetry_span_log>
+        <ttl>finish_date + INTERVAL 3 DAY DELETE</ttl>
+    </opentelemetry_span_log>
+    <crash_log>
+        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+    </crash_log>
+</clickhouse>

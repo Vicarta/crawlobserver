@@ -44,6 +44,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Storage.BatchSize != 1000 {
 		t.Errorf("BatchSize = %d, want 1000", cfg.Storage.BatchSize)
 	}
+	if cfg.Backup.Interval != "24h" {
+		t.Errorf("Backup.Interval = %q, want 24h", cfg.Backup.Interval)
+	}
+	if cfg.Backup.Retain != 2 {
+		t.Errorf("Backup.Retain = %d, want 2", cfg.Backup.Retain)
+	}
 }
 
 func TestWriterStateDirUsesNestedRelativeSQLiteParent(t *testing.T) {
@@ -81,6 +87,9 @@ func TestValidateRejectsInvalid(t *testing.T) {
 		{"invalid port", func(c *Config) { c.ClickHouse.Port = 0 }},
 		{"zero batch_size", func(c *Config) { c.Storage.BatchSize = 0 }},
 		{"zero flush_interval", func(c *Config) { c.Storage.FlushInterval = 0 }},
+		{"invalid backup interval", func(c *Config) { c.Backup.Interval = "daily" }},
+		{"short backup interval", func(c *Config) { c.Backup.Interval = "30m" }},
+		{"zero backup retention", func(c *Config) { c.Backup.Retain = 0 }},
 	}
 
 	for _, tt := range tests {

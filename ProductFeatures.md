@@ -612,11 +612,19 @@ flags. Web UI компілюється в Go binary, тому production не п
 - Automatic schema migrations.
 - SQLite store для users, API keys, project settings та integration metadata.
 - Manual backup list/create/restore/delete через API/UI.
-- Scheduled backups із configurable interval і retention.
-- Critical-data export.
+- Scheduled backups за замовчуванням виконуються раз на 24 години та зберігають
+  дві останні копії; interval і retention залишаються configurable. App restart
+  не створює зайву копію, якщо останній scheduled archive ще не прострочений.
+- Critical-data export є окремим recovery-шляхом. Scheduled full archive зберігає
+  DDL `gsc_analytics`, але не дублює її rows, які входять до critical export;
+  manual full backup залишається самодостатнім і містить усі таблиці.
 - Session retention scheduler.
-- ClickHouse log rotation, compression і seven-day retention для Docker
-  deployment без restart ClickHouse.
+- ClickHouse працює з logger level `information`; `trace_log` і
+  `processors_profile_log` не зберігаються постійно. System logs мають
+  триденний TTL, файлові логи обмежені 100 MB і трьома ротаціями.
+- Docker JSON logs app і ClickHouse обмежені трьома файлами по 20 MB.
+- Host-side ClickHouse log rotation, compression і триденний retention для
+  Docker deployment без restart ClickHouse.
 
 ## 27. Deployment та operations
 

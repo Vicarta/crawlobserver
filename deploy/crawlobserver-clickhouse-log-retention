@@ -8,8 +8,8 @@ if [ ! -d "$LOG_DIR" ]; then
 fi
 
 # ClickHouse can create numeric archives before host logrotate runs. Remove
-# only rotated files older than seven days and never touch active log files.
-find "$LOG_DIR" -maxdepth 1 -type f -mmin +10080 \
+# only rotated files older than three days and never touch active log files.
+find "$LOG_DIR" -maxdepth 1 -type f -mmin +4320 \
   \( \
     -name 'clickhouse-server.log.*' -o \
     -name 'clickhouse-server.err.log.*' -o \

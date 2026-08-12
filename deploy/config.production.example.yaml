@@ -59,9 +59,9 @@ gsc:
 
 backup:
   enabled: true
-  interval: 6h
+  interval: 24h
   dir: /var/backups/crawlobserver
-  retain: 4
+  retain: 2
 
 retention:
   # Keep 0 to disable automatic deletion of old crawl sessions.

@@ -239,7 +239,7 @@ type GSCConfig struct {
 
 type BackupConfig struct {
 	Enabled  bool   `mapstructure:"enabled"`
-	Interval string `mapstructure:"interval"` // duration string: "6h", "12h", "24h"
+	Interval string `mapstructure:"interval"` // duration string: "12h", "24h"
 	Dir      string `mapstructure:"dir"`      // backup directory, "" = <dataDir>/backups
 	Retain   int    `mapstructure:"retain"`   // number of backups to keep
 }
@@ -324,9 +324,9 @@ func SetDefaults() {
 	viper.SetDefault("gsc.redirect_uri", "http://127.0.0.1:8899/api/gsc/callback")
 
 	viper.SetDefault("backup.enabled", true)
-	viper.SetDefault("backup.interval", "6h")
+	viper.SetDefault("backup.interval", "24h")
 	viper.SetDefault("backup.dir", "")
-	viper.SetDefault("backup.retain", 4)
+	viper.SetDefault("backup.retain", 2)
 
 	viper.SetDefault("retention.sessions_per_project", 0)
 	viper.SetDefault("retention.interval", "15m")
@@ -555,6 +555,15 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Storage.FlushInterval <= 0 {
 		return fmt.Errorf("storage.flush_interval must be > 0")
+	}
+	if cfg.Backup.Enabled {
+		interval, err := time.ParseDuration(cfg.Backup.Interval)
+		if err != nil || interval < time.Hour {
+			return fmt.Errorf("backup.interval must be a valid duration >= 1h")
+		}
+		if cfg.Backup.Retain < 1 {
+			return fmt.Errorf("backup.retain must be >= 1")
+		}
 	}
 	return nil
 }

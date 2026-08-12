@@ -24,6 +24,11 @@ services:
       - ./config.yaml:/etc/crawlobserver/config.yaml:ro
       - ./state:/var/lib/crawlobserver
       - ./backups:/var/backups/crawlobserver
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     networks:
       - internal
 
@@ -54,6 +59,12 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
+      - ./clickhouse/config.d/storage-policy.xml:/etc/clickhouse-server/config.d/storage-policy.xml:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     ulimits:
       nofile:
         soft: 262144

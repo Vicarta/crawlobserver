@@ -26,6 +26,10 @@ type SQLBackupOptions struct {
 	SQLitePath string // crawlobserver.db
 	ConfigPath string // config.yaml
 	BackupDir  string // where to write backup archives
+	// ExcludeTableData omits selected table rows while retaining their DDL.
+	// This is used by scheduled backups when a separate critical export is the
+	// authoritative recovery copy. Manual backups leave this empty.
+	ExcludeTableData []string
 }
 
 // sqlBackupMetadata stores backup metadata for SQL-based backups.
@@ -88,6 +92,9 @@ func CreateSQLBackup(ctx context.Context, opts SQLBackupOptions, version string)
 	// Export each table as JSONL via temp file (streaming, no OOM)
 	var exportedTables []string
 	for _, table := range tables {
+		if excludesTableData(opts.ExcludeTableData, table) {
+			continue
+		}
 		exported, err := exportTableToTar(ctx, opts, table, tw)
 		if err != nil {
 			return nil, fmt.Errorf("exporting table %s: %w", table, err)
@@ -152,6 +159,15 @@ func CreateSQLBackup(ctx context.Context, opts SQLBackupOptions, version string)
 		CreatedAt: ts,
 		Size:      fi.Size(),
 	}, nil
+}
+
+func excludesTableData(excluded []string, table string) bool {
+	for _, candidate := range excluded {
+		if candidate == table {
+			return true
+		}
+	}
+	return false
 }
 
 // exportTableToTar streams a table export to a temp file, then adds it to the tar.

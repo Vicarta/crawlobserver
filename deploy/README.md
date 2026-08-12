@@ -207,12 +207,26 @@ cd deploy
 
 The policy:
 
-- rotates `clickhouse-server.log` and `clickhouse-server.err.log` daily;
+- mounts `clickhouse/config.d/storage-policy.xml` through Compose;
+- uses ClickHouse logger level `information` and native `100 MB x 3` file
+  rotation;
+- disables continuously persisted `trace_log` and `processors_profile_log`;
+- applies a three-day TTL to operational ClickHouse system logs;
+- rotates `clickhouse-server.log` and `clickhouse-server.err.log` daily or at
+  100 MB;
 - compresses rotated files;
-- retains at most seven rotations and removes archives older than seven days;
+- retains at most three rotations and removes archives older than three days;
 - uses `copytruncate`, so ClickHouse does not need to restart;
 - removes old numeric archives created by ClickHouse's native size-based
   rotation.
+
+The app and ClickHouse Docker `json-file` logs are independently capped at
+three 20 MB files. Scheduled application backups default to every 24 hours with
+two retained generations; app restarts preserve the due time instead of
+creating an extra archive. A successful separate critical export allows the
+scheduled full archive to omit `gsc_analytics` rows; if that export fails, the
+full archive keeps those rows automatically. Manual full backups always keep
+all table data.
 
 The default paths assume the Compose project name is `deploy`. If the project
 name changes, update `deploy/logrotate/crawlobserver-clickhouse` before

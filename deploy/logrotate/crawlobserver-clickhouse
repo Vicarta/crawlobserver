@@ -1,8 +1,9 @@
 /var/lib/docker/volumes/deploy_clickhouse_logs/_data/clickhouse-server.log
 /var/lib/docker/volumes/deploy_clickhouse_logs/_data/clickhouse-server.err.log {
     daily
-    rotate 7
-    maxage 7
+    maxsize 100M
+    rotate 3
+    maxage 3
     missingok
     notifempty
     compress

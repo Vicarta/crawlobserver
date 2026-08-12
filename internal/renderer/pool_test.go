@@ -3,8 +3,12 @@ package renderer
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/go-rod/rod"
 )
 
 func TestDefaultPoolOptions(t *testing.T) {
@@ -111,5 +115,49 @@ func TestOriginGateHonorsCancellation(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("cancelled origin wait error = %v", err)
+	}
+}
+
+func TestPoolCloseCleansUpLauncherExactlyOnce(t *testing.T) {
+	var cleanupCalls atomic.Int32
+	pool := &Pool{
+		pages: make(chan *rod.Page, 1),
+		launcherCleanup: func() {
+			cleanupCalls.Add(1)
+		},
+	}
+
+	pool.Close()
+	pool.Close()
+
+	if got := cleanupCalls.Load(); got != 1 {
+		t.Fatalf("launcher cleanup calls = %d, want 1", got)
+	}
+	if _, err := pool.Acquire(); !errors.Is(err, errPoolClosed) {
+		t.Fatalf("Acquire after Close error = %v, want %v", err, errPoolClosed)
+	}
+}
+
+func TestPoolCloseIsConcurrentSafe(t *testing.T) {
+	var cleanupCalls atomic.Int32
+	pool := &Pool{
+		pages: make(chan *rod.Page, 1),
+		launcherCleanup: func() {
+			cleanupCalls.Add(1)
+		},
+	}
+
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pool.Close()
+		}()
+	}
+	wg.Wait()
+
+	if got := cleanupCalls.Load(); got != 1 {
+		t.Fatalf("concurrent launcher cleanup calls = %d, want 1", got)
 	}
 }
