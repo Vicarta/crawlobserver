@@ -619,8 +619,9 @@ flags. Web UI компілюється в Go binary, тому production не п
   DDL `gsc_analytics`, але не дублює її rows, які входять до critical export;
   manual full backup залишається самодостатнім і містить усі таблиці.
 - Session retention scheduler.
-- ClickHouse працює з logger level `information`; `trace_log` і
-  `processors_profile_log` не зберігаються постійно. System logs мають
+- ClickHouse працює з logger level `information`; `trace_log`,
+  `processors_profile_log` і невикористаний OpenTelemetry span log не
+  зберігаються постійно. Решта operational system logs мають
   триденний TTL, файлові логи обмежені 100 MB і трьома ротаціями.
 - Docker JSON logs app і ClickHouse обмежені трьома файлами по 20 MB.
 - Host-side ClickHouse log rotation, compression і триденний retention для

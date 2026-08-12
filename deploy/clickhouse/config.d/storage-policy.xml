@@ -42,9 +42,9 @@
     <asynchronous_metric_log>
         <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
     </asynchronous_metric_log>
-    <opentelemetry_span_log>
-        <ttl>finish_date + INTERVAL 3 DAY DELETE</ttl>
-    </opentelemetry_span_log>
+    <!-- The default OpenTelemetry log uses an explicit engine in 25.5, where a
+         separate ttl key is rejected. It is unused in this deployment. -->
+    <opentelemetry_span_log remove="1"/>
     <crash_log>
         <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
     </crash_log>
