@@ -217,6 +217,27 @@ func NewStore(dbPath string) (*Store, error) {
 	}
 
 	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS project_rescan_requests (
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			idempotency_key TEXT NOT NULL,
+			request_id TEXT NOT NULL UNIQUE,
+			session_id TEXT NOT NULL,
+			request_digest TEXT NOT NULL,
+			urls_json TEXT NOT NULL,
+			status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
+			accepted_count INTEGER NOT NULL DEFAULT 0,
+			error_code TEXT NOT NULL DEFAULT '',
+			error_message TEXT NOT NULL DEFAULT '',
+			started_at DATETIME NOT NULL,
+			completed_at DATETIME,
+			PRIMARY KEY (project_id, idempotency_key)
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating project_rescan_requests table: %w", err)
+	}
+
+	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS users (
 			id TEXT PRIMARY KEY,
 			username TEXT NOT NULL UNIQUE,

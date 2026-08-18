@@ -381,6 +381,56 @@ curl -X POST \
 
 Only use with a general/admin API key.
 
+For server-side integrations, use the project-bound endpoint. It verifies the
+project/session relationship and exact seed origin before any crawler mutation.
+`Idempotency-Key` is required, must be at most 200 characters, and should be a
+stable opaque reference to the publish event.
+
+```bash
+curl -X POST \
+  -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
+  -H "Idempotency-Key: seo-publish-{event_id}" \
+  -H "Content-Type: application/json" \
+  "https://crawlobserver.example.com/api/projects/{project_id}/sessions/{session_id}/rescan-pages" \
+  -d '{
+    "urls": [
+      "https://example.com/fixed-404-page/",
+      "https://example.com/updated-page/"
+    ]
+  }'
+```
+
+Successful response:
+
+```json
+{
+  "project_id": "...",
+  "session_id": "...",
+  "request_id": "...",
+  "idempotency_key": "seo-publish-...",
+  "status": "completed",
+  "accepted_url_count": 2,
+  "accepted_urls": ["https://example.com/fixed-404-page/", "https://example.com/updated-page/"],
+  "request_digest": "sha256:...",
+  "started_at": "2026-08-18T09:00:00Z",
+  "completed_at": "2026-08-18T09:00:05Z"
+}
+```
+
+An identical retry returns the same `request_id` and terminal response without
+running a second rescan. Reusing the key with a different project/session/URL
+set returns `409 idempotency_conflict`.
+
+Stable error classifications include `admin_required` (403),
+`project_session_mismatch` (409), `invalid_url` or `cross_origin_url` (422),
+`session_not_rescannable` (409), `idempotency_conflict` (409),
+`url_not_in_session` (422), `rescan_failed` (502), and `internal_error` (500).
+Errors retain the normal string `error` field and add `error_code` plus bounded
+project/session/request provenance where available. Authentication failures
+before routing remain HTTP 401 with the standard API authentication response.
+
+The session-only endpoint remains available for existing UI and API callers:
+
 ```bash
 curl -X POST \
   -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
@@ -604,6 +654,7 @@ https://crawlobserver.example.com/api
 | `POST` | `/crawl` | Start crawl. Admin/general key only. |
 | `POST` | `/sessions/{id}/resume` | Resume or full-recrawl. Admin/general key only. |
 | `POST` | `/sessions/{id}/rescan-pages` | Rescan selected URLs. Admin/general key only. |
+| `POST` | `/projects/{projectId}/sessions/{sessionId}/rescan-pages` | Project-bound, origin-checked, idempotent targeted rescan. Admin/general key plus `Idempotency-Key`. |
 | `POST` | `/sessions/{id}/stop` | Stop crawl. Admin/general key only. |
 | `DELETE` | `/sessions/{id}` | Delete session. Admin/general key only. |
 | `GET` | `/api-keys` | List API keys. Admin/general key only. |

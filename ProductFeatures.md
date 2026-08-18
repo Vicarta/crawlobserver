@@ -1,6 +1,6 @@
 # CrawlObserver: каталог функціональності
 
-Актуальність: 2026-08-08.
+Актуальність: 2026-08-18.
 
 Цей файл є канонічним каталогом фактично реалізованої функціональності
 CrawlObserver. Він описує можливості продукту на рівні користувацьких сценаріїв,
@@ -39,6 +39,9 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
 - Проєктна ізоляція списків проєктів, crawl sessions і session data.
 - General API keys для адміністративних та cross-project операцій.
 - Project API keys для обмеженого read-only доступу до одного проєкту.
+- Project-bound targeted rescan API використовує окрему privileged
+  general/admin capability; evidence-only Project API keys не отримують write
+  access.
 - Створення, перегляд і відкликання API keys через UI та API.
 - Керування користувачами через адміністративний UI та API.
 - Rate limiting для загальних і authentication endpoints.
@@ -68,6 +71,11 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
 - Статуси queued, running, completed, failed і stopped.
 - Явні причини зупинки, зокрема manual stop та interruption by restart.
 - Зупинка активного crawl.
+- Project-bound targeted rescan перевіряє project/session binding і точний
+  allowed origin за canonical seed URL сесії до будь-якої mutation. Запит
+  обмежений 200 absolute HTTP(S) URL, вимагає `Idempotency-Key`, а durable
+  SQLite ledger повертає той самий audit result для ідентичного retry та
+  відхиляє повторне використання ключа з іншим payload.
 - Resume незавершеної сесії з попередніми параметрами.
 - Якщо параметри Resume змінені, UI вимагає підтвердити Full Recrawl.
 - Retry failed pages за status code.

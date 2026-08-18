@@ -3,6 +3,7 @@ package crawler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -18,6 +19,12 @@ import (
 	"github.com/SEObserver/crawlobserver/internal/storage"
 	"github.com/SEObserver/crawlobserver/internal/telemetry"
 	"github.com/posthog/posthog-go"
+)
+
+var (
+	ErrRescanSessionUnavailable = errors.New("rescan session unavailable")
+	ErrRescanBusy               = errors.New("rescan capacity unavailable")
+	ErrRescanPageNotFound       = errors.New("rescan page not found")
 )
 
 const (
@@ -746,10 +753,10 @@ func (m *Manager) RescanPages(sessionID string, urls []string) (int, error) {
 	_, running := m.engines[sessionID]
 	m.mu.RUnlock()
 	if running {
-		return 0, fmt.Errorf("session %s is already running", sessionID)
+		return 0, fmt.Errorf("%w: session %s is already running", ErrRescanSessionUnavailable, sessionID)
 	}
 	if m.IsQueued(sessionID) {
-		return 0, fmt.Errorf("session %s is queued", sessionID)
+		return 0, fmt.Errorf("%w: session %s is queued", ErrRescanSessionUnavailable, sessionID)
 	}
 
 	originalSession, err := m.store.GetSession(context.Background(), sessionID)
@@ -762,7 +769,7 @@ func (m *Manager) RescanPages(sessionID string, urls []string) (int, error) {
 	for _, u := range uniqueURLs {
 		page, err := m.store.GetPage(context.Background(), sessionID, u)
 		if err != nil {
-			return 0, fmt.Errorf("page %q not found in session: %w", u, err)
+			return 0, fmt.Errorf("%w: page %q in session %s: %v", ErrRescanPageNotFound, u, sessionID, err)
 		}
 		rescanMeta[u] = rescanPageMeta{
 			Depth:    page.Depth,
@@ -807,7 +814,7 @@ func (m *Manager) RescanPages(sessionID string, urls []string) (int, error) {
 	select {
 	case m.sem <- struct{}{}:
 	default:
-		return 0, fmt.Errorf("crawler is busy; try again when a crawl slot is free")
+		return 0, fmt.Errorf("%w: crawler is busy; try again when a crawl slot is free", ErrRescanBusy)
 	}
 	defer func() {
 		<-m.sem

@@ -109,6 +109,7 @@ type Server struct {
 
 	pageRankRecomputeMu     sync.Mutex
 	pageRankRecomputeStatus map[string]*pageRankRecomputeStatus // projectID -> status
+	projectRescanMu         sync.Mutex
 
 	// Setup mode fields (desktop onboarding)
 	SetupMode        bool
@@ -248,6 +249,7 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("POST /api/sessions/{id}/stop", s.handleStopCrawl)
 	mux.HandleFunc("POST /api/sessions/{id}/resume", s.handleResumeCrawl)
 	mux.HandleFunc("POST /api/sessions/{id}/rescan-pages", s.handleRescanPages)
+	mux.HandleFunc("POST /api/projects/{projectId}/sessions/{sessionId}/rescan-pages", s.handleProjectRescanPages)
 	mux.HandleFunc("POST /api/sessions/{id}/delete-pages", s.handleDeletePages)
 	mux.HandleFunc("POST /api/sessions/{id}/recompute-depths", s.handleRecomputeDepths)
 	mux.HandleFunc("POST /api/sessions/{id}/compute-pagerank", s.handleComputePageRank)
