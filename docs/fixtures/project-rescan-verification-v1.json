@@ -1,0 +1,180 @@
+{
+  "contract_version": "project-rescan-verification/v1",
+  "request": {
+    "project_id": "project-gerus",
+    "url": "https://sergey-gerus.com/published-page/"
+  },
+  "mutation_auth": {
+    "header": "X-API-Key",
+    "key_type": "project",
+    "capability": "targeted_rescan"
+  },
+  "read_auth": {
+    "header": "X-API-Key",
+    "key_type": "project",
+    "capability": ""
+  },
+  "receipt": {
+    "project_id": "project-gerus",
+    "session_id": "session-targeted-rescan",
+    "request_id": "rescan-request-001",
+    "status": "completed",
+    "accepted_urls": [
+      "https://sergey-gerus.com/published-page/"
+    ],
+    "started_at": "2026-08-18T10:00:00Z",
+    "completed_at": "2026-08-18T10:00:05Z"
+  },
+  "scenarios": [
+    {
+      "name": "trusted-current-page-is-fresh",
+      "snapshot_http_status": 200,
+      "snapshot": {
+        "project_id": "project-gerus",
+        "current_session_id": "session-current-snapshot",
+        "quality_promotion_status": "applied",
+        "updated_at": "2026-08-18T09:00:00Z"
+      },
+      "page_detail_http_status": 200,
+      "page_detail": {
+        "request_session_id": "session-current-snapshot",
+        "requested_url": "https://sergey-gerus.com/published-page/",
+        "body": {
+          "page": {
+            "CrawlSessionID": "session-current-snapshot",
+            "URL": "https://sergey-gerus.com/published-page/",
+            "CrawledAt": "2026-08-18T10:00:02Z"
+          }
+        }
+      },
+      "verified": true,
+      "reason": "verified"
+    },
+    {
+      "name": "receipt-alone",
+      "snapshot_http_status": 0,
+      "page_detail_http_status": 0,
+      "verified": false,
+      "reason": "receipt_is_not_verification"
+    },
+    {
+      "name": "snapshot-project-mismatch",
+      "snapshot_http_status": 200,
+      "snapshot": {
+        "project_id": "project-other",
+        "current_session_id": "session-current-snapshot",
+        "quality_promotion_status": "applied"
+      },
+      "page_detail_http_status": 0,
+      "verified": false,
+      "reason": "project_mismatch"
+    },
+    {
+      "name": "receipt-session-reused-instead-of-current-session",
+      "snapshot_http_status": 200,
+      "snapshot": {
+        "project_id": "project-gerus",
+        "current_session_id": "session-current-snapshot",
+        "quality_promotion_status": "applied"
+      },
+      "page_detail_http_status": 200,
+      "page_detail": {
+        "request_session_id": "session-targeted-rescan",
+        "requested_url": "https://sergey-gerus.com/published-page/",
+        "body": {
+          "page": {
+            "CrawlSessionID": "session-targeted-rescan",
+            "URL": "https://sergey-gerus.com/published-page/",
+            "CrawledAt": "2026-08-18T10:00:02Z"
+          }
+        }
+      },
+      "verified": false,
+      "reason": "session_mismatch"
+    },
+    {
+      "name": "current-snapshot-untrusted",
+      "snapshot_http_status": 409,
+      "snapshot": {
+        "error": "current_snapshot_binding_stale"
+      },
+      "page_detail_http_status": 0,
+      "verified": false,
+      "reason": "untrusted_current_snapshot"
+    },
+    {
+      "name": "current-snapshot-malformed",
+      "snapshot_http_status": 200,
+      "snapshot": {
+        "project_id": "project-gerus",
+        "quality_promotion_status": "applied"
+      },
+      "page_detail_http_status": 0,
+      "verified": false,
+      "reason": "malformed_current_snapshot"
+    },
+    {
+      "name": "page-is-stale",
+      "snapshot_http_status": 200,
+      "snapshot": {
+        "project_id": "project-gerus",
+        "current_session_id": "session-current-snapshot",
+        "quality_promotion_status": "applied"
+      },
+      "page_detail_http_status": 200,
+      "page_detail": {
+        "request_session_id": "session-current-snapshot",
+        "requested_url": "https://sergey-gerus.com/published-page/",
+        "body": {
+          "page": {
+            "CrawlSessionID": "session-current-snapshot",
+            "URL": "https://sergey-gerus.com/published-page/",
+            "CrawledAt": "2026-08-18T09:59:59Z"
+          }
+        }
+      },
+      "verified": false,
+      "reason": "stale_page"
+    },
+    {
+      "name": "page-url-mismatch",
+      "snapshot_http_status": 200,
+      "snapshot": {
+        "project_id": "project-gerus",
+        "current_session_id": "session-current-snapshot",
+        "quality_promotion_status": "applied"
+      },
+      "page_detail_http_status": 200,
+      "page_detail": {
+        "request_session_id": "session-current-snapshot",
+        "requested_url": "https://sergey-gerus.com/published-page/",
+        "body": {
+          "page": {
+            "CrawlSessionID": "session-current-snapshot",
+            "URL": "https://sergey-gerus.com/another-page/",
+            "CrawledAt": "2026-08-18T10:00:02Z"
+          }
+        }
+      },
+      "verified": false,
+      "reason": "page_mismatch"
+    },
+    {
+      "name": "page-detail-malformed",
+      "snapshot_http_status": 200,
+      "snapshot": {
+        "project_id": "project-gerus",
+        "current_session_id": "session-current-snapshot",
+        "quality_promotion_status": "applied"
+      },
+      "page_detail_http_status": 200,
+      "page_detail": {
+        "request_session_id": "session-current-snapshot",
+        "requested_url": "https://sergey-gerus.com/published-page/",
+        "body": {}
+      },
+      "verified": false,
+      "reason": "malformed_page_detail"
+    }
+  ]
+}

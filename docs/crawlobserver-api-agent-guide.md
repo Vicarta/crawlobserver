@@ -379,16 +379,17 @@ curl -X POST \
 
 ## Rescanning Individual Pages
 
-Only use with a general/admin API key.
-
-For server-side integrations, use the project-bound endpoint. It verifies the
-project/session relationship and exact seed origin before any crawler mutation.
-`Idempotency-Key` is required, must be at most 200 characters, and should be a
-stable opaque reference to the publish event.
+For server-side integrations, use the project-bound endpoint with a dedicated
+project API key whose `capability` is `targeted_rescan`. General/admin, browser
+session, basic-auth, and evidence-only project keys are rejected on this route.
+The authenticated key's `project_id` must exactly match `{project_id}` before
+any storage or crawler mutation. The handler then verifies the project/session
+relationship and exact seed origin. `Idempotency-Key` is required, must be at
+most 200 characters, and should be a stable opaque publish-event reference.
 
 ```bash
 curl -X POST \
-  -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
+  -H "X-API-Key: $CRAWLOBSERVER_RESCAN_API_KEY" \
   -H "Idempotency-Key: seo-publish-{event_id}" \
   -H "Content-Type: application/json" \
   "https://crawlobserver.example.com/api/projects/{project_id}/sessions/{session_id}/rescan-pages" \
@@ -421,7 +422,7 @@ An identical retry returns the same `request_id` and terminal response without
 running a second rescan. Reusing the key with a different project/session/URL
 set returns `409 idempotency_conflict`.
 
-Stable error classifications include `admin_required` (403),
+Stable error classifications include `project_rescan_capability_required` (403),
 `project_session_mismatch` (409), `invalid_url` or `cross_origin_url` (422),
 `session_not_rescannable` (409), `idempotency_conflict` (409),
 `url_not_in_session` (422), `rescan_failed` (502), and `internal_error` (500).
@@ -429,7 +430,34 @@ Errors retain the normal string `error` field and add `error_code` plus bounded
 project/session/request provenance where available. Authentication failures
 before routing remain HTTP 401 with the standard API authentication response.
 
-The session-only endpoint remains available for existing UI and API callers:
+### Post-rescan verification contract
+
+A `status: completed` targeted-rescan receipt confirms only that the mutation
+request reached its terminal audit state. It is not evidence that the approved
+page is present in the trusted Current Snapshot.
+
+Verification uses a separate evidence-only project key and this exact sequence:
+
+1. `GET /api/projects/{project_id}/current-snapshot` with
+   `X-API-Key: $CRAWLOBSERVER_EVIDENCE_API_KEY`.
+2. Require HTTP 200, exact `project_id`, non-empty `current_session_id`, and
+   `quality_promotion_status: applied`. A 409 binding response is untrusted.
+3. Ignore the rescan receipt's `session_id` for the evidence read. Use only the
+   `current_session_id` returned by step 1 in
+   `GET /api/sessions/{current_session_id}/page-detail?url={exact_url}`.
+4. Require HTTP 200 and a well-formed `page` whose `CrawlSessionID` equals that
+   Current Snapshot session, whose `URL` exactly equals the requested URL, and
+   whose `CrawledAt` is not earlier than the receipt's `started_at`.
+
+Any missing/malformed response, project/session/URL mismatch, non-200 Current
+Snapshot or page-detail response, untrusted binding, or stale `CrawledAt` is
+`not verified`. Do not fall back to the receipt session, a latest-session
+guess, or a different URL. The executable scenario fixture, including positive
+and denial outcomes, is
+[`project-rescan-verification-v1.json`](fixtures/project-rescan-verification-v1.json).
+
+The session-only endpoint remains available for existing UI and API callers and
+continues to require general/admin credentials:
 
 ```bash
 curl -X POST \
@@ -528,6 +556,29 @@ curl -X POST \
 ```
 
 The full key is returned only once. Store it in the agent secret store. Do not commit it to source control or logs.
+
+Create the dedicated project-bound targeted-rescan key for a server-side
+Dashboard adapter:
+
+```bash
+curl -X POST \
+  -H "X-API-Key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  https://crawlobserver.example.com/api/api-keys \
+  -d '{
+    "name": "seo-dashboard-targeted-rescan",
+    "type": "project",
+    "project_id": "PROJECT_ID",
+    "capability": "targeted_rescan"
+  }'
+```
+
+This capability is accepted only by the project-bound targeted-rescan route; it
+does not satisfy general/admin write gates. Keep the key only in the server-side
+adapter as `CRAWLOBSERVER_RESCAN_API_KEY`; keep the ordinary evidence-only
+project key separately as `CRAWLOBSERVER_EVIDENCE_API_KEY`. No additional
+CrawlObserver server environment variable is required because both keys and
+their scope are stored in the existing API-key database.
 
 List API keys:
 
@@ -654,7 +705,7 @@ https://crawlobserver.example.com/api
 | `POST` | `/crawl` | Start crawl. Admin/general key only. |
 | `POST` | `/sessions/{id}/resume` | Resume or full-recrawl. Admin/general key only. |
 | `POST` | `/sessions/{id}/rescan-pages` | Rescan selected URLs. Admin/general key only. |
-| `POST` | `/projects/{projectId}/sessions/{sessionId}/rescan-pages` | Project-bound, origin-checked, idempotent targeted rescan. Admin/general key plus `Idempotency-Key`. |
+| `POST` | `/projects/{projectId}/sessions/{sessionId}/rescan-pages` | Project-bound, origin-checked, idempotent targeted rescan. Exact-project `targeted_rescan` capability key plus `Idempotency-Key`. |
 | `POST` | `/sessions/{id}/stop` | Stop crawl. Admin/general key only. |
 | `DELETE` | `/sessions/{id}` | Delete session. Admin/general key only. |
 | `GET` | `/api-keys` | List API keys. Admin/general key only. |

@@ -416,9 +416,10 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name      string  `json:"name"`
-		Type      string  `json:"type"`
-		ProjectID *string `json:"project_id"`
+		Name       string  `json:"name"`
+		Type       string  `json:"type"`
+		ProjectID  *string `json:"project_id"`
+		Capability string  `json:"capability"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -428,7 +429,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name and type are required")
 		return
 	}
-	result, err := s.keyStore.CreateAPIKey(req.Name, req.Type, req.ProjectID)
+	result, err := s.keyStore.CreateAPIKeyWithCapability(req.Name, req.Type, req.ProjectID, req.Capability)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to create API key")
 		return

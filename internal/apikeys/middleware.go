@@ -15,10 +15,16 @@ type AuthInfo struct {
 	Method     string  // "basic" | "apikey" | "session"
 	KeyType    string  // "general" | "project" (only for apikey)
 	ProjectID  *string // non-nil only for project keys
+	Capability string  // optional narrowly scoped project mutation capability
 	UserID     string
 	Username   string
 	Role       string
 	ProjectIDs []string
+}
+
+func (a *AuthInfo) CanTargetedRescan(projectID string) bool {
+	return a != nil && a.Method == "apikey" && a.KeyType == "project" &&
+		a.Capability == CapabilityTargetedRescan && a.ProjectID != nil && *a.ProjectID == projectID
 }
 
 func (a *AuthInfo) IsReadOnly() bool {
@@ -73,9 +79,10 @@ func Authenticate(keyStore *Store, basicUser, basicPass string) func(http.Handle
 					return
 				}
 				info := &AuthInfo{
-					Method:    "apikey",
-					KeyType:   result.Type,
-					ProjectID: result.ProjectID,
+					Method:     "apikey",
+					KeyType:    result.Type,
+					ProjectID:  result.ProjectID,
+					Capability: result.Capability,
 				}
 				ctx := context.WithValue(r.Context(), contextKey{}, info)
 				next.ServeHTTP(w, r.WithContext(ctx))

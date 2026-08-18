@@ -75,7 +75,16 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
   allowed origin за canonical seed URL сесії до будь-якої mutation. Запит
   обмежений 200 absolute HTTP(S) URL, вимагає `Idempotency-Key`, а durable
   SQLite ledger повертає той самий audit result для ідентичного retry та
-  відхиляє повторне використання ключа з іншим payload.
+  відхиляє повторне використання ключа з іншим payload. Новий route приймає
+  лише project API key з capability `targeted_rescan`, жорстко звіряє його
+  `project_id` з path і не розширює права evidence-only project keys;
+  general/admin доступ збережений тільки для legacy session-only route.
+- Targeted-rescan receipt є audit receipt, а не підтвердженням публікації.
+  Post-rescan verification окремим project read key спочатку читає trusted
+  Current Snapshot, використовує тільки повернений `current_session_id`, а
+  потім перевіряє exact URL та свіжий `CrawledAt` у page detail. Mismatch,
+  stale, untrusted і malformed результати fail closed як not verified;
+  контракт зафіксований versioned executable fixture.
 - Resume незавершеної сесії з попередніми параметрами.
 - Якщо параметри Resume змінені, UI вимагає підтвердити Full Recrawl.
 - Retry failed pages за status code.

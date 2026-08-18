@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -19,6 +20,7 @@ type projectRescanFixture struct {
 	keyStore  *apikeys.Store
 	projectID string
 	sessionID string
+	rescanKey string
 	store     *mockStore
 	manager   *mockManager
 }
@@ -27,6 +29,10 @@ func newProjectRescanFixture(t *testing.T) projectRescanFixture {
 	t.Helper()
 	srv, handler, keyStore := newTestServer(t)
 	project, err := keyStore.CreateProject("project-bound-rescan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rescanKey, err := keyStore.CreateAPIKeyWithCapability("dashboard-rescan", "project", &project.ID, apikeys.CapabilityTargetedRescan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +50,7 @@ func newProjectRescanFixture(t *testing.T) projectRescanFixture {
 	mm.rescanCount = 2
 	return projectRescanFixture{
 		server: srv, handler: handler, keyStore: keyStore, projectID: project.ID,
-		sessionID: sessionID, store: ms, manager: mm,
+		sessionID: sessionID, rescanKey: rescanKey.FullKey, store: ms, manager: mm,
 	}
 }
 
@@ -57,6 +63,13 @@ func (f projectRescanFixture) request(t *testing.T, key, body string) *http.Requ
 	req := httptest.NewRequest(http.MethodPost, f.path(), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", key)
+	return req
+}
+
+func (f projectRescanFixture) authorizedRequest(t *testing.T, key, body string) *http.Request {
+	t.Helper()
+	req := f.request(t, key, body)
+	req.Header.Set("X-API-Key", f.rescanKey)
 	return req
 }
 
@@ -85,7 +98,7 @@ func TestProjectRescanRejectsProjectReadOnlyKey(t *testing.T) {
 
 	var response projectRescanResponse
 	decodeJSON(t, rec, &response)
-	if rec.Code != http.StatusForbidden || response.ErrorCode != "admin_required" {
+	if rec.Code != http.StatusForbidden || response.ErrorCode != "project_rescan_capability_required" {
 		t.Fatalf("response = %d %#v", rec.Code, response)
 	}
 	if len(f.manager.rescanCalls) != 0 {
@@ -93,15 +106,79 @@ func TestProjectRescanRejectsProjectReadOnlyKey(t *testing.T) {
 	}
 }
 
-func TestProjectRescanGeneralKeySuccessAndIdempotentReplay(t *testing.T) {
+func TestCreateTargetedRescanKeyThroughAdminAPI(t *testing.T) {
 	f := newProjectRescanFixture(t)
-	key, err := f.keyStore.CreateAPIKey("dashboard-adapter", "general", nil)
+	body, err := json.Marshal(map[string]interface{}{
+		"name": "dashboard-project-rescan", "type": "project", "project_id": f.projectID,
+		"capability": apikeys.CapabilityTargetedRescan,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	req := authRequest(httptest.NewRequest(http.MethodPost, "/api/api-keys", strings.NewReader(string(body))))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var created apikeys.APIKeyCreateResult
+	decodeJSON(t, rec, &created)
+	if created.Type != "project" || created.ProjectID == nil || *created.ProjectID != f.projectID ||
+		created.Capability != apikeys.CapabilityTargetedRescan || created.FullKey == "" {
+		t.Fatalf("unexpected API key contract: %#v", created)
+	}
+}
+
+func TestProjectRescanRejectsGeneralKey(t *testing.T) {
+	f := newProjectRescanFixture(t)
+	key, err := f.keyStore.CreateAPIKey("general-admin", "general", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := f.request(t, "general-key-request", `{"urls":["https://example.com/a"]}`)
+	req.Header.Set("X-API-Key", key.FullKey)
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+	var response projectRescanResponse
+	decodeJSON(t, rec, &response)
+	if rec.Code != http.StatusForbidden || response.ErrorCode != "project_rescan_capability_required" {
+		t.Fatalf("response = %d %#v", rec.Code, response)
+	}
+	if len(f.manager.rescanCalls) != 0 {
+		t.Fatal("general key reached project-bound rescan manager")
+	}
+}
+
+func TestLegacySessionRescanKeepsGeneralAccessOnly(t *testing.T) {
+	f := newProjectRescanFixture(t)
+	general, err := f.keyStore.CreateAPIKey("legacy-general", "general", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(apiKey string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+f.sessionID+"/rescan-pages", strings.NewReader(`{"urls":["https://example.com/a"]}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", apiKey)
+		rec := httptest.NewRecorder()
+		f.handler.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := request(general.FullKey); rec.Code != http.StatusOK {
+		t.Fatalf("general legacy response = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := request(f.rescanKey); rec.Code != http.StatusForbidden {
+		t.Fatalf("targeted capability legacy response = %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(f.manager.rescanCalls) != 1 {
+		t.Fatalf("legacy rescan calls = %d, want 1", len(f.manager.rescanCalls))
+	}
+}
+
+func TestProjectRescanDedicatedKeySuccessAndIdempotentReplay(t *testing.T) {
+	f := newProjectRescanFixture(t)
 	request := func(body string) *httptest.ResponseRecorder {
-		req := f.request(t, "publish-event-123", body)
-		req.Header.Set("X-API-Key", key.FullKey)
+		req := f.authorizedRequest(t, "publish-event-123", body)
 		rec := httptest.NewRecorder()
 		f.handler.ServeHTTP(rec, req)
 		return rec
@@ -134,6 +211,37 @@ func TestProjectRescanGeneralKeySuccessAndIdempotentReplay(t *testing.T) {
 	}
 }
 
+func TestProjectRescanKeyCannotTargetAnotherProject(t *testing.T) {
+	f := newProjectRescanFixture(t)
+	other, err := f.keyStore.CreateProject("other-valid-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSessionID := "other-project-session"
+	f.store.getSessionByID[otherSessionID] = &storage.CrawlSession{
+		ID: otherSessionID, ProjectID: &other.ID, Status: "completed", SeedURLs: []string{"https://other.example/"},
+	}
+	path := "/api/projects/" + other.ID + "/sessions/" + otherSessionID + "/rescan-pages"
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"urls":["https://other.example/a"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "cross-project-attempt")
+	req.Header.Set("X-API-Key", f.rescanKey)
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+
+	var response projectRescanResponse
+	decodeJSON(t, rec, &response)
+	if rec.Code != http.StatusForbidden || response.ErrorCode != "project_rescan_capability_required" {
+		t.Fatalf("response = %d %#v", rec.Code, response)
+	}
+	if len(f.manager.rescanCalls) != 0 {
+		t.Fatal("cross-project capability mismatch reached rescan manager")
+	}
+	if _, err := f.keyStore.GetProjectRescanRequest(other.ID, "cross-project-attempt"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("cross-project capability mismatch wrote audit ledger: %v", err)
+	}
+}
+
 func TestProjectRescanRejectsProjectSessionMismatchBeforeMutation(t *testing.T) {
 	f := newProjectRescanFixture(t)
 	other, err := f.keyStore.CreateProject("other-project")
@@ -141,7 +249,7 @@ func TestProjectRescanRejectsProjectSessionMismatchBeforeMutation(t *testing.T) 
 		t.Fatal(err)
 	}
 	f.store.getSessionByID[f.sessionID].ProjectID = &other.ID
-	req := authRequest(f.request(t, "mismatch-request", `{"urls":["https://example.com/a"]}`))
+	req := f.authorizedRequest(t, "mismatch-request", `{"urls":["https://example.com/a"]}`)
 	rec := httptest.NewRecorder()
 	f.handler.ServeHTTP(rec, req)
 
@@ -168,7 +276,7 @@ func TestProjectRescanRejectsInvalidAndCrossOriginURLs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newProjectRescanFixture(t)
-			req := authRequest(f.request(t, "invalid-"+strings.ReplaceAll(tt.name, " ", "-"), tt.body))
+			req := f.authorizedRequest(t, "invalid-"+strings.ReplaceAll(tt.name, " ", "-"), tt.body)
 			rec := httptest.NewRecorder()
 			f.handler.ServeHTTP(rec, req)
 			var response projectRescanResponse
@@ -193,7 +301,7 @@ func TestProjectRescanRejectsOversizedURLList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := authRequest(f.request(t, "too-many-urls", string(body)))
+	req := f.authorizedRequest(t, "too-many-urls", string(body))
 	rec := httptest.NewRecorder()
 	f.handler.ServeHTTP(rec, req)
 	var response projectRescanResponse
@@ -211,7 +319,7 @@ func TestProjectRescanRejectsNonRescannableSession(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			f := newProjectRescanFixture(t)
 			f.store.getSessionByID[f.sessionID].Status = status
-			req := authRequest(f.request(t, "non-rescannable-"+status, `{"urls":["https://example.com/a"]}`))
+			req := f.authorizedRequest(t, "non-rescannable-"+status, `{"urls":["https://example.com/a"]}`)
 			rec := httptest.NewRecorder()
 			f.handler.ServeHTTP(rec, req)
 
@@ -229,12 +337,16 @@ func TestProjectRescanRejectsNonRescannableSession(t *testing.T) {
 
 func TestProjectRescanClassifiesControlPlaneFailure(t *testing.T) {
 	f := newProjectRescanFixture(t)
-	if err := f.keyStore.Close(); err != nil {
-		t.Fatal(err)
-	}
-	req := authRequest(f.request(t, "control-plane-failure", `{"urls":["https://example.com/a"]}`))
+	req := f.authorizedRequest(t, "control-plane-failure", `{"urls":["https://example.com/a"]}`)
 	rec := httptest.NewRecorder()
-	f.handler.ServeHTTP(rec, req)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/projects/{projectId}/sessions/{sessionId}/rescan-pages", func(w http.ResponseWriter, r *http.Request) {
+		if err := f.keyStore.Close(); err != nil {
+			t.Fatal(err)
+		}
+		f.server.handleProjectRescanPages(w, r)
+	})
+	apikeys.Authenticate(f.keyStore, "", "")(mux).ServeHTTP(rec, req)
 	var response projectRescanResponse
 	decodeJSON(t, rec, &response)
 	if rec.Code != http.StatusInternalServerError || response.ErrorCode != "internal_error" {
@@ -247,7 +359,7 @@ func TestProjectRescanClassifiesControlPlaneFailure(t *testing.T) {
 
 func TestProjectRescanRejectsIdempotencyConflict(t *testing.T) {
 	f := newProjectRescanFixture(t)
-	first := authRequest(f.request(t, "same-key", `{"urls":["https://example.com/a"]}`))
+	first := f.authorizedRequest(t, "same-key", `{"urls":["https://example.com/a"]}`)
 	firstRec := httptest.NewRecorder()
 	f.manager.rescanCount = 1
 	f.handler.ServeHTTP(firstRec, first)
@@ -255,7 +367,7 @@ func TestProjectRescanRejectsIdempotencyConflict(t *testing.T) {
 		t.Fatalf("first response = %d %s", firstRec.Code, firstRec.Body.String())
 	}
 
-	conflict := authRequest(f.request(t, "same-key", `{"urls":["https://example.com/b"]}`))
+	conflict := f.authorizedRequest(t, "same-key", `{"urls":["https://example.com/b"]}`)
 	conflictRec := httptest.NewRecorder()
 	f.handler.ServeHTTP(conflictRec, conflict)
 	var response projectRescanResponse
@@ -284,7 +396,7 @@ func TestProjectRescanReturnsStablePageAndProviderFailures(t *testing.T) {
 			f.manager.rescanErr = tt.err
 			f.manager.rescanCount = 0
 			call := func() *httptest.ResponseRecorder {
-				req := authRequest(f.request(t, "failure-"+strings.ReplaceAll(tt.name, " ", "-"), `{"urls":["https://example.com/a"]}`))
+				req := f.authorizedRequest(t, "failure-"+strings.ReplaceAll(tt.name, " ", "-"), `{"urls":["https://example.com/a"]}`)
 				rec := httptest.NewRecorder()
 				f.handler.ServeHTTP(rec, req)
 				return rec

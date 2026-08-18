@@ -14,6 +14,7 @@ func TestIsReadOnly(t *testing.T) {
 		readOnly bool
 	}{
 		{"project key", AuthInfo{Method: "apikey", KeyType: "project"}, true},
+		{"targeted rescan key", AuthInfo{Method: "apikey", KeyType: "project", Capability: CapabilityTargetedRescan}, true},
 		{"general key", AuthInfo{Method: "apikey", KeyType: "general"}, false},
 		{"basic auth", AuthInfo{Method: "basic"}, false},
 	}
@@ -21,6 +22,30 @@ func TestIsReadOnly(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.info.IsReadOnly(); got != tt.readOnly {
 				t.Fatalf("IsReadOnly() = %v, want %v", got, tt.readOnly)
+			}
+		})
+	}
+}
+
+func TestCanTargetedRescanRequiresExactProjectCapability(t *testing.T) {
+	projectID := "project-a"
+	tests := []struct {
+		name    string
+		info    *AuthInfo
+		project string
+		allowed bool
+	}{
+		{name: "exact capability", info: &AuthInfo{Method: "apikey", KeyType: "project", ProjectID: &projectID, Capability: CapabilityTargetedRescan}, project: projectID, allowed: true},
+		{name: "other project", info: &AuthInfo{Method: "apikey", KeyType: "project", ProjectID: &projectID, Capability: CapabilityTargetedRescan}, project: "project-b"},
+		{name: "evidence project key", info: &AuthInfo{Method: "apikey", KeyType: "project", ProjectID: &projectID}, project: projectID},
+		{name: "general key", info: &AuthInfo{Method: "apikey", KeyType: "general"}, project: projectID},
+		{name: "basic auth", info: &AuthInfo{Method: "basic"}, project: projectID},
+		{name: "missing auth", project: projectID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.info.CanTargetedRescan(tt.project); got != tt.allowed {
+				t.Fatalf("CanTargetedRescan() = %v, want %v", got, tt.allowed)
 			}
 		})
 	}
@@ -64,6 +89,32 @@ func TestAuthenticateAPIKey(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestAuthenticateTargetedRescanCapability(t *testing.T) {
+	s := newTestStore(t)
+	project, err := s.CreateProject("rescan-auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.CreateAPIKeyWithCapability("rescan", "project", &project.ID, CapabilityTargetedRescan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := Authenticate(s, "", "")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		info := FromContext(r.Context())
+		if info == nil || !info.CanTargetedRescan(project.ID) || !info.IsReadOnly() {
+			t.Fatalf("unexpected capability auth: %#v", info)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	req.Header.Set("X-API-Key", res.FullKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
 	}
 }
 

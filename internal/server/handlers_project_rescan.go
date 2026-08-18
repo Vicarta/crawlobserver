@@ -54,12 +54,12 @@ func (e *projectRescanInputError) Error() string { return e.message }
 func (s *Server) handleProjectRescanPages(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.PathValue("projectId"))
 	sessionID := strings.TrimSpace(r.PathValue("sessionId"))
-	if !projectRescanAdminAllowed(r) {
-		writeProjectRescanError(w, http.StatusForbidden, projectID, sessionID, "admin_required", "admin or general API credentials are required")
-		return
-	}
 	if projectID == "" || sessionID == "" {
 		writeProjectRescanError(w, http.StatusBadRequest, projectID, sessionID, "invalid_scope", "project_id and session_id are required")
+		return
+	}
+	if !projectRescanCapabilityAllowed(r, projectID) {
+		writeProjectRescanError(w, http.StatusForbidden, projectID, sessionID, "project_rescan_capability_required", "a targeted_rescan API key bound to this project is required")
 		return
 	}
 	if s.keyStore == nil {
@@ -174,9 +174,9 @@ func (s *Server) handleProjectRescanPages(w http.ResponseWriter, r *http.Request
 	writeStoredProjectRescanResponse(w, finished)
 }
 
-func projectRescanAdminAllowed(r *http.Request) bool {
+func projectRescanCapabilityAllowed(r *http.Request, projectID string) bool {
 	auth := apikeys.FromContext(r.Context())
-	return auth == nil || auth.IsAdmin()
+	return auth.CanTargetedRescan(projectID)
 }
 
 func projectRescanSessionStatusAllowed(status string) bool {

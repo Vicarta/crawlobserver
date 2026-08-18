@@ -449,6 +449,94 @@ func TestCreateAPIKeyProject(t *testing.T) {
 	}
 }
 
+func TestCreateAPIKeyTargetedRescanCapability(t *testing.T) {
+	s := newTestStore(t)
+	p, _ := s.CreateProject("rescan-project")
+	res, err := s.CreateAPIKeyWithCapability("rescan adapter", "project", &p.ID, CapabilityTargetedRescan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Type != "project" || res.ProjectID == nil || *res.ProjectID != p.ID || res.Capability != CapabilityTargetedRescan {
+		t.Fatalf("unexpected capability key: %#v", res.APIKey)
+	}
+	lookup := s.ValidateKey(res.FullKey)
+	if lookup == nil || lookup.Type != "project" || lookup.ProjectID == nil || *lookup.ProjectID != p.ID || lookup.Capability != CapabilityTargetedRescan {
+		t.Fatalf("unexpected capability lookup: %#v", lookup)
+	}
+	keys, err := s.ListAPIKeys()
+	if err != nil || len(keys) != 1 || keys[0].Capability != CapabilityTargetedRescan {
+		t.Fatalf("unexpected capability listing: %#v, err=%v", keys, err)
+	}
+}
+
+func TestCreateAPIKeyRejectsInvalidCapabilities(t *testing.T) {
+	s := newTestStore(t)
+	p, _ := s.CreateProject("capability-validation")
+	for _, tc := range []struct {
+		name       string
+		keyType    string
+		projectID  *string
+		capability string
+	}{
+		{name: "unknown project capability", keyType: "project", projectID: &p.ID, capability: "unknown"},
+		{name: "general mutation capability", keyType: "general", capability: CapabilityTargetedRescan},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := s.CreateAPIKeyWithCapability("bad", tc.keyType, tc.projectID, tc.capability); err == nil {
+				t.Fatal("expected capability validation error")
+			}
+		})
+	}
+}
+
+func TestAPIKeyCapabilityMigrationFromExistingDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "apikeys.db")
+	first, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := first.CreateProject("capability-migration")
+	if err != nil {
+		first.Close()
+		t.Fatal(err)
+	}
+	if _, err := first.db.Exec("DROP TABLE api_keys"); err != nil {
+		first.Close()
+		t.Fatal(err)
+	}
+	if _, err := first.db.Exec(`
+		CREATE TABLE api_keys (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			key_hash TEXT NOT NULL UNIQUE,
+			key_prefix TEXT NOT NULL,
+			type TEXT NOT NULL CHECK(type IN ('general', 'project')),
+			project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			last_used_at DATETIME,
+			active INTEGER DEFAULT 1
+		)`); err != nil {
+		first.Close()
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopening existing database: %v", err)
+	}
+	defer second.Close()
+	created, err := second.CreateAPIKeyWithCapability("migrated rescan", "project", &project.ID, CapabilityTargetedRescan)
+	if err != nil {
+		t.Fatalf("creating capability key after migration: %v", err)
+	}
+	if lookup := second.ValidateKey(created.FullKey); lookup == nil || lookup.Capability != CapabilityTargetedRescan {
+		t.Fatalf("capability unavailable after migration: %#v", lookup)
+	}
+}
+
 func TestCreateAPIKeyInvalidType(t *testing.T) {
 	s := newTestStore(t)
 	_, err := s.CreateAPIKey("bad", "invalid", nil)

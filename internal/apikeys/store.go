@@ -147,6 +147,7 @@ type APIKey struct {
 	KeyPrefix  string     `json:"key_prefix"`
 	Type       string     `json:"type"` // "general" | "project"
 	ProjectID  *string    `json:"project_id"`
+	Capability string     `json:"capability,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
 	Active     bool       `json:"active"`
@@ -158,10 +159,13 @@ type APIKeyCreateResult struct {
 }
 
 type KeyLookupResult struct {
-	ID        string
-	Type      string
-	ProjectID *string
+	ID         string
+	Type       string
+	ProjectID  *string
+	Capability string
 }
+
+const CapabilityTargetedRescan = "targeted_rescan"
 
 type Store struct {
 	db *sql.DB
@@ -207,6 +211,7 @@ func NewStore(dbPath string) (*Store, error) {
 			key_prefix TEXT NOT NULL,
 			type TEXT NOT NULL CHECK(type IN ('general', 'project')),
 			project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+			capability TEXT NOT NULL DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			last_used_at DATETIME,
 			active INTEGER DEFAULT 1
@@ -214,6 +219,10 @@ func NewStore(dbPath string) (*Store, error) {
 	`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("creating api_keys table: %w", err)
+	}
+	if _, err := db.Exec("ALTER TABLE api_keys ADD COLUMN capability TEXT NOT NULL DEFAULT ''"); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		db.Close()
+		return nil, fmt.Errorf("migrating api_keys capability: %w", err)
 	}
 
 	if _, err := db.Exec(`
@@ -1081,7 +1090,7 @@ func (s *Store) MarkProjectDeltaManualURLsConsumed(projectID string, urls []stri
 
 func (s *Store) ListAPIKeys() ([]APIKey, error) {
 	rows, err := s.db.Query(`
-		SELECT id, name, key_prefix, type, project_id, created_at, last_used_at, active
+		SELECT id, name, key_prefix, type, project_id, capability, created_at, last_used_at, active
 		FROM api_keys ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -1092,7 +1101,7 @@ func (s *Store) ListAPIKeys() ([]APIKey, error) {
 	var keys []APIKey
 	for rows.Next() {
 		var k APIKey
-		if err := rows.Scan(&k.ID, &k.Name, &k.KeyPrefix, &k.Type, &k.ProjectID,
+		if err := rows.Scan(&k.ID, &k.Name, &k.KeyPrefix, &k.Type, &k.ProjectID, &k.Capability,
 			&k.CreatedAt, &k.LastUsedAt, &k.Active); err != nil {
 			return nil, err
 		}
@@ -1105,11 +1114,18 @@ func (s *Store) ListAPIKeys() ([]APIKey, error) {
 }
 
 func (s *Store) CreateAPIKey(name, keyType string, projectID *string) (*APIKeyCreateResult, error) {
+	return s.CreateAPIKeyWithCapability(name, keyType, projectID, "")
+}
+
+func (s *Store) CreateAPIKeyWithCapability(name, keyType string, projectID *string, capability string) (*APIKeyCreateResult, error) {
 	if keyType != "general" && keyType != "project" {
 		return nil, fmt.Errorf("invalid key type: %s", keyType)
 	}
 	if keyType == "project" && (projectID == nil || *projectID == "") {
 		return nil, fmt.Errorf("project_id required for project keys")
+	}
+	if capability != "" && (keyType != "project" || capability != CapabilityTargetedRescan) {
+		return nil, fmt.Errorf("invalid API key capability: %s", capability)
 	}
 
 	// Generate random key: 32 bytes -> hex -> prefix with sk_
@@ -1127,19 +1143,20 @@ func (s *Store) CreateAPIKey(name, keyType string, projectID *string) (*APIKeyCr
 	keyPrefix := fullKey[:11] + "..."
 
 	k := APIKey{
-		ID:        uuid.New().String(),
-		Name:      name,
-		KeyPrefix: keyPrefix,
-		Type:      keyType,
-		ProjectID: projectID,
-		CreatedAt: time.Now().UTC(),
-		Active:    true,
+		ID:         uuid.New().String(),
+		Name:       name,
+		KeyPrefix:  keyPrefix,
+		Type:       keyType,
+		ProjectID:  projectID,
+		Capability: capability,
+		CreatedAt:  time.Now().UTC(),
+		Active:     true,
 	}
 
 	_, err := s.db.Exec(`
-		INSERT INTO api_keys (id, name, key_hash, key_prefix, type, project_id, created_at, active)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
-		k.ID, k.Name, keyHash, k.KeyPrefix, k.Type, k.ProjectID, k.CreatedAt)
+		INSERT INTO api_keys (id, name, key_hash, key_prefix, type, project_id, capability, created_at, active)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+		k.ID, k.Name, keyHash, k.KeyPrefix, k.Type, k.ProjectID, k.Capability, k.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("inserting api key: %w", err)
 	}
@@ -1296,9 +1313,9 @@ func (s *Store) ValidateKey(rawKey string) *KeyLookupResult {
 
 	var result KeyLookupResult
 	err := s.db.QueryRow(`
-		SELECT id, type, project_id FROM api_keys
+		SELECT id, type, project_id, capability FROM api_keys
 		WHERE key_hash = ? AND active = 1`,
-		keyHash).Scan(&result.ID, &result.Type, &result.ProjectID)
+		keyHash).Scan(&result.ID, &result.Type, &result.ProjectID, &result.Capability)
 	if err != nil {
 		return nil
 	}
