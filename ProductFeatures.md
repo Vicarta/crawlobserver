@@ -39,9 +39,9 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
 - Проєктна ізоляція списків проєктів, crawl sessions і session data.
 - General API keys для адміністративних та cross-project операцій.
 - Project API keys для обмеженого read-only доступу до одного проєкту.
-- Project-bound targeted rescan API використовує окрему privileged
-  general/admin capability; evidence-only Project API keys не отримують write
-  access.
+- Project-bound targeted rescan API використовує окремий Project API key із
+  privileged capability `targeted_rescan`; evidence-only Project API keys не
+  отримують write access.
 - Створення, перегляд і відкликання API keys через UI та API.
 - Керування користувачами через адміністративний UI та API.
 - Rate limiting для загальних і authentication endpoints.
