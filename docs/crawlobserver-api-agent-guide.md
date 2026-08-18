@@ -422,13 +422,73 @@ An identical retry returns the same `request_id` and terminal response without
 running a second rescan. Reusing the key with a different project/session/URL
 set returns `409 idempotency_conflict`.
 
-Stable error classifications include `project_rescan_capability_required` (403),
-`project_session_mismatch` (409), `invalid_url` or `cross_origin_url` (422),
-`session_not_rescannable` (409), `idempotency_conflict` (409),
-`url_not_in_session` (422), `rescan_failed` (502), and `internal_error` (500).
-Errors retain the normal string `error` field and add `error_code` plus bounded
-project/session/request provenance where available. Authentication failures
-before routing remain HTTP 401 with the standard API authentication response.
+The runtime response taxonomy is:
+
+| HTTP | `status` | `error_code` | Meaning |
+| --- | --- | --- | --- |
+| 200 | `completed` | omitted | Initial terminal success, or an identical idempotent replay of it. |
+| 400 | `rejected` | `invalid_scope` | A project or session path identifier is empty. |
+| 400 | `rejected` | `invalid_idempotency_key` | `Idempotency-Key` is missing or longer than 200 characters. |
+| 400 | `rejected` | `invalid_request` | Invalid/oversized JSON, an unknown field, a trailing JSON value, or a non-array `urls` value. |
+| 403 | `rejected` | `project_rescan_capability_required` | The credential lacks the exact-project `targeted_rescan` capability. |
+| 404 | `rejected` | `project_not_found` | The path project does not exist. |
+| 404 | `rejected` | `session_not_found` | The path session does not exist. |
+| 409 | `rejected` | `project_session_mismatch` | The session is not bound to the path project. |
+| 409 | `rejected` | `session_not_rescannable` | Before ledger claim, the session is non-terminal, running/queued, or has no valid seed origin. |
+| 409 | `failed` | `session_not_rescannable` | After ledger claim, the crawler reports the session unavailable or all crawl capacity busy. |
+| 409 | `rejected` | `idempotency_conflict` | The same key was used with a different project/session/normalized URL set. |
+| 409 | `running` | `duplicate_in_progress` | A matching durable request is still `running`; no second rescan is started. |
+| 422 | `rejected` | `invalid_url` | The URL list is empty or contains an invalid/non-HTTP(S)/credential-bearing URL. |
+| 422 | `rejected` | `too_many_urls` | More than 200 URLs were supplied. |
+| 422 | `rejected` | `cross_origin_url` | A URL is outside every canonical session seed origin. |
+| 422 | `failed` | `url_not_in_session` | The durable request reached the crawler, but a requested page was not in the target session. |
+| 500 | `rejected` | `internal_error` | Project/session/idempotency storage or audit claim failed. |
+| 500 | `rejected` | `audit_finalize_failed` | The rescan returned success, but its durable audit record could not be finalized; do not treat it as success. |
+| 502 | `failed` | `rescan_failed` | The durable request reached the crawler, but the targeted rescan failed. |
+
+Authentication failures before routing remain HTTP 401 with the standard API
+authentication response. A pre-execution `rejected` response has no durable
+`request_id`. A `completed` or `failed` terminal receipt includes
+`request_id`, `idempotency_key`, normalized `accepted_urls`, `request_digest`,
+`started_at`, and `completed_at`. A `running`/`duplicate_in_progress` receipt
+includes the same request identity, URL set, digest, and `started_at`, omits
+`completed_at`, and is not success. Replaying a stored `failed` request returns
+the same terminal receipt and HTTP classification without another mutation.
+
+Running duplicate receipt (`409`; zero-valued `accepted_url_count` is omitted):
+
+```json
+{
+  "project_id": "...",
+  "session_id": "...",
+  "request_id": "...",
+  "idempotency_key": "seo-publish-...",
+  "status": "running",
+  "accepted_urls": ["https://example.com/updated-page/"],
+  "request_digest": "sha256:...",
+  "started_at": "2026-08-18T09:00:00Z",
+  "error_code": "duplicate_in_progress",
+  "error": "an identical targeted rescan request is still in progress"
+}
+```
+
+Terminal failed receipt (`409`, `422`, or `502`, depending on `error_code`):
+
+```json
+{
+  "project_id": "...",
+  "session_id": "...",
+  "request_id": "...",
+  "idempotency_key": "seo-publish-...",
+  "status": "failed",
+  "accepted_urls": ["https://example.com/updated-page/"],
+  "request_digest": "sha256:...",
+  "started_at": "2026-08-18T09:00:00Z",
+  "completed_at": "2026-08-18T09:00:05Z",
+  "error_code": "url_not_in_session",
+  "error": "one or more URLs are not present in the target session"
+}
+```
 
 ### Post-rescan verification contract
 
@@ -442,19 +502,33 @@ Verification uses a separate evidence-only project key and this exact sequence:
    `X-API-Key: $CRAWLOBSERVER_EVIDENCE_API_KEY`.
 2. Require HTTP 200, exact `project_id`, non-empty `current_session_id`, and
    `quality_promotion_status: applied`. A 409 binding response is untrusted.
-3. Ignore the rescan receipt's `session_id` for the evidence read. Use only the
-   `current_session_id` returned by step 1 in
-   `GET /api/sessions/{current_session_id}/page-detail?url={exact_url}`.
-4. Require HTTP 200 and a well-formed `page` whose `CrawlSessionID` equals that
-   Current Snapshot session, whose `URL` exactly equals the requested URL, and
-   whose `CrawledAt` is not earlier than the receipt's `started_at`.
+   Require `current_session_id == receipt.session_id`.
+3. Read that exact returned receipt session with
+   `GET /api/sessions/{receipt.session_id}` and the evidence key. Require HTTP
+   200, `ID == receipt.session_id`, `ProjectID == project_id`, terminal status
+   `completed` or `completed_with_errors`, and both `is_running` and
+   `is_queued` false.
+4. Use the same verified session in
+   `GET /api/sessions/{receipt.session_id}/page-detail?url={exact_url}`.
+   Require HTTP 200 and a well-formed `page` whose `CrawlSessionID` equals the
+   receipt/Current Snapshot session, whose `URL` exactly equals the requested
+   URL, and whose `CrawledAt` is not earlier than the receipt's `started_at`.
+
+Targeted rescan updates pages in the supplied existing session. It does not
+create a new session, publish a new trusted snapshot, or promote a historical
+session to Current Snapshot. Consequently, a completed receipt for a session
+that is not already `current_session_id` is `not verified`; this route provides
+no later promotion event to wait for. Current Snapshot `updated_at` and session
+`FinishedAt` may legitimately predate the rescan and are not freshness proof.
+The exact page's `CrawledAt` supplies the causal timestamp.
 
 Any missing/malformed response, project/session/URL mismatch, non-200 Current
-Snapshot or page-detail response, untrusted binding, or stale `CrawledAt` is
-`not verified`. Do not fall back to the receipt session, a latest-session
-guess, or a different URL. The executable scenario fixture, including positive
-and denial outcomes, is
-[`project-rescan-verification-v1.json`](fixtures/project-rescan-verification-v1.json).
+Snapshot, returned-session, or page-detail response, untrusted binding, or
+stale `CrawledAt` is `not verified`. Do not substitute a latest-session guess,
+historical session, or different URL. The executable scenario fixture and real-handler integration
+test cover the complete Current Snapshot -> receipt session -> requested page
+flow:
+[`project-rescan-verification-v2.json`](fixtures/project-rescan-verification-v2.json).
 
 The session-only endpoint remains available for existing UI and API callers and
 continues to require general/admin credentials:

@@ -1,0 +1,347 @@
+{
+  "contract_version": "project-rescan-verification/v2",
+  "request": {
+    "project_id": "project-gerus",
+    "url": "https://sergey-gerus.com/published-page/"
+  },
+  "mutation_auth": {
+    "header": "X-API-Key",
+    "key_type": "project",
+    "capability": "targeted_rescan"
+  },
+  "read_auth": {
+    "header": "X-API-Key",
+    "key_type": "project",
+    "capability": ""
+  },
+  "receipt": {
+    "project_id": "project-gerus",
+    "session_id": "session-current-snapshot",
+    "request_id": "rescan-request-001",
+    "idempotency_key": "published-change-001",
+    "status": "completed",
+    "accepted_url_count": 1,
+    "accepted_urls": [
+      "https://sergey-gerus.com/published-page/"
+    ],
+    "request_digest": "sha256:fixture-digest",
+    "started_at": "2026-08-18T10:00:00Z",
+    "completed_at": "2026-08-18T10:00:05Z"
+  },
+  "scenarios": [
+    {
+      "name": "trusted-current-receipt-session-page-is-fresh",
+      "current_snapshot_read": {
+        "method": "GET",
+        "path": "/api/projects/project-gerus/current-snapshot",
+        "http_status": 200,
+        "body": {
+          "project_id": "project-gerus",
+          "current_session_id": "session-current-snapshot",
+          "quality_promotion_status": "applied",
+          "updated_at": "2026-08-18T09:00:00Z"
+        }
+      },
+      "returned_session_read": {
+        "method": "GET",
+        "path": "/api/sessions/session-current-snapshot",
+        "http_status": 200,
+        "body": {
+          "ID": "session-current-snapshot",
+          "ProjectID": "project-gerus",
+          "Status": "completed",
+          "is_running": false,
+          "is_queued": false
+        }
+      },
+      "page_detail_read": {
+        "method": "GET",
+        "path": "/api/sessions/session-current-snapshot/page-detail?url=https%3A%2F%2Fsergey-gerus.com%2Fpublished-page%2F",
+        "http_status": 200,
+        "body": {
+          "page": {
+            "CrawlSessionID": "session-current-snapshot",
+            "URL": "https://sergey-gerus.com/published-page/",
+            "CrawledAt": "2026-08-18T10:00:02Z"
+          }
+        }
+      },
+      "verified": true,
+      "reason": "verified"
+    },
+    {
+      "name": "receipt-alone",
+      "verified": false,
+      "reason": "receipt_is_not_verification"
+    },
+    {
+      "name": "snapshot-project-mismatch",
+      "current_snapshot_read": {
+        "method": "GET",
+        "path": "/api/projects/project-gerus/current-snapshot",
+        "http_status": 200,
+        "body": {
+          "project_id": "project-other",
+          "current_session_id": "session-current-snapshot",
+          "quality_promotion_status": "applied"
+        }
+      },
+      "verified": false,
+      "reason": "project_mismatch"
+    },
+    {
+      "name": "receipt-session-is-not-current",
+      "current_snapshot_read": {
+        "method": "GET",
+        "path": "/api/projects/project-gerus/current-snapshot",
+        "http_status": 200,
+        "body": {
+          "project_id": "project-gerus",
+          "current_session_id": "session-other-current",
+          "quality_promotion_status": "applied"
+        }
+      },
+      "verified": false,
+      "reason": "receipt_session_not_current"
+    },
+    {
+      "name": "current-snapshot-untrusted",
+      "current_snapshot_read": {
+        "method": "GET",
+        "path": "/api/projects/project-gerus/current-snapshot",
+        "http_status": 409,
+        "body": {
+          "error": "current_snapshot_binding_stale"
+        }
+      },
+      "verified": false,
+      "reason": "untrusted_current_snapshot"
+    },
+    {
+      "name": "current-snapshot-malformed",
+      "current_snapshot_read": {
+        "method": "GET",
+        "path": "/api/projects/project-gerus/current-snapshot",
+        "http_status": 200,
+        "body": {
+          "project_id": "project-gerus",
+          "quality_promotion_status": "applied"
+        }
+      },
+      "verified": false,
+      "reason": "malformed_current_snapshot"
+    },
+    {
+      "name": "returned-session-unavailable",
+      "current_snapshot_read": {
+        "method": "GET",
+        "path": "/api/projects/project-gerus/current-snapshot",
+        "http_status": 200,
+        "body": {
+          "project_id": "project-gerus",
+          "current_session_id": "session-current-snapshot",
+          "quality_promotion_status": "applied"
+        }
+      },
+      "returned_session_read": {
+        "method": "GET",
+        "path": "/api/sessions/session-current-snapshot",
+        "http_status": 404,
+        "body": {
+          "error": "session not found"
+        }
+      },
+      "verified": false,
+      "reason": "returned_session_unavailable"
+    },
+    {
+      "name": "returned-session-mismatch",
+      "current_snapshot_read": {
+        "method": "GET",
+        "path": "/api/projects/project-gerus/current-snapshot",
+        "http_status": 200,
+        "body": {
+          "project_id": "project-gerus",
+          "current_session_id": "session-current-snapshot",
+          "quality_promotion_status": "applied"
+        }
+      },
+      "returned_session_read": {
+        "method": "GET",
+        "path": "/api/sessions/session-current-snapshot",
+        "http_status": 200,
+        "body": {
+          "ID": "session-other",
+          "ProjectID": "project-gerus",
+          "Status": "completed",
+          "is_running": false,
+          "is_queued": false
+        }
+      },
+      "verified": false,
+      "reason": "session_mismatch"
+    },
+    {
+      "name": "returned-session-not-terminal",
+      "current_snapshot_read": {
+        "method": "GET",
+        "path": "/api/projects/project-gerus/current-snapshot",
+        "http_status": 200,
+        "body": {
+          "project_id": "project-gerus",
+          "current_session_id": "session-current-snapshot",
+          "quality_promotion_status": "applied"
+        }
+      },
+      "returned_session_read": {
+        "method": "GET",
+        "path": "/api/sessions/session-current-snapshot",
+        "http_status": 200,
+        "body": {
+          "ID": "session-current-snapshot",
+          "ProjectID": "project-gerus",
+          "Status": "running",
+          "is_running": true,
+          "is_queued": false
+        }
+      },
+      "verified": false,
+      "reason": "session_not_terminal"
+    },
+    {
+      "name": "returned-session-malformed",
+      "current_snapshot_read": {
+        "method": "GET",
+        "path": "/api/projects/project-gerus/current-snapshot",
+        "http_status": 200,
+        "body": {
+          "project_id": "project-gerus",
+          "current_session_id": "session-current-snapshot",
+          "quality_promotion_status": "applied"
+        }
+      },
+      "returned_session_read": {
+        "method": "GET",
+        "path": "/api/sessions/session-current-snapshot",
+        "http_status": 200,
+        "body": {
+          "ID": "session-current-snapshot",
+          "ProjectID": "project-gerus"
+        }
+      },
+      "verified": false,
+      "reason": "malformed_returned_session"
+    },
+    {
+      "name": "page-is-stale",
+      "current_snapshot_read": {
+        "method": "GET",
+        "path": "/api/projects/project-gerus/current-snapshot",
+        "http_status": 200,
+        "body": {
+          "project_id": "project-gerus",
+          "current_session_id": "session-current-snapshot",
+          "quality_promotion_status": "applied"
+        }
+      },
+      "returned_session_read": {
+        "method": "GET",
+        "path": "/api/sessions/session-current-snapshot",
+        "http_status": 200,
+        "body": {
+          "ID": "session-current-snapshot",
+          "ProjectID": "project-gerus",
+          "Status": "completed",
+          "is_running": false,
+          "is_queued": false
+        }
+      },
+      "page_detail_read": {
+        "method": "GET",
+        "path": "/api/sessions/session-current-snapshot/page-detail?url=https%3A%2F%2Fsergey-gerus.com%2Fpublished-page%2F",
+        "http_status": 200,
+        "body": {
+          "page": {
+            "CrawlSessionID": "session-current-snapshot",
+            "URL": "https://sergey-gerus.com/published-page/",
+            "CrawledAt": "2026-08-18T09:59:59Z"
+          }
+        }
+      },
+      "verified": false,
+      "reason": "stale_page"
+    },
+    {
+      "name": "page-url-mismatch",
+      "current_snapshot_read": {
+        "method": "GET",
+        "path": "/api/projects/project-gerus/current-snapshot",
+        "http_status": 200,
+        "body": {
+          "project_id": "project-gerus",
+          "current_session_id": "session-current-snapshot",
+          "quality_promotion_status": "applied"
+        }
+      },
+      "returned_session_read": {
+        "method": "GET",
+        "path": "/api/sessions/session-current-snapshot",
+        "http_status": 200,
+        "body": {
+          "ID": "session-current-snapshot",
+          "ProjectID": "project-gerus",
+          "Status": "completed",
+          "is_running": false,
+          "is_queued": false
+        }
+      },
+      "page_detail_read": {
+        "method": "GET",
+        "path": "/api/sessions/session-current-snapshot/page-detail?url=https%3A%2F%2Fsergey-gerus.com%2Fpublished-page%2F",
+        "http_status": 200,
+        "body": {
+          "page": {
+            "CrawlSessionID": "session-current-snapshot",
+            "URL": "https://sergey-gerus.com/another-page/",
+            "CrawledAt": "2026-08-18T10:00:02Z"
+          }
+        }
+      },
+      "verified": false,
+      "reason": "page_mismatch"
+    },
+    {
+      "name": "page-detail-malformed",
+      "current_snapshot_read": {
+        "method": "GET",
+        "path": "/api/projects/project-gerus/current-snapshot",
+        "http_status": 200,
+        "body": {
+          "project_id": "project-gerus",
+          "current_session_id": "session-current-snapshot",
+          "quality_promotion_status": "applied"
+        }
+      },
+      "returned_session_read": {
+        "method": "GET",
+        "path": "/api/sessions/session-current-snapshot",
+        "http_status": 200,
+        "body": {
+          "ID": "session-current-snapshot",
+          "ProjectID": "project-gerus",
+          "Status": "completed",
+          "is_running": false,
+          "is_queued": false
+        }
+      },
+      "page_detail_read": {
+        "method": "GET",
+        "path": "/api/sessions/session-current-snapshot/page-detail?url=https%3A%2F%2Fsergey-gerus.com%2Fpublished-page%2F",
+        "http_status": 200,
+        "body": {}
+      },
+      "verified": false,
+      "reason": "malformed_page_detail"
+    }
+  ]
+}

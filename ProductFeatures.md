@@ -81,10 +81,13 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
   general/admin доступ збережений тільки для legacy session-only route.
 - Targeted-rescan receipt є audit receipt, а не підтвердженням публікації.
   Post-rescan verification окремим project read key спочатку читає trusted
-  Current Snapshot, використовує тільки повернений `current_session_id`, а
-  потім перевіряє exact URL та свіжий `CrawledAt` у page detail. Mismatch,
-  stale, untrusted і malformed результати fail closed як not verified;
-  контракт зафіксований versioned executable fixture.
+  Current Snapshot і вимагає, щоб `current_session_id` дорівнював
+  `receipt.session_id`, читає саме цю terminal session через session GET, а
+  потім перевіряє exact URL та свіжий `CrawledAt` у page detail. Targeted
+  rescan змінює наявну session in place і сам не створює та не промотує новий
+  trusted snapshot. Mismatch, stale, untrusted і malformed результати fail
+  closed як not verified; контракт зафіксований versioned executable fixture
+  та real-handler integration test.
 - Resume незавершеної сесії з попередніми параметрами.
 - Якщо параметри Resume змінені, UI вимагає підтвердити Full Recrawl.
 - Retry failed pages за status code.

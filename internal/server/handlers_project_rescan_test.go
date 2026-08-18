@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SEObserver/crawlobserver/internal/apikeys"
 	"github.com/SEObserver/crawlobserver/internal/crawler"
@@ -23,6 +24,19 @@ type projectRescanFixture struct {
 	rescanKey string
 	store     *mockStore
 	manager   *mockManager
+}
+
+type hookedProjectRescanManager struct {
+	*mockManager
+	afterRescan func()
+}
+
+func (m *hookedProjectRescanManager) RescanPages(sessionID string, urls []string) (int, error) {
+	count, err := m.mockManager.RescanPages(sessionID, urls)
+	if m.afterRescan != nil {
+		m.afterRescan()
+	}
+	return count, err
 }
 
 func newProjectRescanFixture(t *testing.T) projectRescanFixture {
@@ -83,6 +97,90 @@ func TestProjectRescanRequiresAuthentication(t *testing.T) {
 	if len(f.manager.rescanCalls) != 0 {
 		t.Fatal("unauthorized request reached rescan manager")
 	}
+}
+
+func TestProjectRescanBadRequestClassifications(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		body string
+		code string
+	}{
+		{name: "missing idempotency key", body: `{"urls":["https://example.com/a"]}`, code: "invalid_idempotency_key"},
+		{name: "malformed JSON", key: "bad-json", body: `{"urls":`, code: "invalid_request"},
+		{name: "unknown field", key: "unknown-field", body: `{"urls":["https://example.com/a"],"extra":true}`, code: "invalid_request"},
+		{name: "trailing JSON", key: "trailing-json", body: `{"urls":["https://example.com/a"]}{}`, code: "invalid_request"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newProjectRescanFixture(t)
+			req := f.authorizedRequest(t, tt.key, tt.body)
+			rec := httptest.NewRecorder()
+			f.handler.ServeHTTP(rec, req)
+			var response projectRescanResponse
+			decodeJSON(t, rec, &response)
+			if rec.Code != http.StatusBadRequest || response.Status != "rejected" || response.ErrorCode != tt.code {
+				t.Fatalf("response = %d %#v", rec.Code, response)
+			}
+			if len(f.manager.rescanCalls) != 0 {
+				t.Fatal("bad request reached rescan manager")
+			}
+		})
+	}
+}
+
+func TestProjectRescanRejectsInvalidScope(t *testing.T) {
+	f := newProjectRescanFixture(t)
+	req := f.authorizedRequest(t, "invalid-scope", `{"urls":["https://example.com/a"]}`)
+	rec := httptest.NewRecorder()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("projectId", "")
+		r.SetPathValue("sessionId", f.sessionID)
+		f.server.handleProjectRescanPages(w, r)
+	})
+	apikeys.Authenticate(f.keyStore, "", "")(inner).ServeHTTP(rec, req)
+	var response projectRescanResponse
+	decodeJSON(t, rec, &response)
+	if rec.Code != http.StatusBadRequest || response.Status != "rejected" || response.ErrorCode != "invalid_scope" {
+		t.Fatalf("response = %d %#v", rec.Code, response)
+	}
+}
+
+func TestProjectRescanNotFoundClassifications(t *testing.T) {
+	t.Run("session", func(t *testing.T) {
+		f := newProjectRescanFixture(t)
+		path := "/api/projects/" + f.projectID + "/sessions/missing-session/rescan-pages"
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"urls":["https://example.com/a"]}`))
+		req.Header.Set("X-API-Key", f.rescanKey)
+		req.Header.Set("Idempotency-Key", "missing-session")
+		rec := httptest.NewRecorder()
+		f.handler.ServeHTTP(rec, req)
+		var response projectRescanResponse
+		decodeJSON(t, rec, &response)
+		if rec.Code != http.StatusNotFound || response.Status != "rejected" || response.ErrorCode != "session_not_found" {
+			t.Fatalf("response = %d %#v", rec.Code, response)
+		}
+	})
+
+	t.Run("project", func(t *testing.T) {
+		f := newProjectRescanFixture(t)
+		req := f.authorizedRequest(t, "missing-project", `{"urls":["https://example.com/a"]}`)
+		rec := httptest.NewRecorder()
+		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := f.keyStore.DeleteProject(f.projectID); err != nil {
+				t.Fatal(err)
+			}
+			r.SetPathValue("projectId", f.projectID)
+			r.SetPathValue("sessionId", f.sessionID)
+			f.server.handleProjectRescanPages(w, r)
+		})
+		apikeys.Authenticate(f.keyStore, "", "")(inner).ServeHTTP(rec, req)
+		var response projectRescanResponse
+		decodeJSON(t, rec, &response)
+		if rec.Code != http.StatusNotFound || response.Status != "rejected" || response.ErrorCode != "project_not_found" {
+			t.Fatalf("response = %d %#v", rec.Code, response)
+		}
+	})
 }
 
 func TestProjectRescanRejectsProjectReadOnlyKey(t *testing.T) {
@@ -208,6 +306,34 @@ func TestProjectRescanDedicatedKeySuccessAndIdempotentReplay(t *testing.T) {
 	}
 	if firstResponse.ProjectID != f.projectID || firstResponse.SessionID != f.sessionID || firstResponse.AcceptedCount != 2 || len(firstResponse.AcceptedURLs) != 2 || firstResponse.StartedAt == nil || firstResponse.CompletedAt == nil {
 		t.Fatalf("incomplete typed response: %#v", firstResponse)
+	}
+}
+
+func TestProjectRescanReturnsRunningDuplicateReceipt(t *testing.T) {
+	f := newProjectRescanFixture(t)
+	urls := []string{"https://example.com/a"}
+	digest := projectRescanDigest(f.projectID, f.sessionID, urls)
+	startedAt := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	record, err := f.keyStore.CreateProjectRescanRequest(f.projectID, "running-request", f.sessionID, digest, urls, startedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := f.authorizedRequest(t, "running-request", `{"urls":["https://example.com/a"]}`)
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+
+	var response projectRescanResponse
+	decodeJSON(t, rec, &response)
+	if rec.Code != http.StatusConflict || response.Status != apikeys.ProjectRescanStatusRunning ||
+		response.ErrorCode != "duplicate_in_progress" || response.RequestID != record.RequestID ||
+		response.StartedAt == nil || !response.StartedAt.Equal(startedAt) || response.CompletedAt != nil {
+		t.Fatalf("unexpected running duplicate receipt: %d %#v", rec.Code, response)
+	}
+	if len(response.AcceptedURLs) != 1 || response.AcceptedURLs[0] != urls[0] || response.RequestDigest != digest {
+		t.Fatalf("incomplete running duplicate receipt: %#v", response)
+	}
+	if len(f.manager.rescanCalls) != 0 {
+		t.Fatal("running duplicate replay reached rescan manager")
 	}
 }
 
@@ -357,6 +483,32 @@ func TestProjectRescanClassifiesControlPlaneFailure(t *testing.T) {
 	}
 }
 
+func TestProjectRescanClassifiesAuditFinalizationFailure(t *testing.T) {
+	f := newProjectRescanFixture(t)
+	closeErr := error(nil)
+	hooked := &hookedProjectRescanManager{
+		mockManager: f.manager,
+		afterRescan: func() {
+			closeErr = f.keyStore.Close()
+		},
+	}
+	f.server.manager = hooked
+	req := f.authorizedRequest(t, "audit-finalize-failure", `{"urls":["https://example.com/a"]}`)
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	var response projectRescanResponse
+	decodeJSON(t, rec, &response)
+	if rec.Code != http.StatusInternalServerError || response.Status != "rejected" || response.ErrorCode != "audit_finalize_failed" {
+		t.Fatalf("response = %d %#v", rec.Code, response)
+	}
+	if len(f.manager.rescanCalls) != 1 {
+		t.Fatalf("rescan calls = %d, want 1", len(f.manager.rescanCalls))
+	}
+}
+
 func TestProjectRescanRejectsIdempotencyConflict(t *testing.T) {
 	f := newProjectRescanFixture(t)
 	first := f.authorizedRequest(t, "same-key", `{"urls":["https://example.com/a"]}`)
@@ -388,6 +540,7 @@ func TestProjectRescanReturnsStablePageAndProviderFailures(t *testing.T) {
 		errorCode  string
 	}{
 		{name: "page missing", err: crawler.ErrRescanPageNotFound, statusCode: http.StatusUnprocessableEntity, errorCode: "url_not_in_session"},
+		{name: "crawler busy", err: crawler.ErrRescanBusy, statusCode: http.StatusConflict, errorCode: "session_not_rescannable"},
 		{name: "provider failure", err: errors.New("upstream failed with secret-token-value"), statusCode: http.StatusBadGateway, errorCode: "rescan_failed"},
 	}
 	for _, tt := range tests {
@@ -408,6 +561,10 @@ func TestProjectRescanReturnsStablePageAndProviderFailures(t *testing.T) {
 			decodeJSON(t, second, &secondResponse)
 			if first.Code != tt.statusCode || second.Code != tt.statusCode || firstResponse.ErrorCode != tt.errorCode {
 				t.Fatalf("responses = %d %#v / %d %#v", first.Code, firstResponse, second.Code, secondResponse)
+			}
+			if firstResponse.Status != apikeys.ProjectRescanStatusFailed || secondResponse.Status != apikeys.ProjectRescanStatusFailed ||
+				firstResponse.StartedAt == nil || firstResponse.CompletedAt == nil {
+				t.Fatalf("failure receipt is incomplete: %#v / %#v", firstResponse, secondResponse)
 			}
 			if firstResponse.RequestID == "" || firstResponse.RequestID != secondResponse.RequestID || len(f.manager.rescanCalls) != 1 {
 				t.Fatalf("failure replay was not stable: %#v / %#v, calls=%d", firstResponse, secondResponse, len(f.manager.rescanCalls))
