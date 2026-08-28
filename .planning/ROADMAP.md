@@ -468,9 +468,13 @@ DEPLOY-253-01
 **Plans:** 3 plans
 
 Plans:
-- [ ] 25.3-01: Derived raw-stability evidence and selector v2
-- [ ] 25.3-02: Planner, fail-closed publication binding, persisted provenance, and UI
-- [ ] 25.3-03: Regression closure, documentation, and safe production rollout
+- [x] 25.3-01: Derived raw-stability evidence and selector v2
+- [x] 25.3-02: Planner, fail-closed publication binding, persisted provenance, and UI
+- [x] 25.3-03: Regression closure, documentation, and safe production rollout
+
+**Completed:** 2026-08-28. The exact implementation was pushed as
+`448534e335eb1bd7ddd307347304ecde59259c6e`, deployed by an app-only overlay,
+and accepted through read-only DI Preview. No live crawl or rescan was run.
 
 ### Phase 26: Trustworthy sitemap availability and lastmod validation
 

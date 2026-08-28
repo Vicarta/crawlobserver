@@ -5,7 +5,7 @@
 See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 **Core value:** A server operator can deploy, start, secure, verify, and recover CrawlObserver without guessing critical runtime steps.
-**Current focus:** Phase 25.3: Raw-stabilized sitemap retry suppression
+**Current focus:** Phase 25.3 complete; Phase 26 remains planned
 
 ## Current Status
 
@@ -36,8 +36,9 @@ See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 ## Next Action
 
-Plan and execute urgent Phase 25.3. Keep Current Snapshot publication fail-closed,
-do not run a live crawl/rescan, and use read-only Preview for production acceptance.
+Phase 25.3 is closed and deployed. Keep the current app-only rollout in place;
+plan the next approved Phase 26 work before making any further production
+change. Do not run a live crawl/rescan as part of this closeout.
 
 ## Accumulated Context
 
@@ -82,9 +83,23 @@ do not run a live crawl/rescan, and use read-only Preview for production accepta
     `fc5a708afe0e3cc2a6cda63a42f80737a5e22ccc`. The rollout waited for the
     active DI crawl to finish, passed both safe gates, restarted only the app,
     and verified app/ClickHouse health plus read-only production UI evidence.
-    DI currently has 2,063 forward-lastmod events and 25 canaries, so its large
+  - DI currently has 2,063 forward-lastmod events and 25 canaries, so its large
     next candidate set is justified by change evidence rather than a minimum
     target or an automatic reduction of its 5,000 safety ceiling.
+
+- Phase 25.3 completed and deployed on 2026-08-28 from commit
+  `448534e335eb1bd7ddd307347304ecde59259c6e`.
+  - Two no-force active-crawl gates passed and only `crawlobserver-app` was
+    recreated. Final health was `ok`; ClickHouse remained healthy and
+    `SELECT 1` returned `1`.
+  - Read-only DI Preview returned 2,063 published differences split into 13
+    actionable events and 2,050 stable acknowledgements, proven by the exact
+    pair `bef21482-4513-486d-8999-1374f25daa9e` and
+    `636f285a-743a-4c4d-aca3-cde03eaf08f9`. It launched only 13 events plus 25
+    canaries and kept publication held.
+  - No live crawl, rescan, publication, cleanup, or historical rewrite was
+    performed. Local ClickHouse-tagged fixtures remain unrun because the local
+    Docker daemon was unavailable; this is recorded in the phase verification.
 
 - Phase 25.1 inserted after Phase 25: PageRank quality evidence consistency (URGENT).
   - At phase start, production session `cecabb70-b621-48a1-9dc4-1feb3c3757cb` was marked
