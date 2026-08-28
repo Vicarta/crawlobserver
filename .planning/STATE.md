@@ -5,7 +5,7 @@
 See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 **Core value:** A server operator can deploy, start, secure, verify, and recover CrawlObserver without guessing critical runtime steps.
-**Current focus:** Phase 25.2: Bounded changed-only Daily Delta and verified effective origins
+**Current focus:** Phase 26: Trustworthy sitemap availability and lastmod validation (planned)
 
 ## Current Status
 
@@ -36,8 +36,8 @@ See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 ## Next Action
 
-Finish Phase 25.2 plan 05 gates, commit/push, then deploy app-only through the
-active-crawl-blocking safe restart. Do not start a crawl or mutate production data.
+Phase 25.2 is complete and deployed. Phase 26 is planned; begin it only on
+explicit product direction and keep its sitemap-reporting scope separate.
 
 ## Accumulated Context
 
@@ -64,6 +64,13 @@ active-crawl-blocking safe restart. Do not start a crawl or mutate production da
     `ProductFeatures.md` ownership, and guarded app-only deployment. Live crawls
     and production data mutation are explicitly excluded.
   - Phase 26 remains planned and now depends on Phase 25.2.
+  - Completed and deployed on 2026-08-28 from commit
+    `fc5a708afe0e3cc2a6cda63a42f80737a5e22ccc`. The rollout waited for the
+    active DI crawl to finish, passed both safe gates, restarted only the app,
+    and verified app/ClickHouse health plus read-only production UI evidence.
+    DI currently has 2,063 forward-lastmod events and 25 canaries, so its large
+    next candidate set is justified by change evidence rather than a minimum
+    target or an automatic reduction of its 5,000 safety ceiling.
 
 - Phase 25.1 inserted after Phase 25: PageRank quality evidence consistency (URGENT).
   - At phase start, production session `cecabb70-b621-48a1-9dc4-1feb3c3757cb` was marked
@@ -196,7 +203,7 @@ active-crawl-blocking safe restart. Do not start a crawl or mutate production da
 - Whether to build the Compose image on the server or push/pull a registry image later.
 
 ---
-*Last updated: 2026-08-28 during Phase 25.2 execution*
+*Last updated: 2026-08-28 after Phase 25.2 production acceptance*
 
 - Phase 13 added: PageRank Lab access, automatic PageRank recalculation after settings changes, and confirmed erroneous-page pruning.
 - Phase 14 added: structured crawl stop reasons plus deploy guard to prevent silent crawl interruption during app restarts.

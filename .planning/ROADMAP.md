@@ -423,7 +423,7 @@ Plans:
 - [x] 25.2-02: Dual observation terms and publication-safe Delta wiring
 - [x] 25.2-03: Conditional GET execution and evidence-preserving `304` overlay
 - [x] 25.2-04: Exact shared static/rendered discovered-URL budget
-- [ ] 25.2-05: Proven effective-origin response/UI, aggregate gates, and safe production rollout
+- [x] 25.2-05: Proven effective-origin response/UI, aggregate gates, and safe production rollout
 
 ### Phase 26: Trustworthy sitemap availability and lastmod validation
 
