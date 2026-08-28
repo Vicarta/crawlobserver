@@ -10,6 +10,13 @@ type RedirectHop struct {
 	StatusCode int
 }
 
+// RequestValidators contains the retained HTTP validators for an optional
+// conditional GET. Values are copied exactly to the request headers.
+type RequestValidators struct {
+	ETag         string
+	LastModified string
+}
+
 // FetchResult contains the result of fetching a URL.
 type FetchResult struct {
 	URL           string
@@ -26,4 +33,5 @@ type FetchResult struct {
 	Depth         int
 	FoundOn       string
 	Attempt       int // retry attempt number (0 = first try)
+	NotModified   bool
 }

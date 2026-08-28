@@ -238,6 +238,31 @@
         </div>
       </div>
 
+      {#if preview?.sitemap_selection}
+        <div class="delta-summary sitemap-selection-summary">
+          <div>
+            <strong>{formatInt(preview?.sitemap_events)}</strong>
+            <span>Changed events</span>
+          </div>
+          <div>
+            <strong>{formatInt(preview?.sitemap_pending_unpublished)}</strong>
+            <span>Pending unpublished</span>
+          </div>
+          <div>
+            <strong>{formatInt(preview?.sitemap_canaries)}</strong>
+            <span>Canaries</span>
+          </div>
+          <div title="Changed sitemap events kept for a later Delta plan.">
+            <strong>{formatInt(preview?.sitemap_deferred)}</strong>
+            <span>Sitemap deferred</span>
+          </div>
+        </div>
+      {/if}
+
+      {#if preview?.held_publication_reason}
+        <div class="delta-note warning">{preview.held_publication_reason}</div>
+      {/if}
+
       {#if preview?.sitemap_refresh}
         {@const refresh = preview.sitemap_refresh}
         <div class:warning={refresh.mode !== 'fresh'} class="sitemap-refresh">
@@ -351,8 +376,24 @@
           <label
             ><span>Max candidates</span><input
               type="number"
-              min="1"
+              min="0"
               bind:value={settings.max_candidates_per_run}
+              disabled={!isAdmin}
+            /></label
+          >
+          <label
+            ><span>Changed sitemap cap (0 = all)</span><input
+              type="number"
+              min="0"
+              bind:value={settings.sitemap_changed_limit}
+              disabled={!isAdmin}
+            /></label
+          >
+          <label
+            ><span>Rotating sitemap canaries</span><input
+              type="number"
+              min="0"
+              bind:value={settings.sitemap_canary_count}
               disabled={!isAdmin}
             /></label
           >

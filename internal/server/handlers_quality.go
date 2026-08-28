@@ -1360,6 +1360,13 @@ func (s *Server) evaluateDeltaPlanGate(ctx context.Context, qs qualityStorage, s
 			}
 		}
 	}
+	if selection := plan.SitemapSelection; selection != nil && selection.EventDeferred > 0 {
+		findings = append(findings, qualityFinding(
+			sessionID, projectID, "warning", "delta_sitemap_events_deferred",
+			"Daily Delta deferred sitemap events that remain unpublished; the published sitemap safety term was held.",
+			"sitemap_events_deferred", float64(selection.EventDeferred), float64(selection.EventTotal), 0, false, now,
+		))
+	}
 	if settings.DeltaCandidateCoveragePercent > 0 && len(plan.LaunchedURLs) > 0 {
 		launchedURLs := uniqueStrings(plan.LaunchedURLs)
 		if len(launchedURLs) == 0 {
@@ -1456,6 +1463,15 @@ func addDeltaPlanMetrics(metrics map[string]interface{}, plan *config.DeltaPlanC
 		metrics["sitemap_refresh_added"] = refresh.AddedCount
 		metrics["sitemap_refresh_removed"] = refresh.RemovedCount
 		metrics["sitemap_refresh_invalid"] = refresh.InvalidEntryCount
+	}
+	if selection := plan.SitemapSelection; selection != nil {
+		metrics["sitemap_selector_revision"] = selection.SelectorRevision
+		metrics["sitemap_event_total"] = selection.EventTotal
+		metrics["sitemap_event_selected"] = selection.EventSelected
+		metrics["sitemap_event_deferred"] = selection.EventDeferred
+		metrics["sitemap_canary_selected"] = selection.CanarySelected
+		metrics["sitemap_selection_complete"] = selection.SelectionComplete
+		metrics["sitemap_pending_unpublished"] = sitemapSelectionPendingCount(selection)
 	}
 }
 

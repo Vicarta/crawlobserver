@@ -41,10 +41,12 @@ type Engine struct {
 	robots   *fetcher.RobotsCache
 	session  *Session
 
-	pagesCrawled   atomic.Int64
-	lastProgressAt atomic.Int64
-	maxPages       int64
-	phase          atomic.Value // string: current phase ("fetching_sitemaps", "crawling", "")
+	pagesCrawled    atomic.Int64
+	lastProgressAt  atomic.Int64
+	maxPages        int64
+	discoveryMu     sync.Mutex
+	discoveredPages int
+	phase           atomic.Value // string: current phase ("fetching_sitemaps", "crawling", "")
 
 	allowedHosts    map[string]bool
 	allowedDomains  map[string]bool
@@ -103,6 +105,7 @@ type Engine struct {
 	footerSelectorPatterns       []string
 	initialSitemaps              []storage.SitemapRow
 	initialSitemapURLs           []storage.SitemapURLRow
+	httpValidators               map[string]fetcher.RequestValidators
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -184,6 +187,19 @@ func (e *Engine) SetSessionID(id string) {
 func (e *Engine) SetInitialSitemapObservation(sitemaps []storage.SitemapRow, sitemapURLs []storage.SitemapURLRow) {
 	e.initialSitemaps = append([]storage.SitemapRow(nil), sitemaps...)
 	e.initialSitemapURLs = append([]storage.SitemapURLRow(nil), sitemapURLs...)
+}
+
+// SetHTTPValidators supplies retained baseline validators for an enabled
+// Daily Delta. The map is omitted for ordinary and disabled crawls.
+func (e *Engine) SetHTTPValidators(validators map[string]fetcher.RequestValidators) {
+	if len(validators) == 0 {
+		e.httpValidators = nil
+		return
+	}
+	e.httpValidators = make(map[string]fetcher.RequestValidators, len(validators))
+	for url, value := range validators {
+		e.httpValidators[url] = value
+	}
 }
 
 // ResumeSession prepares the engine to resume an existing session.
@@ -473,6 +489,50 @@ func (e *Engine) seedFrontier(seeds []string) {
 			Depth:    0,
 		})
 	}
+}
+
+// admitDiscoveredURL adds one non-seed URL to the frontier when it passes all
+// normal admission checks. The optional discovery budget and frontier add are
+// deliberately guarded by the same mutex so static and rendered workers share
+// one exact budget.
+func (e *Engine) admitDiscoveredURL(targetURL string, depth int, foundOn string) bool {
+	if e.rescanOnly || e.sitemapOnly || !e.isInScope(targetURL) || e.isExcluded(targetURL) {
+		return false
+	}
+	if e.cfg.Crawler.MaxDepth > 0 && depth > e.cfg.Crawler.MaxDepth {
+		return false
+	}
+	select {
+	case <-e.ctx.Done():
+		return false
+	default:
+	}
+
+	priority := depth
+	if e.sitemapURLSet[targetURL] && priority > 1 {
+		priority = 1
+	}
+
+	e.discoveryMu.Lock()
+	defer e.discoveryMu.Unlock()
+	select {
+	case <-e.ctx.Done():
+		return false
+	default:
+	}
+	if budget := e.cfg.Crawler.DiscoveryBudget; budget != nil && e.discoveredPages >= *budget {
+		return false
+	}
+	if !e.front.Add(frontier.CrawlURL{
+		URL:      targetURL,
+		Priority: priority,
+		Depth:    depth,
+		FoundOn:  foundOn,
+	}) {
+		return false
+	}
+	e.discoveredPages++
+	return true
 }
 
 // prefetchRobots fetches robots.txt for all seed hosts and discovers sitemaps.
@@ -816,7 +876,7 @@ func (e *Engine) fetchWorker(id int, in <-chan *frontier.CrawlURL, out chan<- *f
 			continue
 		}
 
-		result := e.fetch.FetchWithContext(e.ctx, crawlURL.URL, crawlURL.Depth, crawlURL.FoundOn)
+		result := e.fetch.FetchWithContextValidators(e.ctx, crawlURL.URL, crawlURL.Depth, crawlURL.FoundOn, e.httpValidators[crawlURL.URL])
 		result.Attempt = crawlURL.Attempt
 
 		// Only count first attempts for progress
@@ -1025,6 +1085,14 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 			}
 		}
 
+		// A 304 is durable Delta audit evidence, but has no body or graph
+		// mutation to parse, extract, render, resource-check, or discover.
+		if result.StatusCode == http.StatusNotModified {
+			ensureNonNilArrays(&pageRow)
+			e.buffer.AddPage(pageRow)
+			continue
+		}
+
 		// Store raw HTML if enabled
 		if e.cfg.Crawler.StoreHTML && result.IsHTML() && len(result.Body) > 0 {
 			pageRow.BodyHTML = string(result.Body)
@@ -1141,23 +1209,7 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 
 					if link.IsInternal {
 						internalOut++
-						// Check crawl scope and exclude patterns before adding to frontier
-						if !e.rescanOnly && !e.sitemapOnly && e.isInScope(link.TargetURL) && !e.isExcluded(link.TargetURL) {
-							newDepth := result.Depth + 1
-							if e.cfg.Crawler.MaxDepth == 0 || newDepth <= e.cfg.Crawler.MaxDepth {
-								priority := newDepth
-								// Boost priority for URLs found in sitemaps
-								if e.sitemapURLSet[link.TargetURL] && priority > 1 {
-									priority = 1
-								}
-								e.front.Add(frontier.CrawlURL{
-									URL:      link.TargetURL,
-									Priority: priority,
-									Depth:    newDepth,
-									FoundOn:  result.URL,
-								})
-							}
-						}
+						_ = e.admitDiscoveredURL(link.TargetURL, result.Depth+1, result.URL)
 					} else {
 						externalOut++
 						if e.checkExternal && e.externalCh != nil {
@@ -2015,20 +2067,8 @@ func (e *Engine) renderWorker(id int, in <-chan *renderItem) {
 				// JS-only URLs are followed.
 				for _, link := range renderedData.Links {
 					if link.IsInternal {
-						if e.followJSLinks && e.isInScope(link.TargetURL) {
-							newDepth := item.result.Depth + 1
-							if e.cfg.Crawler.MaxDepth == 0 || newDepth <= e.cfg.Crawler.MaxDepth {
-								priority := newDepth
-								if e.sitemapURLSet[link.TargetURL] && priority > 1 {
-									priority = 1
-								}
-								e.front.Add(frontier.CrawlURL{
-									URL:      link.TargetURL,
-									Priority: priority,
-									Depth:    newDepth,
-									FoundOn:  item.result.URL,
-								})
-							}
+						if e.followJSLinks {
+							_ = e.admitDiscoveredURL(link.TargetURL, item.result.Depth+1, item.result.URL)
 						}
 					} else if e.checkExternal && e.externalCh != nil {
 						if _, loaded := e.externalChecked.LoadOrStore(link.TargetURL, struct{}{}); !loaded {

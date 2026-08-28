@@ -94,6 +94,21 @@
 - **TEST-251-01**: Regression coverage spans ClickHouse visibility, lifecycle ordering, shared counts, JS/non-JS, concurrent evaluation, scheduler/restart, API, and UI.
 - **DEPLOY-251-01**: ProductFeatures and rollout evidence are updated; deployment is app-only, blocked by active crawls, and enforces a process-lifetime single-writer lock so app and migration writers cannot overlap.
 
+### Bounded Changed-Only Daily Delta And Verified Effective Origins
+
+- **DELTA-252-01**: Fresh sitemap planning compares against both the newest complete raw observation and the materialized Current Snapshot sitemap observation; the materialized observation is the authoritative published safety term.
+- **DELTA-252-02**: Only added URLs and strictly forward valid lastmod values are change events, and raw observation alone cannot consume an event that is still pending relative to the published safety term.
+- **DELTA-252-03**: Candidate selection is deterministic and bounded: evidence-backed changed events and explicit problem/manual work precede up to 50 rotating canary fillers; existing changed/new limits and `max_candidates_per_run` remain configurable safety ceilings rather than daily targets, and selected/deferred provenance is durable.
+- **HTTP-252-01**: Conditional-request mode sends retained `ETag` and/or `Last-Modified` validators for selected URLs when current evidence provides them.
+- **HTTP-252-02**: `304 Not Modified` short-circuits body parsing and preserves the current page row and link evidence while retaining auditable request/outcome metadata.
+- **SNAP-252-01**: Only a trusted, complete, non-superseded Current Snapshot publication may advance the authoritative sitemap safety term; capped, deferred, failed, or untrusted Delta work cannot consume pending events.
+- **DISC-252-01**: Discovered URLs use one explicit budget independent of seed/candidate count, including exact zero behavior and concurrency-safe shared admission across static and rendered discovery.
+- **ORIGIN-252-01**: Session list/detail responses expose an `effective_origin` only when durable actual-launch or final-redirect evidence proves it; raw `SeedURLs` remain unchanged audit provenance and ProjectPage displays both.
+- **COMPAT-252-01**: Phase 21/25/25.1 lineage, project authorization, raw observations, raw seeds, and legacy response fields remain compatible.
+- **TEST-252-01**: Automated local coverage includes dual-term retries, selector bounds/rotation, validators and 304 overlay, zero/N discovery races, effective-origin API/UI behavior, and affected full regression suites.
+- **DOC-252-01**: Every implementation slice updates `ProductFeatures.md`; Phase 25.2 performs no live crawl or production data mutation.
+- **DEPLOY-252-01**: After all local gates pass, deploy only the app through the active-crawl-blocking safe restart, never force, and verify app health plus ClickHouse continuity.
+
 ### Deferred Authorization And External API Hardening
 
 - **AUTH-27-01**: Project read-only credentials cannot trigger resource reparse, custom tests, extractions, or interlinking simulation.
@@ -168,6 +183,18 @@
 | UI-251-01 | Phase 25.1 | Done |
 | TEST-251-01 | Phase 25.1 | Done |
 | DEPLOY-251-01 | Phase 25.1 | Done |
+| DELTA-252-01 | Phase 25.2 | Planned |
+| DELTA-252-02 | Phase 25.2 | Planned |
+| DELTA-252-03 | Phase 25.2 | Planned |
+| HTTP-252-01 | Phase 25.2 | Planned |
+| HTTP-252-02 | Phase 25.2 | Planned |
+| SNAP-252-01 | Phase 25.2 | Planned |
+| DISC-252-01 | Phase 25.2 | Planned |
+| ORIGIN-252-01 | Phase 25.2 | Planned |
+| COMPAT-252-01 | Phase 25.2 | Planned |
+| TEST-252-01 | Phase 25.2 | Planned |
+| DOC-252-01 | Phase 25.2 | Planned |
+| DEPLOY-252-01 | Phase 25.2 | Planned |
 | AUTH-27-01 | Phase 27 | Deferred |
 | AUTH-27-02 | Phase 27 | Deferred |
 | AUTH-27-03 | Phase 27 | Deferred |
@@ -183,4 +210,4 @@
 
 ---
 *Requirements defined: 2026-05-29*
-*Last updated: 2026-08-08 after Phase 25.1 production completion*
+*Last updated: 2026-08-28 during Phase 25.2 execution*

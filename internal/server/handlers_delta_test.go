@@ -114,6 +114,7 @@ func TestDeltaCrawlRequestPreservesBaselineSeedURLs(t *testing.T) {
 	result := &deltaCandidateResult{
 		settings: &apikeys.ProjectDeltaSettings{
 			ProjectID:                projectID,
+			UseConditionalRequests:   true,
 			MaxDiscoveryDepth:        1,
 			RespectRobotsTxt:         true,
 			RetryCount:               2,
@@ -150,6 +151,9 @@ func TestDeltaCrawlRequestPreservesBaselineSeedURLs(t *testing.T) {
 	if !reflect.DeepEqual(req.SessionSeedURLs, baselineSeeds) {
 		t.Fatalf("req.SessionSeedURLs = %#v, want %#v", req.SessionSeedURLs, baselineSeeds)
 	}
+	if req.DiscoveryBudget == nil || *req.DiscoveryBudget != 0 {
+		t.Fatalf("req.DiscoveryBudget = %#v, want explicit 0", req.DiscoveryBudget)
+	}
 	if req.CheckPageResources == nil || !*req.CheckPageResources {
 		t.Fatalf("req.CheckPageResources = %#v, want true", req.CheckPageResources)
 	}
@@ -158,6 +162,12 @@ func TestDeltaCrawlRequestPreservesBaselineSeedURLs(t *testing.T) {
 	}
 	if req.DeltaPlan.BaselineSessionID != "baseline-session" {
 		t.Fatalf("DeltaPlan.BaselineSessionID = %q", req.DeltaPlan.BaselineSessionID)
+	}
+	if req.DeltaPlan.ConditionalRequestBaselineSessionID != "baseline-session" || !req.DeltaPlan.UseConditionalRequests {
+		t.Fatalf("conditional DeltaPlan = %#v", req.DeltaPlan)
+	}
+	if result.preview.ConditionalRequestBaselineSessionID != "" || result.preview.UseConditionalRequests {
+		t.Fatal("deltaCrawlRequest must not mutate the preview result")
 	}
 	if req.DeltaPlan.BaselineSourceSessionID != "raw-full-session" ||
 		req.DeltaPlan.BaselineEvaluationRevision != "watermark-evaluation" ||
@@ -171,6 +181,73 @@ func TestDeltaCrawlRequestPreservesBaselineSeedURLs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(req.DeltaPlan.LaunchedURLs, deltaURLs) {
 		t.Fatalf("DeltaPlan.LaunchedURLs = %#v, want %#v", req.DeltaPlan.LaunchedURLs, deltaURLs)
+	}
+}
+
+func TestDeltaCrawlRequestPersistsDisabledConditionalRequests(t *testing.T) {
+	srv := &Server{cfg: &config.Config{}}
+	req, err := srv.deltaCrawlRequest(&deltaCandidateResult{
+		settings: &apikeys.ProjectDeltaSettings{ProjectID: "project-1", UseConditionalRequests: false},
+		baseline: &storage.CrawlSession{ID: "current-snapshot"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.DeltaPlan == nil || req.DeltaPlan.UseConditionalRequests || req.DeltaPlan.ConditionalRequestBaselineSessionID != "current-snapshot" {
+		t.Fatalf("disabled conditional DeltaPlan = %#v", req.DeltaPlan)
+	}
+}
+
+func TestBoundDeltaCandidatesHonorsExplicitZeroAndInputPriority(t *testing.T) {
+	settings := &apikeys.ProjectDeltaSettings{
+		MaxCandidatesPerRun:   0,
+		MaxChangedPagesPerRun: 10,
+		MaxNewPagesPerRun:     10,
+	}
+	got, deferred := boundDeltaCandidates([]string{"https://example.test/event"}, map[string]struct{}{}, settings)
+	if len(got) != 0 || deferred != 1 {
+		t.Fatalf("zero bound = %#v, deferred=%d; want none, 1", got, deferred)
+	}
+
+	settings.MaxCandidatesPerRun = 2
+	candidates := []string{
+		"https://example.test/event",
+		"https://example.test/manual",
+		"https://example.test/canary",
+	}
+	got, deferred = boundDeltaCandidates(candidates, map[string]struct{}{}, settings)
+	if !reflect.DeepEqual(got, candidates[:2]) || deferred != 1 {
+		t.Fatalf("priority bound = %#v, deferred=%d; want %#v, 1", got, deferred, candidates[:2])
+	}
+}
+
+func TestDeltaCrawlRequestPersistsSitemapSelectionLineage(t *testing.T) {
+	srv := &Server{cfg: &config.Config{}}
+	selection := &config.DeltaSitemapSelection{
+		SelectorRevision: "v1", RawObservationSessionID: "raw-session", RawObservedAt: time.Now().UTC(),
+		PublishedSessionID: "materialized-session", PublishedSnapshotRevision: 9,
+		PublishedContentWatermarkSessionID: "watermark-session", SelectionComplete: false,
+		EventTotal: 2, EventSelected: 1, EventDeferred: 1, SourceByURL: map[string]string{
+			"https://example.test/pending": DeltaSitemapSourcePendingUnpublished,
+		},
+	}
+	req, err := srv.deltaCrawlRequest(&deltaCandidateResult{
+		settings:         &apikeys.ProjectDeltaSettings{ProjectID: "project-1"},
+		baseline:         &storage.CrawlSession{ID: "materialized-session"},
+		sitemapSelection: selection,
+	})
+	if err != nil {
+		t.Fatalf("deltaCrawlRequest: %v", err)
+	}
+	if req.DeltaPlan == nil || !reflect.DeepEqual(req.DeltaPlan.SitemapSelection, selection) {
+		t.Fatalf("persisted sitemap selection = %#v, want %#v", req.DeltaPlan, selection)
+	}
+	if req.DeltaPlan.SitemapSelection == selection {
+		t.Fatal("DeltaPlan must own a copy of sitemap selection lineage")
+	}
+	selection.SourceByURL["https://example.test/pending"] = "changed-after-request"
+	if req.DeltaPlan.SitemapSelection.SourceByURL["https://example.test/pending"] == "changed-after-request" {
+		t.Fatal("DeltaPlan must own a copy of sitemap selection source provenance")
 	}
 }
 

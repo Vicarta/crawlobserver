@@ -9,8 +9,10 @@ import (
 	"github.com/spf13/viper"
 )
 
-func TestDeltaSitemapRefreshJSONContract(t *testing.T) {
+func TestDeltaSitemapSelectionConfigJSONContract(t *testing.T) {
 	plan := DeltaPlanConfig{
+		ConditionalRequestBaselineSessionID: "current-snapshot",
+		UseConditionalRequests:              true,
 		SitemapRefresh: &DeltaSitemapRefresh{
 			Mode:                "fresh",
 			FetchedAt:           time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC),
@@ -27,6 +29,21 @@ func TestDeltaSitemapRefreshJSONContract(t *testing.T) {
 				RawLoc:     "https://example.com/path with space",
 			}},
 		},
+		SitemapSelection: &DeltaSitemapSelection{
+			SelectorRevision:                   "v1",
+			RawObservationSessionID:            "raw-delta",
+			RawObservedAt:                      time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC),
+			PublishedSessionID:                 "current-snapshot",
+			PublishedSnapshotRevision:          9,
+			PublishedContentWatermarkSessionID: "watermark-delta",
+			RotationEpoch:                      time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC),
+			EventTotal:                         31,
+			EventSelected:                      30,
+			EventDeferred:                      1,
+			CanarySelected:                     50,
+			SelectionComplete:                  false,
+			SourceByURL:                        map[string]string{"https://example.com/a": "sitemap_pending_unpublished"},
+		},
 	}
 
 	encoded, err := json.Marshal(plan)
@@ -39,6 +56,12 @@ func TestDeltaSitemapRefreshJSONContract(t *testing.T) {
 	}
 	if !reflect.DeepEqual(decoded.SitemapRefresh, plan.SitemapRefresh) {
 		t.Fatalf("SitemapRefresh round trip = %#v, want %#v", decoded.SitemapRefresh, plan.SitemapRefresh)
+	}
+	if !reflect.DeepEqual(decoded.SitemapSelection, plan.SitemapSelection) {
+		t.Fatalf("SitemapSelection round trip = %#v, want %#v", decoded.SitemapSelection, plan.SitemapSelection)
+	}
+	if decoded.ConditionalRequestBaselineSessionID != plan.ConditionalRequestBaselineSessionID || !decoded.UseConditionalRequests {
+		t.Fatalf("conditional plan = %#v", decoded)
 	}
 
 	legacy, err := json.Marshal(DeltaPlanConfig{})
@@ -54,6 +77,9 @@ func TestDeltaSitemapRefreshJSONContract(t *testing.T) {
 	}
 	if legacyDecoded.SitemapRefresh != nil {
 		t.Fatalf("legacy plan SitemapRefresh = %#v, want nil", legacyDecoded.SitemapRefresh)
+	}
+	if legacyDecoded.SitemapSelection != nil {
+		t.Fatalf("legacy plan SitemapSelection = %#v, want nil", legacyDecoded.SitemapSelection)
 	}
 }
 

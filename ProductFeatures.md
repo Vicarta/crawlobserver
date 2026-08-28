@@ -1,6 +1,6 @@
 # CrawlObserver: каталог функціональності
 
-Актуальність: 2026-08-18.
+Актуальність: 2026-08-28.
 
 Цей файл є канонічним каталогом фактично реалізованої функціональності
 CrawlObserver. Він описує можливості продукту на рівні користувацьких сценаріїв,
@@ -101,6 +101,13 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
 - Terminal session status публікується після recompute depth, Internal PageRank
   і near-duplicate analytics, щоб downstream quality gates читали завершені
   derived metrics.
+- Session list/detail API додає response-only `effective_origin` та
+  `effective_origin_state`: `proven` походить лише з durable launched-request
+  і final-response evidence для кожного фактично запущеного URL, а
+  `unavailable`/`ambiguous` ніколи не виводять origin із raw seed, canonical,
+  sitemap, DNS або config. Exact raw `SeedURLs` залишаються незмінною audit
+  provenance; Project Sessions показує proven operational origin і окремо
+  підписаний raw seed.
 
 ## 4. Налаштування crawl
 
@@ -138,6 +145,10 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
 - robots.txt discovery, persistence та URL access testing.
 - Sitemap index/urlset discovery, recursive traversal і raw `<loc>` evidence.
 - Page depth та `found_on` calculation із подальшим graph recomputation.
+- Daily Delta має незалежний exact discovery budget: planned candidates не
+  витрачають його; лише успішне унікальне додавання static або rendered URL до
+  frontier витрачає одну одиницю. Значення `0` вимикає link discovery, тоді як
+  seeds і retries продовжують запускатися.
 - Контрольована зупинка при crawl cancellation, process shutdown або критичних
   storage failures.
 - Exposed progress, audit data, retry counters і recent status timeline.
@@ -439,19 +450,38 @@ shared rendered metadata shell diagnostics без site-specific правил.
   depth і runtime.
 - Follow internal links із new/changed pages у межах configured limits.
 - Rate limit, retries, backoff і JS rendering для Delta.
-- robots compliance, conditional requests і GET fallback після failed HEAD.
+- robots compliance, conditional GET requests з exact retained `ETag` і
+  `Last-Modified` validators. Якщо server
+  відповідає `304 Not Modified`, Delta зберігає raw response evidence без
+  parsing/rendering/resource/extraction/link-discovery work.
 - URL policy: canonical host, trailing slash, fragments, tracking/query params,
   allowed params та allow/block patterns.
 - Confirmation policies для scope change і full recrawl.
 - Пауза Delta, коли full crawl активний.
 - Previous snapshot не видаляється до успішного завершення нового run.
 - Candidate plan і sitemap provenance зберігаються для audit та quality gates.
+- Changed-only sitemap selection compares fresh evidence with the published
+  Current Snapshot safety term: only added URLs and strictly forward valid W3C
+  `lastmod` values become events; raw unpublished observations only label retry
+  provenance and cannot consume a pending event.
+- Sitemap selection prioritizes evidence-backed changed events, then up to 50
+  deterministic rotating canaries; the existing changed/new limits and
+  `max_candidates_per_run` remain configurable safety ceilings rather than
+  daily targets. Event/canary/deferred
+  counts, rotation epoch, selector revision, published/raw observation lineage,
+  selection completeness, and per-URL source remain durable Delta plan audit
+  evidence; legacy plans explicitly retain absent selection provenance. Existing
+  project maximums remain unchanged. Canaries fill remaining capacity
+  after changed, manual, and problem candidates instead of displacing them;
+  changed-event, canary, and global candidate limits are editable in Daily Delta.
 
 ## 19. Current Snapshot
 
 - Materialized full-site snapshot на рівні проєкту.
 - Trusted full crawl стає baseline.
-- Trusted Daily Delta updates fold у current state.
+- Trusted Daily Delta updates fold у current state; raw Delta `304 Not Modified`
+  rows лишаються audit/coverage evidence, але не overlay-ять materialized page
+  або source-link evidence Current Snapshot.
 - Failed/untrusted Delta не публікується.
 - Raw crawl sessions залишаються audit artifacts.
 - Configurable maximum retained deltas і baseline fold interval.
@@ -499,6 +529,12 @@ shared rendered metadata shell diagnostics без site-specific правил.
   evaluator/rules, current quality revision, newest PageRank evidence і lineage
   quality-baseline сесії.
 - Sitemap membership оновлюється лише після trusted fresh promotion.
+- Перед будь-якою Current Snapshot mutation Delta promotion повторно звіряє
+  selector revision, complete fresh observation та exact published
+  `current_session_id`/snapshot revision/content watermark із plan. Stale або
+  mixed lineage повертається як superseded без overlay; trusted incomplete
+  selection може оновити selected pages, але залишає published sitemap term
+  byte-equivalent, тож deferred events залишаються pending для наступного plan.
 - Safe orphan 404 cleanup видаляє лише stale 404 із current snapshot, якщо немає
   internal inlinks і sitemap membership; raw sessions не видаляються.
 

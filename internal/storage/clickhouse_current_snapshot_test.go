@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/SEObserver/crawlobserver/internal/config"
 )
 
 func TestCompareSnapshotSourceUsesSessionIDForEqualStartedAt(t *testing.T) {
@@ -14,6 +16,33 @@ func TestCompareSnapshotSourceUsesSessionIDForEqualStartedAt(t *testing.T) {
 	}
 	if got := compareSnapshotSource(at, "ffffffff-ffff-4fff-8fff-ffffffffffff", at, "00000000-0000-4000-8000-000000000001"); got <= 0 {
 		t.Fatalf("newer equal-timestamp ID compare = %d, want > 0", got)
+	}
+}
+
+func TestDeltaSitemapPublicationBindingRequiresExactCompleteSelection(t *testing.T) {
+	snap := &ProjectCurrentSnapshot{CurrentSessionID: "current", SnapshotRevision: 12, ContentWatermarkSessionID: "watermark"}
+	plan := &config.DeltaPlanConfig{
+		SitemapRefresh: &config.DeltaSitemapRefresh{Mode: "fresh", FetchedAt: time.Now().UTC()},
+		SitemapSelection: &config.DeltaSitemapSelection{
+			SelectorRevision: "v1", RawObservationSessionID: "raw", RawObservedAt: time.Now().UTC(),
+			PublishedSessionID: "current", PublishedSnapshotRevision: 12, PublishedContentWatermarkSessionID: "watermark",
+			SelectionComplete: true,
+		},
+	}
+	publish, err := deltaSitemapPublicationBindingMatches(plan, snap)
+	if err != nil || !publish {
+		t.Fatalf("exact complete binding publish=%t err=%v", publish, err)
+	}
+	plan.SitemapSelection.SelectionComplete = false
+	publish, err = deltaSitemapPublicationBindingMatches(plan, snap)
+	if err != nil || publish {
+		t.Fatalf("incomplete selection publish=%t err=%v, want held publication", publish, err)
+	}
+	plan.SitemapSelection.SelectionComplete = true
+	plan.SitemapSelection.PublishedSnapshotRevision++
+	_, err = deltaSitemapPublicationBindingMatches(plan, snap)
+	if !errors.Is(err, ErrCurrentSnapshotSourceSuperseded) {
+		t.Fatalf("stale published binding err=%v, want superseded", err)
 	}
 }
 

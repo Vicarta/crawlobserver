@@ -367,6 +367,64 @@ Plans:
 - [x] 25.1-02: Fail-closed lifecycle, versioned quality, promotion, and API
 - [x] 25.1-03: Provenance UI, regression closure, and safe production rollout
 
+### Phase 25.2: Bounded changed-only Daily Delta and verified effective origins (INSERTED)
+
+**Goal:** Make Daily Delta select a bounded, retry-safe changed set, issue real
+conditional requests, enforce an exact discovery budget, preserve Current
+Snapshot evidence on `304`, and report only response-proven effective origins
+without rewriting raw seeds.
+
+**Requirements**:
+- **DELTA-252-01:** Compare every fresh sitemap observation with both the newest
+  complete raw observation and the materialized Current Snapshot sitemap
+  observation; the published materialized observation is the authoritative
+  safety term for pending change eligibility.
+- **DELTA-252-02:** Treat only newly added URLs and strictly forward valid
+  `lastmod` values as changed events. A capped, deferred, failed, or untrusted
+  Delta cannot consume an event merely because a newer raw observation saw it.
+- **DELTA-252-03:** Select evidence-backed changed events and explicit
+  problem/manual work before up to 50 deterministic rotating canary fillers;
+  retain the existing changed/new limits and `max_candidates_per_run` as
+  configurable safety ceilings rather than daily targets, and persist
+  selection/deferral provenance.
+- **HTTP-252-01:** When conditional requests are enabled, send retained `ETag`
+  and/or `Last-Modified` validators from current evidence for each selected URL.
+- **HTTP-252-02:** Treat `304 Not Modified` as a successful no-body outcome and
+  preserve current page and link evidence instead of publishing an empty row or
+  deleting graph edges.
+- **SNAP-252-01:** Advance the authoritative published sitemap observation only
+  through the existing trusted, complete, non-superseded Current Snapshot
+  publication path; incomplete selection cannot consume deferred events.
+- **DISC-252-01:** Enforce one explicit discovered-URL budget, independent of
+  seed/candidate count, including exact zero behavior and concurrency-safe
+  shared admission across static and rendered discovery.
+- **ORIGIN-252-01:** Add response-only `effective_origin` to session list/detail
+  from durable launched/final-redirect evidence, while retaining raw `SeedURLs`
+  as audit provenance and displaying both on ProjectPage.
+- **COMPAT-252-01:** Preserve Phase 21/25/25.1 lineage, authorization, raw
+  observations, existing project seeds, and legacy response fields.
+- **TEST-252-01:** Cover selector boundaries and retries, validators/304 overlay,
+  zero/N discovery under races, effective-origin authorization/serialization,
+  frontend display, and the full local regression matrix.
+- **DOC-252-01:** Update `ProductFeatures.md` in each implementation slice; this
+  urgent phase performs no live crawl or production data mutation.
+- **DEPLOY-252-01:** After all local gates pass, build and restart only the app
+  through the active-crawl-blocking safe gate, never force, then verify app
+  health, ClickHouse continuity, logs, and read-only API/UI behavior.
+
+**Covers:** DELTA-252-01, DELTA-252-02, DELTA-252-03, HTTP-252-01,
+HTTP-252-02, SNAP-252-01, DISC-252-01, ORIGIN-252-01, COMPAT-252-01,
+TEST-252-01, DOC-252-01, DEPLOY-252-01
+**Depends on:** Phase 21, Phase 25, Phase 25.1
+**Plans:** 5 plans
+
+Plans:
+- [x] 25.2-01: Bounded changed-event selector and rotating canary foundation
+- [x] 25.2-02: Dual observation terms and publication-safe Delta wiring
+- [x] 25.2-03: Conditional GET execution and evidence-preserving `304` overlay
+- [x] 25.2-04: Exact shared static/rendered discovered-URL budget
+- [ ] 25.2-05: Proven effective-origin response/UI, aggregate gates, and safe production rollout
+
 ### Phase 26: Trustworthy sitemap availability and lastmod validation
 
 **Goal:** Make sitemap-versus-crawl reporting distinguish observed missing URLs
@@ -413,7 +471,7 @@ overstating partial or legacy data.
 **Covers:** SITEMAP-26-01, SITEMAP-26-02, AVAIL-26-01, AVAIL-26-02,
 DATE-26-01, DATE-26-02, API-26-01, UI-26-01, COMPAT-26-01, TEST-26-01,
 DEPLOY-26-01
-**Depends on:** Phase 21, Phase 24, Phase 25
+**Depends on:** Phase 21, Phase 24, Phase 25.2
 **Plans:** 10 plans
 
 Plans:
@@ -456,7 +514,7 @@ Plans:
   compatibility and contract tests.
 
 ---
-*Last updated: 2026-08-08 after Phase 25.1 production completion*
+*Last updated: 2026-08-26 after Phase 25.2 planning*
 
 ## Phase 13: PageRank Lab access, recalc, and page pruning
 

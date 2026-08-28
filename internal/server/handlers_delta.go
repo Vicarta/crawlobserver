@@ -21,15 +21,23 @@ import (
 )
 
 type deltaPreview struct {
-	ProjectID         string                      `json:"project_id"`
-	BaselineSessionID string                      `json:"baseline_session_id"`
-	TotalCandidates   int                         `json:"total_candidates"`
-	LaunchLimit       int                         `json:"launch_limit"`
-	WillLaunch        int                         `json:"will_launch"`
-	Deferred          int                         `json:"deferred"`
-	BySource          map[string]int              `json:"by_source"`
-	SampleURLs        []string                    `json:"sample_urls"`
-	SitemapRefresh    *config.DeltaSitemapRefresh `json:"sitemap_refresh,omitempty"`
+	ProjectID                           string                        `json:"project_id"`
+	BaselineSessionID                   string                        `json:"baseline_session_id"`
+	ConditionalRequestBaselineSessionID string                        `json:"conditional_request_baseline_session_id"`
+	UseConditionalRequests              bool                          `json:"use_conditional_requests"`
+	TotalCandidates                     int                           `json:"total_candidates"`
+	LaunchLimit                         int                           `json:"launch_limit"`
+	WillLaunch                          int                           `json:"will_launch"`
+	Deferred                            int                           `json:"deferred"`
+	BySource                            map[string]int                `json:"by_source"`
+	SampleURLs                          []string                      `json:"sample_urls"`
+	SitemapRefresh                      *config.DeltaSitemapRefresh   `json:"sitemap_refresh,omitempty"`
+	SitemapSelection                    *config.DeltaSitemapSelection `json:"sitemap_selection,omitempty"`
+	SitemapEvents                       int                           `json:"sitemap_events"`
+	SitemapPending                      int                           `json:"sitemap_pending_unpublished"`
+	SitemapCanaries                     int                           `json:"sitemap_canaries"`
+	SitemapDeferred                     int                           `json:"sitemap_deferred"`
+	HeldPublicationReason               string                        `json:"held_publication_reason,omitempty"`
 }
 
 type deltaCandidateResult struct {
@@ -47,6 +55,8 @@ type deltaCandidateResult struct {
 	sitemapRows              []storage.SitemapRow
 	sitemapURLRows           []storage.SitemapURLRow
 	sitemapRefresh           *config.DeltaSitemapRefresh
+	sitemapSelection         *config.DeltaSitemapSelection
+	heldPublicationReason    string
 	preview                  deltaPreview
 }
 
@@ -600,7 +610,14 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 	var sitemapRows []storage.SitemapRow
 	var sitemapURLRows []storage.SitemapURLRow
 	var sitemapRefresh *config.DeltaSitemapRefresh
+	var sitemapSelection *config.DeltaSitemapSelection
+	var sitemapCanaryURLs []string
+	heldPublicationReason := ""
 	if settings.SourceSitemap {
+		terms, termsErr := s.store.LoadDeltaSitemapTerms(ctx, projectID, lineage.CurrentSessionID, lineage.SourceSessionID, deltaSitemapComparisonLimit)
+		if termsErr != nil {
+			return nil, fmt.Errorf("loading delta sitemap safety terms: %w", termsErr)
+		}
 		refreshed, refreshErr := s.refreshDeltaSitemap(ctx, baseline, settings, perSourceLimit)
 		if refreshErr != nil {
 			return nil, refreshErr
@@ -610,38 +627,36 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 		sitemapURLRows = refreshed.SitemapURLRows
 		switch sitemapRefresh.Mode {
 		case deltaSitemapRefreshFresh:
-			addSource("sitemap_fresh", refreshed.Candidates)
-			delete(bySource, "sitemap_fresh")
-			// Keep this aggregate key for existing quality/dashboard consumers. The
-			// candidate provenance itself remains sitemap_fresh.
-			bySource["sitemap"] = len(refreshed.Candidates)
+			selection := SelectDeltaSitemapCandidates(DeltaSitemapSelectionInput{
+				ProjectID:                 projectID,
+				PublishedSnapshotRevision: lineage.SnapshotRevision,
+				RotationEpoch:             deltaSitemapRotationEpoch(sitemapRefresh.FetchedAt),
+				Fresh:                     deltaSitemapSelectionURLs(refreshed.SitemapURLRows, settings),
+				Raw:                       deltaSitemapSelectionURLsFromObservation(terms.Raw, settings),
+				Published:                 deltaSitemapSelectionURLsFromObservation(terms.Published, settings),
+				ChangedLimit:              settings.SitemapChangedLimit,
+				CanaryCount:               settings.SitemapCanaryCount,
+				MaxCandidates:             settings.MaxCandidatesPerRun,
+			})
+			sitemapSelection = deltaSitemapSelectionConfig(selection, terms, lineage, sitemapRefresh.FetchedAt)
+			selected := make([]string, 0, len(selection.Selected))
+			for _, candidate := range selection.Selected {
+				selected = append(selected, candidate.URL)
+				if candidate.Source == DeltaSitemapSourceCanary {
+					sitemapCanaryURLs = append(sitemapCanaryURLs, candidate.URL)
+					continue
+				}
+				addSource(candidate.Source, []string{candidate.URL})
+			}
+			bySource["sitemap"] = len(selected)
+			if !selection.SelectionComplete {
+				heldPublicationReason = fmt.Sprintf("Sitemap publication held: %d changed event candidates are deferred.", selection.EventDeferred)
+			}
 		case deltaSitemapRefreshSnapshotFallback:
-			addSource("sitemap_snapshot_fallback", refreshed.Candidates)
-			delete(bySource, "sitemap_snapshot_fallback")
-			bySource["sitemap"] = len(refreshed.Candidates)
+			heldPublicationReason = "Sitemap publication held: the sitemap refresh used the snapshot fallback."
+		case deltaSitemapRefreshSkipped:
+			heldPublicationReason = "Sitemap publication held: the sitemap refresh was not complete."
 		}
-	}
-	if settings.SourceGSC {
-		urls, err := s.store.DeltaGSCCandidateURLs(ctx, projectID, perSourceLimit)
-		if err != nil {
-			return nil, err
-		}
-		addSource("gsc", urls)
-	}
-	if settings.SourceProblemPages {
-		urls, err := s.store.DeltaProblemPageURLs(ctx, baseline.ID, settings.MaxChangedPagesPerRun)
-		if err != nil {
-			return nil, err
-		}
-		addSource("problem_pages", urls)
-	}
-	if settings.SourceStalePages {
-		staleBefore := time.Now().UTC().AddDate(0, 0, -settings.StaleAfterDays)
-		urls, err := s.store.DeltaStalePageURLs(ctx, baseline.ID, staleBefore, settings.MaxChangedPagesPerRun)
-		if err != nil {
-			return nil, err
-		}
-		addSource("stale_pages", urls)
 	}
 	if settings.SourceManualQueue {
 		urls, err := s.keyStore.ListProjectDeltaManualURLs(projectID, perSourceLimit)
@@ -651,6 +666,31 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 		manualRaw = append(manualRaw, urls...)
 		addSource("manual_queue", urls)
 	}
+	if settings.SourceProblemPages {
+		urls, err := s.store.DeltaProblemPageURLs(ctx, baseline.ID, settings.MaxChangedPagesPerRun)
+		if err != nil {
+			return nil, err
+		}
+		addSource("problem_pages", urls)
+	}
+	if settings.SourceGSC {
+		urls, err := s.store.DeltaGSCCandidateURLs(ctx, projectID, perSourceLimit)
+		if err != nil {
+			return nil, err
+		}
+		addSource("gsc", urls)
+	}
+	if settings.SourceStalePages {
+		staleBefore := time.Now().UTC().AddDate(0, 0, -settings.StaleAfterDays)
+		urls, err := s.store.DeltaStalePageURLs(ctx, baseline.ID, staleBefore, settings.MaxChangedPagesPerRun)
+		if err != nil {
+			return nil, err
+		}
+		addSource("stale_pages", urls)
+	}
+	if len(sitemapCanaryURLs) > 0 {
+		addSource(DeltaSitemapSourceCanary, sitemapCanaryURLs)
+	}
 
 	scope := baselineCrawlScope(baseline)
 	filteredAll := filterDeltaURLs(candidates, baseline.SeedURLs, scope, settings)
@@ -659,6 +699,42 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 		return nil, err
 	}
 	filtered, deferred := boundDeltaCandidates(filteredAll, knownSet, settings)
+	if sitemapSelection != nil {
+		launchedSet := make(map[string]struct{}, len(filtered))
+		for _, candidate := range filtered {
+			launchedSet[candidate] = struct{}{}
+		}
+		unlaunchedEvents := 0
+		launchedCanaries := 0
+		for url, source := range sitemapSelection.SourceByURL {
+			if source == DeltaSitemapSourceCanary {
+				if _, launched := launchedSet[url]; launched {
+					launchedCanaries++
+				} else {
+					delete(sitemapSelection.SourceByURL, url)
+				}
+				continue
+			}
+			if _, selected := sourceSets[url][source]; !selected {
+				continue
+			}
+			if _, launched := launchedSet[url]; !launched && (source == DeltaSitemapSourceAdded || source == DeltaSitemapSourceLastModForward || source == DeltaSitemapSourcePendingUnpublished) {
+				unlaunchedEvents++
+			}
+		}
+		sitemapSelection.CanarySelected = launchedCanaries
+		if unlaunchedEvents > 0 {
+			sitemapSelection.EventSelected -= unlaunchedEvents
+			if sitemapSelection.EventSelected < 0 {
+				sitemapSelection.EventSelected = 0
+			}
+			sitemapSelection.EventDeferred += unlaunchedEvents
+			sitemapSelection.SelectionComplete = false
+		}
+		if !sitemapSelection.SelectionComplete {
+			heldPublicationReason = fmt.Sprintf("Sitemap publication held: %d changed event candidates are deferred.", sitemapSelection.EventDeferred)
+		}
+	}
 	candidateSources := deltaCandidateSourcesForLaunched(filtered, sourceSets)
 	manual := launchedManualURLs(manualRaw, filtered, settings)
 	launchLimit := len(filtered) + settings.MaxDiscoveredPagesPerRun
@@ -678,15 +754,25 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 		sample = sample[:20]
 	}
 	preview := deltaPreview{
-		ProjectID:         projectID,
-		BaselineSessionID: baseline.ID,
-		TotalCandidates:   len(filteredAll),
-		LaunchLimit:       launchLimit,
-		WillLaunch:        len(filtered),
-		Deferred:          deferred,
-		BySource:          bySource,
-		SampleURLs:        sample,
-		SitemapRefresh:    cloneDeltaSitemapRefresh(sitemapRefresh),
+		ProjectID:                           projectID,
+		BaselineSessionID:                   baseline.ID,
+		ConditionalRequestBaselineSessionID: baseline.ID,
+		UseConditionalRequests:              settings.UseConditionalRequests,
+		TotalCandidates:                     len(filteredAll),
+		LaunchLimit:                         launchLimit,
+		WillLaunch:                          len(filtered),
+		Deferred:                            deferred,
+		BySource:                            bySource,
+		SampleURLs:                          sample,
+		SitemapRefresh:                      cloneDeltaSitemapRefresh(sitemapRefresh),
+		SitemapSelection:                    cloneDeltaSitemapSelection(sitemapSelection),
+		HeldPublicationReason:               heldPublicationReason,
+	}
+	if sitemapSelection != nil {
+		preview.SitemapEvents = sitemapSelection.EventSelected
+		preview.SitemapPending = sitemapSelectionPendingCount(sitemapSelection)
+		preview.SitemapCanaries = sitemapSelection.CanarySelected
+		preview.SitemapDeferred = sitemapSelection.EventDeferred
 	}
 	return &deltaCandidateResult{
 		settings:                 settings,
@@ -703,6 +789,8 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 		sitemapRows:              sitemapRows,
 		sitemapURLRows:           sitemapURLRows,
 		sitemapRefresh:           cloneDeltaSitemapRefresh(sitemapRefresh),
+		sitemapSelection:         cloneDeltaSitemapSelection(sitemapSelection),
+		heldPublicationReason:    heldPublicationReason,
 		preview:                  preview,
 	}, nil
 }
@@ -813,10 +901,12 @@ func (s *Server) deltaCrawlRequest(result *deltaCandidateResult) (crawler.CrawlR
 	checkExternal := false
 	checkResources := cfg.Crawler.CheckPageResources == nil || *cfg.Crawler.CheckPageResources
 	retries := result.settings.RetryCount
+	discoveryBudget := result.settings.MaxDiscoveredPagesPerRun
 	req := crawler.CrawlRequest{
 		Seeds:               result.urls,
 		SessionSeedURLs:     append([]string(nil), result.baseline.SeedURLs...),
 		MaxPages:            maxPages,
+		DiscoveryBudget:     &discoveryBudget,
 		MaxDepth:            result.settings.MaxDiscoveryDepth,
 		Workers:             cfg.Crawler.Workers,
 		Delay:               delay.String(),
@@ -843,21 +933,24 @@ func (s *Server) deltaCrawlRequest(result *deltaCandidateResult) (crawler.CrawlR
 		Label:               "Daily Delta Crawl",
 		DeltaPlannedPages:   len(result.urls),
 		DeltaPlan: &config.DeltaPlanConfig{
-			BaselineSessionID:                 result.baseline.ID,
-			BaselineSourceSessionID:           result.baselineSourceID,
-			BaselineEvaluationRevision:        result.baselineEvaluation,
-			BaselineSourceEvaluationRevision:  result.baselineSourceEvaluation,
-			BaselineSnapshotRevision:          result.baselineSnapshotRev,
-			BaselineContentWatermarkSessionID: result.baselineWatermarkID,
-			TotalCandidates:                   result.preview.TotalCandidates,
-			LaunchedCandidates:                len(result.urls),
-			DeferredCandidates:                result.preview.Deferred,
-			LaunchLimit:                       result.preview.LaunchLimit,
-			SourceCounts:                      copyStringIntMap(result.preview.BySource),
-			BaselineSitemapURLCount:           result.baselineSitemapCount,
-			LaunchedURLs:                      append([]string(nil), result.urls...),
-			CandidateSources:                  copyStringSliceMap(result.candidateSources),
-			SitemapRefresh:                    cloneDeltaSitemapRefresh(result.sitemapRefresh),
+			BaselineSessionID:                   result.baseline.ID,
+			ConditionalRequestBaselineSessionID: result.baseline.ID,
+			UseConditionalRequests:              result.settings.UseConditionalRequests,
+			BaselineSourceSessionID:             result.baselineSourceID,
+			BaselineEvaluationRevision:          result.baselineEvaluation,
+			BaselineSourceEvaluationRevision:    result.baselineSourceEvaluation,
+			BaselineSnapshotRevision:            result.baselineSnapshotRev,
+			BaselineContentWatermarkSessionID:   result.baselineWatermarkID,
+			TotalCandidates:                     result.preview.TotalCandidates,
+			LaunchedCandidates:                  len(result.urls),
+			DeferredCandidates:                  result.preview.Deferred,
+			LaunchLimit:                         result.preview.LaunchLimit,
+			SourceCounts:                        copyStringIntMap(result.preview.BySource),
+			BaselineSitemapURLCount:             result.baselineSitemapCount,
+			LaunchedURLs:                        append([]string(nil), result.urls...),
+			CandidateSources:                    copyStringSliceMap(result.candidateSources),
+			SitemapRefresh:                      cloneDeltaSitemapRefresh(result.sitemapRefresh),
+			SitemapSelection:                    cloneDeltaSitemapSelection(result.sitemapSelection),
 		},
 		InitialSitemaps:              copySitemapRows(result.sitemapRows),
 		InitialSitemapURLs:           copySitemapURLRows(result.sitemapURLRows),
@@ -917,7 +1010,7 @@ func orderedDeltaCandidateSources(set map[string]struct{}) []string {
 	if len(set) == 0 {
 		return nil
 	}
-	order := []string{"manual_queue", "sitemap_fresh", "sitemap_snapshot_fallback", "sitemap", "problem_pages", "stale_pages", "gsc", "discovered"}
+	order := []string{"manual_queue", DeltaSitemapSourceAdded, DeltaSitemapSourceLastModForward, DeltaSitemapSourcePendingUnpublished, DeltaSitemapSourceCanary, "sitemap_fresh", "sitemap_snapshot_fallback", "sitemap", "problem_pages", "stale_pages", "gsc", "discovered"}
 	out := make([]string, 0, len(set))
 	for _, source := range order {
 		if _, ok := set[source]; ok {
@@ -959,7 +1052,7 @@ func (s *Server) deltaKnownURLSet(ctx context.Context, sessionID string, setting
 func boundDeltaCandidates(candidates []string, known map[string]struct{}, settings *apikeys.ProjectDeltaSettings) ([]string, int) {
 	changedLimit := max(0, settings.MaxChangedPagesPerRun)
 	newLimit := max(0, settings.MaxNewPagesPerRun)
-	totalLimit := max(1, settings.MaxCandidatesPerRun)
+	totalLimit := max(0, settings.MaxCandidatesPerRun)
 	changedCount := 0
 	newCount := 0
 	deferred := 0

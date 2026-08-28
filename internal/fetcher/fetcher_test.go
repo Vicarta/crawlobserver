@@ -1,6 +1,7 @@
 package fetcher
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,74 @@ import (
 	"testing"
 	"time"
 )
+
+func TestFetchWithContextValidators(t *testing.T) {
+	tests := []struct {
+		name       string
+		validators RequestValidators
+		status     int
+		wantETag   string
+		wantMod    string
+	}{
+		{name: "etag only", validators: RequestValidators{ETag: `W/"current"`}, status: http.StatusNotModified, wantETag: `W/"current"`},
+		{name: "last modified only", validators: RequestValidators{LastModified: "Wed, 21 Oct 2015 07:28:00 GMT"}, status: http.StatusNotModified, wantMod: "Wed, 21 Oct 2015 07:28:00 GMT"},
+		{name: "both exact", validators: RequestValidators{ETag: `"strong"`, LastModified: "Tue, 20 Oct 2015 07:28:00 GMT"}, status: http.StatusNotModified, wantETag: `"strong"`, wantMod: "Tue, 20 Oct 2015 07:28:00 GMT"},
+		{name: "no validators stays unconditional", status: http.StatusOK},
+		{name: "server may return 200", validators: RequestValidators{ETag: `"old"`}, status: http.StatusOK, wantETag: `"old"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("If-None-Match"); got != tt.wantETag {
+					t.Errorf("If-None-Match = %q, want %q", got, tt.wantETag)
+				}
+				if got := r.Header.Get("If-Modified-Since"); got != tt.wantMod {
+					t.Errorf("If-Modified-Since = %q, want %q", got, tt.wantMod)
+				}
+				w.Header().Set("ETag", `"response"`)
+				w.WriteHeader(tt.status)
+				if tt.status == http.StatusOK {
+					_, _ = w.Write([]byte("<html><body>updated</body></html>"))
+				}
+			}))
+			defer server.Close()
+
+			f := New("TestBot/1.0", time.Second, 1024, DialOptions{AllowPrivateIPs: true}, "")
+			got := f.FetchWithContextValidators(context.Background(), server.URL, 2, "https://example.test/source", tt.validators)
+			if got.StatusCode != tt.status || got.NotModified != (tt.status == http.StatusNotModified) {
+				t.Fatalf("result status/notModified = %d/%t", got.StatusCode, got.NotModified)
+			}
+		})
+	}
+}
+
+func TestFetchWithContextValidatorsSurviveRedirectAndCancellation(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, server.URL+"/final", http.StatusFound)
+			return
+		}
+		if got := r.Header.Get("If-None-Match"); got != `W/"retained"` {
+			t.Errorf("redirected validator = %q", got)
+		}
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer server.Close()
+
+	f := New("TestBot/1.0", time.Second, 1024, DialOptions{AllowPrivateIPs: true}, "")
+	got := f.FetchWithContextValidators(context.Background(), server.URL+"/start", 0, "", RequestValidators{ETag: `W/"retained"`})
+	if got.StatusCode != http.StatusNotModified || len(got.RedirectChain) != 1 {
+		t.Fatalf("redirected result = %#v", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got = f.FetchWithContextValidators(ctx, server.URL, 0, "", RequestValidators{ETag: `"cancel"`})
+	if got.Error == "" {
+		t.Fatal("cancelled request unexpectedly succeeded")
+	}
+}
 
 func TestFetchBasic(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

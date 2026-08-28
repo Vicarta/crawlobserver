@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/SEObserver/crawlobserver/internal/applog"
 	"github.com/SEObserver/crawlobserver/internal/config"
+	"github.com/SEObserver/crawlobserver/internal/normalizer"
 )
 
 // InsertSession inserts or updates a crawl session.
@@ -25,6 +28,194 @@ func (s *Store) InsertSession(ctx context.Context, session *CrawlSession) error 
 }
 
 const nonSyntheticSessionFilter = `(label NOT IN ('Current Snapshot', 'Current Baseline Snapshot'))`
+
+const effectiveOriginSessionBatchSize = 50
+
+// EffectiveOriginsForSessions derives response-only origins for a batch of
+// sessions. The launched URL set comes from raw seeds for full crawls and from
+// the immutable DeltaPlan for Delta crawls. Page evidence is read once for the
+// whole batch so session list responses never introduce an N+1 query.
+func (s *Store) EffectiveOriginsForSessions(ctx context.Context, sessions []CrawlSession) (map[string]EffectiveOrigin, error) {
+	result := make(map[string]EffectiveOrigin, len(sessions))
+	if len(sessions) > effectiveOriginSessionBatchSize {
+		for start := 0; start < len(sessions); start += effectiveOriginSessionBatchSize {
+			end := min(start+effectiveOriginSessionBatchSize, len(sessions))
+			batch, err := s.EffectiveOriginsForSessions(ctx, sessions[start:end])
+			if err != nil {
+				return nil, err
+			}
+			for sessionID, origin := range batch {
+				result[sessionID] = origin
+			}
+		}
+		return result, nil
+	}
+	launchedBySession := make(map[string]map[string]struct{}, len(sessions))
+	allSessionIDs := make([]string, 0, len(sessions))
+	allURLs := make([]string, 0)
+	seenSessionIDs := make(map[string]struct{}, len(sessions))
+	seenURLs := make(map[string]struct{})
+
+	for _, sess := range sessions {
+		result[sess.ID] = EffectiveOrigin{State: EffectiveOriginUnavailable}
+		if _, seen := seenSessionIDs[sess.ID]; !seen {
+			seenSessionIDs[sess.ID] = struct{}{}
+			allSessionIDs = append(allSessionIDs, sess.ID)
+		}
+
+		launchedURLs, isDelta := launchedURLsForOrigin(sess)
+		if isDelta && launchedURLs == nil {
+			continue
+		}
+		set := normalizedLaunchedURLSet(launchedURLs)
+		for _, launchedURL := range launchedURLs {
+			launchedURL, err := normalizer.Normalize(launchedURL)
+			if err != nil || launchedURL == "" {
+				continue
+			}
+			if _, seen := seenURLs[launchedURL]; !seen {
+				seenURLs[launchedURL] = struct{}{}
+				allURLs = append(allURLs, launchedURL)
+			}
+		}
+		launchedBySession[sess.ID] = set
+	}
+	if len(allSessionIDs) == 0 || len(allURLs) == 0 {
+		return result, nil
+	}
+
+	args := make([]interface{}, 0, len(allSessionIDs)+len(allURLs))
+	args = appendStringPlaceholders(args, allSessionIDs)
+	args = appendStringPlaceholders(args, allURLs)
+	query := fmt.Sprintf(`
+		SELECT toString(crawl_session_id), url, final_url, status_code, error
+		FROM crawlobserver.pages FINAL
+		WHERE toString(crawl_session_id) IN (%s) AND url IN (%s)`,
+		sessionPlaceholders(len(allSessionIDs)), sessionPlaceholders(len(allURLs)))
+	rows, err := s.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying session origin evidence: %w", err)
+	}
+	defer rows.Close()
+
+	provedOriginsBySession := make(map[string]map[string]map[string]struct{}, len(allSessionIDs))
+	for rows.Next() {
+		var sessionID, requestedURL, finalURL, fetchError string
+		var statusCode uint16
+		if err := rows.Scan(&sessionID, &requestedURL, &finalURL, &statusCode, &fetchError); err != nil {
+			return nil, fmt.Errorf("scanning session origin evidence: %w", err)
+		}
+		if statusCode == 0 || strings.TrimSpace(fetchError) != "" {
+			continue
+		}
+		if _, ok := launchedBySession[sessionID][requestedURL]; !ok {
+			continue
+		}
+		responseURL := finalURL
+		if responseURL == "" {
+			responseURL = requestedURL
+		}
+		origin, ok := normalizeEffectiveOrigin(responseURL)
+		if !ok {
+			continue
+		}
+		if provedOriginsBySession[sessionID] == nil {
+			provedOriginsBySession[sessionID] = make(map[string]map[string]struct{})
+		}
+		if provedOriginsBySession[sessionID][requestedURL] == nil {
+			provedOriginsBySession[sessionID][requestedURL] = make(map[string]struct{})
+		}
+		provedOriginsBySession[sessionID][requestedURL][origin] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating session origin evidence: %w", err)
+	}
+
+	for sessionID, launched := range launchedBySession {
+		result[sessionID] = resolveEffectiveOrigin(launched, provedOriginsBySession[sessionID])
+	}
+	return result, nil
+}
+
+func normalizedLaunchedURLSet(values []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		normalized, err := normalizer.Normalize(value)
+		if err == nil && normalized != "" {
+			result[normalized] = struct{}{}
+		}
+	}
+	return result
+}
+
+func resolveEffectiveOrigin(launched map[string]struct{}, proved map[string]map[string]struct{}) EffectiveOrigin {
+	origins := make(map[string]struct{})
+	for requestedURL, requestedOrigins := range proved {
+		if _, ok := launched[requestedURL]; !ok {
+			continue
+		}
+		for origin := range requestedOrigins {
+			origins[origin] = struct{}{}
+		}
+	}
+	if len(origins) > 1 {
+		return EffectiveOrigin{State: EffectiveOriginAmbiguous}
+	}
+	if len(launched) == 0 || len(proved) != len(launched) || len(origins) != 1 {
+		return EffectiveOrigin{State: EffectiveOriginUnavailable}
+	}
+	for origin := range origins {
+		return EffectiveOrigin{Origin: origin, State: EffectiveOriginProven}
+	}
+	return EffectiveOrigin{State: EffectiveOriginUnavailable}
+}
+
+func launchedURLsForOrigin(sess CrawlSession) ([]string, bool) {
+	var saved config.Config
+	if err := json.Unmarshal([]byte(sess.Config), &saved); err == nil && saved.Crawler.DeltaPlan != nil {
+		return saved.Crawler.DeltaPlan.LaunchedURLs, true
+	}
+	if strings.EqualFold(strings.TrimSpace(sess.Label), "Daily Delta Crawl") {
+		return nil, true
+	}
+	return sess.SeedURLs, false
+}
+
+func normalizeEffectiveOrigin(raw string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Hostname() == "" {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", false
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	port := u.Port()
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return scheme + "://" + host, true
+}
+
+func sessionPlaceholders(count int) string {
+	if count <= 0 {
+		return "NULL"
+	}
+	return strings.TrimRight(strings.Repeat("?,", count), ",")
+}
+
+func appendStringPlaceholders(args []interface{}, values []string) []interface{} {
+	for _, value := range values {
+		args = append(args, value)
+	}
+	return args
+}
 
 // ListSessions retrieves crawl sessions, optionally filtered by project ID.
 func (s *Store) ListSessions(ctx context.Context, projectID ...string) ([]CrawlSession, error) {

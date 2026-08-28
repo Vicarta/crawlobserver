@@ -3,10 +3,80 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/SEObserver/crawlobserver/internal/config"
+	"github.com/SEObserver/crawlobserver/internal/fetcher"
 )
+
+// PageHTTPValidators returns retained response validators for exact page URLs
+// in one materialized baseline session. Header names are matched
+// case-insensitively because historic rows preserve their original casing.
+func (s *Store) PageHTTPValidators(ctx context.Context, sessionID string, urls []string) (map[string]fetcher.RequestValidators, error) {
+	if sessionID == "" || len(urls) == 0 {
+		return map[string]fetcher.RequestValidators{}, nil
+	}
+	rows, err := s.conn.Query(ctx, `
+		SELECT url, headers
+		FROM crawlobserver.pages FINAL
+		WHERE crawl_session_id = ? AND url IN (?)`, sessionID, urls)
+	if err != nil {
+		return nil, fmt.Errorf("loading page HTTP validators: %w", err)
+	}
+	defer rows.Close()
+	validators := make(map[string]fetcher.RequestValidators, len(urls))
+	for rows.Next() {
+		var url string
+		var headers map[string]string
+		if err := rows.Scan(&url, &headers); err != nil {
+			return nil, fmt.Errorf("scanning page HTTP validators: %w", err)
+		}
+		var value fetcher.RequestValidators
+		for key, headerValue := range headers {
+			switch {
+			case strings.EqualFold(key, "ETag"):
+				value.ETag = headerValue
+			case strings.EqualFold(key, "Last-Modified"):
+				value.LastModified = headerValue
+			}
+		}
+		if value.ETag != "" || value.LastModified != "" {
+			validators[url] = value
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating page HTTP validators: %w", err)
+	}
+	return validators, nil
+}
+
+// DeltaSitemapObservationURL retains the literal sitemap URL and lastmod
+// evidence. The server applies project URL policy before passing these values
+// to the pure selector.
+type DeltaSitemapObservationURL struct {
+	Loc     string
+	LastMod string
+}
+
+// DeltaSitemapObservation identifies one complete sitemap observation.
+type DeltaSitemapObservation struct {
+	SessionID  string
+	ObservedAt time.Time
+	URLs       []DeltaSitemapObservationURL
+}
+
+// DeltaSitemapTerms are the dual sitemap terms used for changed-only Delta
+// planning. Published is always the exact materialized Current Snapshot
+// supplied by the caller; Raw is the newest complete fresh Delta observation,
+// falling back only to the trusted raw full-crawl source.
+type DeltaSitemapTerms struct {
+	Raw       DeltaSitemapObservation
+	Published DeltaSitemapObservation
+}
 
 // LatestProjectSession returns the newest sitemap-backed completed session for a project.
 // Daily delta crawls are partial snapshots, so using the latest session blindly can
@@ -71,6 +141,102 @@ func (s *Store) DeltaSitemapCandidateURLs(ctx context.Context, sessionID string,
 	}
 	defer rows.Close()
 	return scanStringColumn(rows)
+}
+
+// LoadDeltaSitemapTerms reads bounded sitemap evidence for one already
+// validated Current Snapshot lineage. It never substitutes an arbitrary latest
+// crawl for the published term. Fresh raw observations must be terminal,
+// non-synthetic Daily Delta sessions with a persisted Phase 21 fresh refresh.
+func (s *Store) LoadDeltaSitemapTerms(ctx context.Context, projectID, publishedSessionID, rawFallbackSessionID string, limit int) (*DeltaSitemapTerms, error) {
+	if projectID == "" || publishedSessionID == "" || rawFallbackSessionID == "" {
+		return nil, fmt.Errorf("complete project and snapshot sitemap lineage is required")
+	}
+	if limit <= 0 {
+		limit = 50000
+	}
+	published, err := s.loadDeltaSitemapObservation(ctx, publishedSessionID, time.Time{}, limit)
+	if err != nil {
+		return nil, fmt.Errorf("loading published sitemap term: %w", err)
+	}
+
+	rows, err := s.conn.Query(ctx, `
+		SELECT id, finished_at, config
+		FROM crawlobserver.crawl_sessions FINAL
+		WHERE project_id = ?
+		  AND `+nonSyntheticSessionFilter+`
+		  AND status = 'completed'
+		  AND label = 'Daily Delta Crawl'
+		ORDER BY finished_at DESC, id DESC
+		LIMIT 100`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("querying fresh raw sitemap observations: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sessionID, rawConfig string
+		var observedAt time.Time
+		if err := rows.Scan(&sessionID, &observedAt, &rawConfig); err != nil {
+			return nil, fmt.Errorf("scanning fresh raw sitemap observation: %w", err)
+		}
+		var saved config.Config
+		if err := json.Unmarshal([]byte(rawConfig), &saved); err != nil || saved.Crawler.DeltaPlan == nil ||
+			saved.Crawler.DeltaPlan.SitemapRefresh == nil ||
+			!strings.EqualFold(saved.Crawler.DeltaPlan.SitemapRefresh.Mode, "fresh") {
+			continue
+		}
+		if !saved.Crawler.DeltaPlan.SitemapRefresh.FetchedAt.IsZero() {
+			observedAt = saved.Crawler.DeltaPlan.SitemapRefresh.FetchedAt
+		}
+		raw, err := s.loadDeltaSitemapObservation(ctx, sessionID, observedAt, limit)
+		if err != nil {
+			return nil, fmt.Errorf("loading fresh raw sitemap observation: %w", err)
+		}
+		return &DeltaSitemapTerms{Raw: raw, Published: published}, nil
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating fresh raw sitemap observations: %w", err)
+	}
+
+	raw, err := s.loadDeltaSitemapObservation(ctx, rawFallbackSessionID, time.Time{}, limit)
+	if err != nil {
+		return nil, fmt.Errorf("loading trusted raw full sitemap fallback: %w", err)
+	}
+	return &DeltaSitemapTerms{Raw: raw, Published: published}, nil
+}
+
+func (s *Store) loadDeltaSitemapObservation(ctx context.Context, sessionID string, observedAt time.Time, limit int) (DeltaSitemapObservation, error) {
+	if observedAt.IsZero() {
+		session, err := s.GetSession(ctx, sessionID)
+		if err != nil {
+			return DeltaSitemapObservation{}, err
+		}
+		observedAt = session.FinishedAt
+		if observedAt.IsZero() {
+			observedAt = session.StartedAt
+		}
+	}
+	rows, err := s.conn.Query(ctx, `
+		SELECT loc, lastmod
+		FROM crawlobserver.sitemap_urls FINAL
+		WHERE crawl_session_id = ? AND loc != ''
+		ORDER BY loc, lastmod
+		LIMIT ?`, sessionID, limit)
+	if err != nil {
+		return DeltaSitemapObservation{}, err
+	}
+	defer rows.Close()
+	observation := DeltaSitemapObservation{SessionID: sessionID, ObservedAt: observedAt, URLs: []DeltaSitemapObservationURL{}}
+	for rows.Next() {
+		var row DeltaSitemapObservationURL
+		if err := rows.Scan(&row.Loc, &row.LastMod); err != nil {
+			return DeltaSitemapObservation{}, err
+		}
+		observation.URLs = append(observation.URLs, row)
+	}
+	if err := rows.Err(); err != nil {
+		return DeltaSitemapObservation{}, err
+	}
+	return observation, nil
 }
 
 func (s *Store) CountSitemapURLs(ctx context.Context, sessionID string) (int, error) {

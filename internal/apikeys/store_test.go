@@ -1,6 +1,8 @@
 package apikeys
 
 import (
+	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +14,53 @@ import (
 	"github.com/SEObserver/crawlobserver/internal/extraction"
 	"github.com/SEObserver/crawlobserver/internal/providers"
 )
+
+func TestBoundedDeltaSettingsAddsColumnsWithoutChangingCandidateMaximum(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`
+		CREATE TABLE project_delta_settings (
+			project_id TEXT PRIMARY KEY,
+			max_candidates_per_run INTEGER NOT NULL DEFAULT 5000
+		);
+		INSERT INTO project_delta_settings(project_id, max_candidates_per_run)
+		VALUES ('legacy-default', 5000), ('custom', 240);`); err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	legacy.Close()
+
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var historical, custom, changedLimit, canaryCount int
+	if err := store.db.QueryRow(`SELECT max_candidates_per_run, sitemap_changed_limit, sitemap_canary_count FROM project_delta_settings WHERE project_id = 'legacy-default'`).Scan(&historical, &changedLimit, &canaryCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT max_candidates_per_run FROM project_delta_settings WHERE project_id = 'custom'`).Scan(&custom); err != nil {
+		t.Fatal(err)
+	}
+	if historical != 5000 || custom != 240 || changedLimit != 0 || canaryCount != 50 {
+		t.Fatalf("historical=%d custom=%d changed=%d canaries=%d; want 5000, 240, 0, 50", historical, custom, changedLimit, canaryCount)
+	}
+	store.Close()
+
+	reopened, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.db.QueryRow(`SELECT max_candidates_per_run FROM project_delta_settings WHERE project_id = 'legacy-default'`).Scan(&historical); err != nil {
+		t.Fatal(err)
+	}
+	if historical != 5000 {
+		t.Fatalf("reopened historical maximum = %d; want 5000", historical)
+	}
+}
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
@@ -330,6 +379,62 @@ func TestProjectDeltaSettingsSitemapRefreshFailureModeMigrationIsIdempotent(t *t
 	}
 	if got.SitemapRefreshFailureMode != SitemapRefreshFailureModeSnapshotFallback {
 		t.Fatalf("migrated sitemap refresh failure mode = %q, want %q", got.SitemapRefreshFailureMode, SitemapRefreshFailureModeSnapshotFallback)
+	}
+}
+
+func TestProjectDeltaSettingsSitemapSelectionDefaultsAndBounds(t *testing.T) {
+	s := newTestStore(t)
+	p, err := s.CreateProject("selection-defaults")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defaults, err := s.GetProjectDeltaSettings(p.ID)
+	if err != nil {
+		t.Fatalf("GetProjectDeltaSettings() error = %v", err)
+	}
+	if defaults.MaxCandidatesPerRun != 5000 || defaults.SitemapChangedLimit != 0 || defaults.SitemapCanaryCount != 50 {
+		t.Fatalf("selection defaults = %+v, want max=5000 changed=all canaries=50", defaults)
+	}
+
+	defaults.MaxCandidatesPerRun = 511
+	defaults.SitemapChangedLimit = 0
+	defaults.SitemapCanaryCount = 0
+	saved, err := s.SaveProjectDeltaSettings(*defaults)
+	if err != nil {
+		t.Fatalf("SaveProjectDeltaSettings() error = %v", err)
+	}
+	if saved.MaxCandidatesPerRun != 511 || saved.SitemapChangedLimit != 0 || saved.SitemapCanaryCount != 0 {
+		t.Fatalf("saved explicit bounds = %+v, want max=511 changed=0 canaries=0", saved)
+	}
+
+	saved.MaxCandidatesPerRun = -1
+	saved.SitemapChangedLimit = -1
+	saved.SitemapCanaryCount = -1
+	sanitized, err := s.SaveProjectDeltaSettings(*saved)
+	if err != nil {
+		t.Fatalf("SaveProjectDeltaSettings negative bounds error = %v", err)
+	}
+	if sanitized.MaxCandidatesPerRun != 0 || sanitized.SitemapChangedLimit != 0 || sanitized.SitemapCanaryCount != 0 {
+		t.Fatalf("negative selection bounds were not sanitized to zero: %+v", sanitized)
+	}
+}
+
+func TestProjectDeltaSettingsLegacySelectionJSONDefaultsPreserveExplicitZero(t *testing.T) {
+	var legacy ProjectDeltaSettings
+	if err := json.Unmarshal([]byte(`{"project_id":"legacy"}`), &legacy); err != nil {
+		t.Fatalf("Unmarshal legacy settings error = %v", err)
+	}
+	if legacy.SitemapChangedLimit != 0 || legacy.SitemapCanaryCount != 50 {
+		t.Fatalf("legacy selection settings = %+v, want defaults", legacy)
+	}
+
+	var explicitZero ProjectDeltaSettings
+	if err := json.Unmarshal([]byte(`{"project_id":"zero","sitemap_changed_limit":0,"sitemap_canary_count":0}`), &explicitZero); err != nil {
+		t.Fatalf("Unmarshal zero settings error = %v", err)
+	}
+	if explicitZero.SitemapChangedLimit != 0 || explicitZero.SitemapCanaryCount != 0 {
+		t.Fatalf("explicit zero selection settings = %+v, want zero values", explicitZero)
 	}
 }
 

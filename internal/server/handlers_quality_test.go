@@ -103,6 +103,22 @@ func TestEvaluateDeltaPlanGateMarksSitemapFallbackNonFresh(t *testing.T) {
 	}
 }
 
+func TestEvaluateDeltaPlanGateReportsDeferredSitemapEventsWithoutBlockingPromotion(t *testing.T) {
+	plan := &config.DeltaPlanConfig{SitemapSelection: &config.DeltaSitemapSelection{
+		EventTotal: 4, EventDeferred: 2, SelectionComplete: false,
+	}}
+	findings := (&Server{}).evaluateDeltaPlanGate(context.Background(), qualityGateMock{}, "session-1", "project-di", plan, apikeys.ProjectQualitySettings{}, time.Now())
+	for _, finding := range findings {
+		if finding.FindingType == "delta_sitemap_events_deferred" {
+			if finding.Blocking {
+				t.Fatalf("deferred sitemap finding must not report pending events as consumed or block page overlay: %#v", finding)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected deferred sitemap finding, got %#v", findings)
+}
+
 func TestEvaluateDeltaPlanGateBlocksMissingLaunchedCandidateCoverage(t *testing.T) {
 	srv := &Server{}
 	qs := qualityGateMock{matched: 1}

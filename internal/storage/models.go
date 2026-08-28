@@ -18,6 +18,19 @@ type CrawlSession struct {
 	Label        string
 }
 
+// EffectiveOrigin is response-only operational origin evidence for a session.
+// An unavailable or ambiguous result always has an empty Origin.
+type EffectiveOrigin struct {
+	Origin string
+	State  string
+}
+
+const (
+	EffectiveOriginProven      = "proven"
+	EffectiveOriginUnavailable = "unavailable"
+	EffectiveOriginAmbiguous   = "ambiguous"
+)
+
 // PageRow represents a crawled page for storage.
 type PageRow struct {
 	CrawlSessionID   string

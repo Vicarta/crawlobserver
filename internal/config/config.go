@@ -50,6 +50,7 @@ type CrawlerConfig struct {
 	Delay                 time.Duration    `mapstructure:"delay"`
 	MaxPages              int              `mapstructure:"max_pages"`
 	DeltaPlannedPages     int              `mapstructure:"delta_planned_pages"`
+	DiscoveryBudget       *int             `mapstructure:"discovery_budget"`
 	DeltaPlan             *DeltaPlanConfig `mapstructure:"delta_plan"`
 	MaxDepth              int              `mapstructure:"max_depth"`
 	Timeout               time.Duration    `mapstructure:"timeout"`
@@ -82,21 +83,43 @@ type CrawlerConfig struct {
 }
 
 type DeltaPlanConfig struct {
-	BaselineSessionID                 string               `json:"baseline_session_id" mapstructure:"baseline_session_id"`
-	BaselineSourceSessionID           string               `json:"baseline_source_session_id" mapstructure:"baseline_source_session_id"`
-	BaselineEvaluationRevision        string               `json:"baseline_evaluation_revision" mapstructure:"baseline_evaluation_revision"`
-	BaselineSourceEvaluationRevision  string               `json:"baseline_source_evaluation_revision" mapstructure:"baseline_source_evaluation_revision"`
-	BaselineSnapshotRevision          uint64               `json:"baseline_snapshot_revision" mapstructure:"baseline_snapshot_revision"`
-	BaselineContentWatermarkSessionID string               `json:"baseline_content_watermark_session_id" mapstructure:"baseline_content_watermark_session_id"`
-	TotalCandidates                   int                  `json:"total_candidates" mapstructure:"total_candidates"`
-	LaunchedCandidates                int                  `json:"launched_candidates" mapstructure:"launched_candidates"`
-	DeferredCandidates                int                  `json:"deferred_candidates" mapstructure:"deferred_candidates"`
-	LaunchLimit                       int                  `json:"launch_limit" mapstructure:"launch_limit"`
-	SourceCounts                      map[string]int       `json:"source_counts" mapstructure:"source_counts"`
-	BaselineSitemapURLCount           int                  `json:"baseline_sitemap_url_count" mapstructure:"baseline_sitemap_url_count"`
-	LaunchedURLs                      []string             `json:"launched_urls,omitempty" mapstructure:"launched_urls"`
-	CandidateSources                  map[string][]string  `json:"candidate_sources,omitempty" mapstructure:"candidate_sources"`
-	SitemapRefresh                    *DeltaSitemapRefresh `json:"sitemap_refresh,omitempty" mapstructure:"sitemap_refresh"`
+	BaselineSessionID                   string                 `json:"baseline_session_id" mapstructure:"baseline_session_id"`
+	ConditionalRequestBaselineSessionID string                 `json:"conditional_request_baseline_session_id,omitempty" mapstructure:"conditional_request_baseline_session_id"`
+	UseConditionalRequests              bool                   `json:"use_conditional_requests" mapstructure:"use_conditional_requests"`
+	BaselineSourceSessionID             string                 `json:"baseline_source_session_id" mapstructure:"baseline_source_session_id"`
+	BaselineEvaluationRevision          string                 `json:"baseline_evaluation_revision" mapstructure:"baseline_evaluation_revision"`
+	BaselineSourceEvaluationRevision    string                 `json:"baseline_source_evaluation_revision" mapstructure:"baseline_source_evaluation_revision"`
+	BaselineSnapshotRevision            uint64                 `json:"baseline_snapshot_revision" mapstructure:"baseline_snapshot_revision"`
+	BaselineContentWatermarkSessionID   string                 `json:"baseline_content_watermark_session_id" mapstructure:"baseline_content_watermark_session_id"`
+	TotalCandidates                     int                    `json:"total_candidates" mapstructure:"total_candidates"`
+	LaunchedCandidates                  int                    `json:"launched_candidates" mapstructure:"launched_candidates"`
+	DeferredCandidates                  int                    `json:"deferred_candidates" mapstructure:"deferred_candidates"`
+	LaunchLimit                         int                    `json:"launch_limit" mapstructure:"launch_limit"`
+	SourceCounts                        map[string]int         `json:"source_counts" mapstructure:"source_counts"`
+	BaselineSitemapURLCount             int                    `json:"baseline_sitemap_url_count" mapstructure:"baseline_sitemap_url_count"`
+	LaunchedURLs                        []string               `json:"launched_urls,omitempty" mapstructure:"launched_urls"`
+	CandidateSources                    map[string][]string    `json:"candidate_sources,omitempty" mapstructure:"candidate_sources"`
+	SitemapRefresh                      *DeltaSitemapRefresh   `json:"sitemap_refresh,omitempty" mapstructure:"sitemap_refresh"`
+	SitemapSelection                    *DeltaSitemapSelection `json:"sitemap_selection,omitempty" mapstructure:"sitemap_selection"`
+}
+
+// DeltaSitemapSelection records the immutable bounded changed-only selection
+// inputs and result used by a launched Delta. A nil value explicitly denotes a
+// legacy session created before selector provenance was persisted.
+type DeltaSitemapSelection struct {
+	SelectorRevision                   string            `json:"selector_revision" mapstructure:"selector_revision"`
+	RawObservationSessionID            string            `json:"raw_observation_session_id,omitempty" mapstructure:"raw_observation_session_id"`
+	RawObservedAt                      time.Time         `json:"raw_observed_at,omitempty" mapstructure:"raw_observed_at"`
+	PublishedSessionID                 string            `json:"published_session_id,omitempty" mapstructure:"published_session_id"`
+	PublishedSnapshotRevision          uint64            `json:"published_snapshot_revision" mapstructure:"published_snapshot_revision"`
+	PublishedContentWatermarkSessionID string            `json:"published_content_watermark_session_id,omitempty" mapstructure:"published_content_watermark_session_id"`
+	RotationEpoch                      time.Time         `json:"rotation_epoch,omitempty" mapstructure:"rotation_epoch"`
+	EventTotal                         int               `json:"event_total" mapstructure:"event_total"`
+	EventSelected                      int               `json:"event_selected" mapstructure:"event_selected"`
+	EventDeferred                      int               `json:"event_deferred" mapstructure:"event_deferred"`
+	CanarySelected                     int               `json:"canary_selected" mapstructure:"canary_selected"`
+	SelectionComplete                  bool              `json:"selection_complete" mapstructure:"selection_complete"`
+	SourceByURL                        map[string]string `json:"source_by_url,omitempty" mapstructure:"source_by_url"`
 }
 
 // DeltaSitemapRefresh records the sitemap provenance used to build a Delta

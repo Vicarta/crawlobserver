@@ -45,7 +45,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		resp := s.sessionListPayload(sessions)
+		resp := s.sessionListPayload(r.Context(), sessions)
 		writeJSON(w, map[string]interface{}{
 			"sessions": resp,
 			"total":    total,
@@ -62,31 +62,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enrich with running/queued status
-	var resp []map[string]interface{}
-	for _, sess := range sessions {
-		pagesCrawled := sess.PagesCrawled
-		if pages, _, running := s.manager.Progress(sess.ID); running {
-			pagesCrawled = uint64(pages)
-		}
-		item := map[string]interface{}{
-			"ID":           sess.ID,
-			"StartedAt":    sess.StartedAt,
-			"FinishedAt":   sess.FinishedAt,
-			"Status":       sess.Status,
-			"SeedURLs":     sess.SeedURLs,
-			"Config":       config.RedactSensitiveConfigJSON(sess.Config),
-			"PagesCrawled": pagesCrawled,
-			"UserAgent":    sess.UserAgent,
-			"ProjectID":    sess.ProjectID,
-			"Label":        sess.Label,
-			"is_running":   s.manager.IsRunning(sess.ID),
-			"is_queued":    s.manager.IsQueued(sess.ID),
-		}
-		enrichSessionStopMetadata(item, sess.Config)
-		resp = append(resp, item)
-	}
-	writeJSON(w, resp)
+	writeJSON(w, s.sessionListPayload(r.Context(), sessions))
 }
 
 // handleSession returns a single session, including synthetic current and
@@ -103,7 +79,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload := s.sessionListPayload([]storage.CrawlSession{*sess})
+	payload := s.sessionListPayload(r.Context(), []storage.CrawlSession{*sess})
 	writeJSON(w, payload[0])
 }
 
@@ -128,24 +104,24 @@ func (s *Server) handleScopedSessions(w http.ResponseWriter, r *http.Request, au
 		return sessions[i].StartedAt.After(sessions[j].StartedAt)
 	})
 
-	resp := s.sessionListPayload(sessions)
 	if r.URL.Query().Get("limit") != "" {
 		limit, offset := clampPagination(queryInt(r, "limit", 30), queryInt(r, "offset", 0))
-		total := len(resp)
-		end := offset + limit
+		total := len(sessions)
 		if offset > total {
 			offset = total
 		}
+		end := offset + limit
 		if end > total {
 			end = total
 		}
+		resp := s.sessionListPayload(r.Context(), sessions[offset:end])
 		writeJSON(w, map[string]interface{}{
-			"sessions": resp[offset:end],
+			"sessions": resp,
 			"total":    total,
 		})
 		return
 	}
-	writeJSON(w, resp)
+	writeJSON(w, s.sessionListPayload(r.Context(), sessions))
 }
 
 func sessionMatchesSearch(sess storage.CrawlSession, search string) bool {
@@ -158,8 +134,12 @@ func sessionMatchesSearch(sess storage.CrawlSession, search string) bool {
 		strings.Contains(strings.ToLower(sess.Label), search)
 }
 
-func (s *Server) sessionListPayload(sessions []storage.CrawlSession) []map[string]interface{} {
+func (s *Server) sessionListPayload(ctx context.Context, sessions []storage.CrawlSession) []map[string]interface{} {
 	var resp []map[string]interface{}
+	originBySession := map[string]storage.EffectiveOrigin{}
+	if origins, err := s.store.EffectiveOriginsForSessions(ctx, sessions); err == nil {
+		originBySession = origins
+	}
 	qualityBySession := map[string]storage.CrawlQualityResult{}
 	if qs, ok := s.qualityStore(); ok {
 		sessionIDs := make([]string, 0, len(sessions))
@@ -189,6 +169,12 @@ func (s *Server) sessionListPayload(sessions []storage.CrawlSession) []map[strin
 			"is_running":   s.manager.IsRunning(sess.ID),
 			"is_queued":    s.manager.IsQueued(sess.ID),
 		}
+		origin := originBySession[sess.ID]
+		if origin.State == "" {
+			origin.State = storage.EffectiveOriginUnavailable
+		}
+		item["effective_origin"] = origin.Origin
+		item["effective_origin_state"] = origin.State
 		enrichSessionStopMetadata(item, sess.Config)
 		if quality, ok := qualityBySession[sess.ID]; ok {
 			item["quality"] = map[string]interface{}{

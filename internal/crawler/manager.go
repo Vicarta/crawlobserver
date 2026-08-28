@@ -47,6 +47,10 @@ func boolPtr(v bool) *bool {
 	return &v
 }
 
+func intPtr(v int) *int {
+	return &v
+}
+
 func boolValue(v *bool, fallback bool) bool {
 	if v == nil {
 		return fallback
@@ -113,6 +117,7 @@ type CrawlRequest struct {
 	Seeds                        []string                `json:"seeds"`
 	SessionSeedURLs              []string                `json:"session_seed_urls,omitempty"`
 	MaxPages                     int                     `json:"max_pages"`
+	DiscoveryBudget              *int                    `json:"discovery_budget,omitempty"`
 	MaxDepth                     int                     `json:"max_depth"`
 	Workers                      int                     `json:"workers"`
 	Delay                        string                  `json:"delay"`
@@ -168,6 +173,9 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 	crawlerCfg := cfg.Crawler
 	if req.MaxPages > 0 {
 		crawlerCfg.MaxPages = req.MaxPages
+	}
+	if req.DiscoveryBudget != nil {
+		crawlerCfg.DiscoveryBudget = intPtr(*req.DiscoveryBudget)
 	}
 	if req.DeltaPlannedPages > 0 {
 		crawlerCfg.DeltaPlannedPages = req.DeltaPlannedPages
@@ -269,6 +277,17 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 	}
 
 	engine := NewEngine(&cfg, m.store)
+	if req.DeltaPlan != nil && req.DeltaPlan.UseConditionalRequests {
+		baselineID := req.DeltaPlan.ConditionalRequestBaselineSessionID
+		if baselineID == "" {
+			baselineID = req.DeltaPlan.BaselineSessionID
+		}
+		validators, err := m.store.PageHTTPValidators(context.Background(), baselineID, req.Seeds)
+		if err != nil {
+			return "", fmt.Errorf("loading delta HTTP validators: %w", err)
+		}
+		engine.SetHTTPValidators(validators)
+	}
 	sessionID := engine.SessionID(sessionSeeds)
 	engine.session.ProjectID = req.ProjectID
 	engine.session.Label = req.Label
@@ -469,6 +488,9 @@ func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string
 		crawlerCfg := cfg.Crawler
 		if overrides.MaxPages > 0 {
 			crawlerCfg.MaxPages = overrides.MaxPages
+		}
+		if overrides.DiscoveryBudget != nil {
+			crawlerCfg.DiscoveryBudget = intPtr(*overrides.DiscoveryBudget)
 		}
 		if overrides.MaxDepth > 0 {
 			crawlerCfg.MaxDepth = overrides.MaxDepth

@@ -56,6 +56,78 @@ type SitemapURL struct {
 	Priority   string `xml:"priority"`
 }
 
+// SitemapLastMod is a strict, precision-aware W3C sitemap lastmod value.
+// Date-only values intentionally retain date precision; callers must not turn
+// them into an arbitrary instant when comparing them with a datetime value.
+type SitemapLastMod struct {
+	Raw      string
+	Time     time.Time
+	DateOnly bool
+}
+
+// ParseSitemapLastMod accepts only W3C date or RFC3339 date-time values. The
+// raw value is retained for audit callers, while Time is normalized to UTC for
+// deterministic comparison. Missing and malformed values return an error.
+func ParseSitemapLastMod(raw string) (SitemapLastMod, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return SitemapLastMod{Raw: raw}, fmt.Errorf("sitemap lastmod is missing")
+	}
+	if len(value) == len("2006-01-02") {
+		parsed, err := time.Parse("2006-01-02", value)
+		if err == nil {
+			return SitemapLastMod{Raw: raw, Time: parsed.UTC(), DateOnly: true}, nil
+		}
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return SitemapLastMod{Raw: raw}, fmt.Errorf("invalid sitemap lastmod %q: %w", raw, err)
+	}
+	return SitemapLastMod{Raw: raw, Time: parsed.UTC()}, nil
+}
+
+// CompareSitemapLastMod compares two strict sitemap lastmod values. It returns
+// -1, 0, or 1 and false when either input is missing or invalid. Date/date and
+// mixed precision comparisons use the UTC calendar date; datetime/datetime
+// comparisons use the UTC instant.
+func CompareSitemapLastMod(candidate, baseline string) (int, bool) {
+	left, err := ParseSitemapLastMod(candidate)
+	if err != nil {
+		return 0, false
+	}
+	right, err := ParseSitemapLastMod(baseline)
+	if err != nil {
+		return 0, false
+	}
+	if left.DateOnly || right.DateOnly {
+		leftDate := left.Time.UTC().Format("2006-01-02")
+		rightDate := right.Time.UTC().Format("2006-01-02")
+		switch {
+		case leftDate < rightDate:
+			return -1, true
+		case leftDate > rightDate:
+			return 1, true
+		default:
+			return 0, true
+		}
+	}
+	switch {
+	case left.Time.Before(right.Time):
+		return -1, true
+	case left.Time.After(right.Time):
+		return 1, true
+	default:
+		return 0, true
+	}
+}
+
+// SitemapLastModStrictlyForward reports whether candidate is valid and ahead
+// of baseline under CompareSitemapLastMod's conservative precision rules.
+func SitemapLastModStrictlyForward(candidate, baseline string) bool {
+	comparison, comparable := CompareSitemapLastMod(candidate, baseline)
+	return comparable && comparison > 0
+}
+
 // SitemapChild preserves the raw index <loc> while exposing the transport URL
 // used for the sequential child traversal.
 type SitemapChild struct {

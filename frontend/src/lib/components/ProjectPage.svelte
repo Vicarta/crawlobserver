@@ -498,7 +498,7 @@
       <table>
         <thead>
           <tr>
-            <th>{t('project.seedUrl')}</th>
+            <th>Operational origin</th>
             <th>Type</th>
             <th>{t('common.status')}</th>
             <th>Quality</th>
@@ -510,7 +510,20 @@
         <tbody>
           {#each projSessions as s}
             <tr class="clickable-row" onclick={() => onselectsession?.(s)}>
-              <td class="cell-url">{s.SeedURLs?.[0] || s.ID}</td>
+              <td class="session-origin-cell">
+                {#if s.effective_origin_state === 'proven' && s.effective_origin}
+                  <span class="session-effective-origin" title={s.effective_origin}
+                    >{s.effective_origin}</span
+                  >
+                {:else if s.effective_origin_state === 'ambiguous'}
+                  <span class="session-origin-state">Origin ambiguous</span>
+                {:else}
+                  <span class="session-origin-state">Origin unavailable</span>
+                {/if}
+                <span class="session-raw-seed" title={s.SeedURLs?.join(', ') || s.ID}
+                  >Raw seed: {s.SeedURLs?.[0] || s.ID}</span
+                >
+              </td>
               <td>
                 <span
                   class="badge"
@@ -1122,6 +1135,30 @@
     padding: 4px;
     color: var(--text-muted);
     cursor: pointer;
+  }
+  .session-origin-cell {
+    max-width: 320px;
+    min-width: 170px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .session-effective-origin,
+  .session-origin-state,
+  .session-raw-seed {
+    display: block;
+    overflow-wrap: anywhere;
+  }
+  .session-effective-origin {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .session-origin-state,
+  .session-raw-seed {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .session-raw-seed {
+    margin-top: 3px;
   }
   .btn-unlink:hover {
     color: #dc2626;

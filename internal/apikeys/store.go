@@ -38,6 +38,8 @@ type ProjectDeltaSettings struct {
 	SourceStalePages                         bool        `json:"source_stale_pages"`
 	SourceManualQueue                        bool        `json:"source_manual_queue"`
 	SitemapRefreshFailureMode                string      `json:"sitemap_refresh_failure_mode"`
+	SitemapChangedLimit                      int         `json:"sitemap_changed_limit"`
+	SitemapCanaryCount                       int         `json:"sitemap_canary_count"`
 	StaleAfterDays                           int         `json:"stale_after_days"`
 	MaxCandidatesPerRun                      int         `json:"max_candidates_per_run"`
 	MaxChangedPagesPerRun                    int         `json:"max_changed_pages_per_run"`
@@ -96,6 +98,16 @@ func (s *ProjectDeltaSettings) UnmarshalJSON(data []byte) error {
 	var decoded projectDeltaSettingsAlias
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	// Older API/config payloads predate the bounded sitemap controls. Supply
+	// the canary default only when absent. SitemapChangedLimit intentionally
+	// keeps its zero value, which means all evidence-backed sitemap events.
+	if _, present := fields["sitemap_canary_count"]; !present {
+		decoded.SitemapCanaryCount = 50
 	}
 	if err := validateSitemapRefreshFailureMode(decoded.SitemapRefreshFailureMode); err != nil {
 		return err
@@ -333,6 +345,8 @@ func NewStore(dbPath string) (*Store, error) {
 			max_candidates_per_run INTEGER NOT NULL DEFAULT 5000,
 			max_changed_pages_per_run INTEGER NOT NULL DEFAULT 1000,
 			max_new_pages_per_run INTEGER NOT NULL DEFAULT 1000,
+			sitemap_changed_limit INTEGER NOT NULL DEFAULT 0,
+			sitemap_canary_count INTEGER NOT NULL DEFAULT 50,
 			max_discovered_pages_per_run INTEGER NOT NULL DEFAULT 500,
 			max_discovery_depth INTEGER NOT NULL DEFAULT 1,
 			respect_robots_txt INTEGER NOT NULL DEFAULT 1,
@@ -380,6 +394,10 @@ func NewStore(dbPath string) (*Store, error) {
 		"ALTER TABLE project_delta_settings ADD COLUMN sitemap_refresh_failure_mode TEXT NOT NULL DEFAULT 'skip'",
 	} {
 		db.Exec(col) // ignore duplicate column errors
+	}
+	if err := migrateBoundedDeltaSettings(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 
 	if _, err := db.Exec(`
@@ -566,6 +584,27 @@ func NewStore(dbPath string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+func migrateBoundedDeltaSettings(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("starting bounded Delta settings migration: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, statement := range []string{
+		"ALTER TABLE project_delta_settings ADD COLUMN sitemap_changed_limit INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE project_delta_settings ADD COLUMN sitemap_canary_count INTEGER NOT NULL DEFAULT 50",
+	} {
+		if _, err := tx.Exec(statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("adding bounded Delta setting: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing bounded Delta settings migration: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) Close() error {
 	return s.db.Close()
 }
@@ -692,6 +731,8 @@ func DefaultProjectDeltaSettings(projectID string) ProjectDeltaSettings {
 		SourceStalePages:                         true,
 		SourceManualQueue:                        true,
 		SitemapRefreshFailureMode:                SitemapRefreshFailureModeSkip,
+		SitemapChangedLimit:                      0,
+		SitemapCanaryCount:                       50,
 		StaleAfterDays:                           30,
 		MaxCandidatesPerRun:                      5000,
 		MaxChangedPagesPerRun:                    1000,
@@ -743,14 +784,20 @@ func sanitizeDeltaSettings(in ProjectDeltaSettings) ProjectDeltaSettings {
 	if out.StaleAfterDays <= 0 {
 		out.StaleAfterDays = 30
 	}
-	if out.MaxCandidatesPerRun <= 0 {
-		out.MaxCandidatesPerRun = 5000
+	if out.SitemapChangedLimit < 0 {
+		out.SitemapChangedLimit = 0
 	}
-	if out.MaxChangedPagesPerRun <= 0 {
-		out.MaxChangedPagesPerRun = 1000
+	if out.SitemapCanaryCount < 0 {
+		out.SitemapCanaryCount = 0
 	}
-	if out.MaxNewPagesPerRun <= 0 {
-		out.MaxNewPagesPerRun = 1000
+	if out.MaxCandidatesPerRun < 0 {
+		out.MaxCandidatesPerRun = 0
+	}
+	if out.MaxChangedPagesPerRun < 0 {
+		out.MaxChangedPagesPerRun = 0
+	}
+	if out.MaxNewPagesPerRun < 0 {
+		out.MaxNewPagesPerRun = 0
 	}
 	if out.MaxDiscoveredPagesPerRun < 0 {
 		out.MaxDiscoveredPagesPerRun = 0
@@ -812,6 +859,7 @@ func (s *Store) GetProjectDeltaSettings(projectID string) (*ProjectDeltaSettings
 		SELECT project_id, enabled, schedule_time, timezone,
 			source_sitemap, source_gsc, source_problem_pages, source_stale_pages, source_manual_queue,
 			sitemap_refresh_failure_mode,
+			sitemap_changed_limit, sitemap_canary_count,
 			stale_after_days, max_candidates_per_run, max_changed_pages_per_run, max_new_pages_per_run,
 			max_discovered_pages_per_run, max_discovery_depth, respect_robots_txt, use_conditional_requests,
 			fallback_to_get_when_head_fails, enable_js_rendering_for_delta, rate_limit_requests_per_second,
@@ -835,6 +883,7 @@ func (s *Store) GetProjectDeltaSettings(projectID string) (*ProjectDeltaSettings
 		&st.ProjectID, &enabled, &st.ScheduleTime, &st.Timezone,
 		&sourceSitemap, &sourceGSC, &sourceProblemPages, &sourceStalePages, &sourceManualQueue,
 		&st.SitemapRefreshFailureMode,
+		&st.SitemapChangedLimit, &st.SitemapCanaryCount,
 		&st.StaleAfterDays, &st.MaxCandidatesPerRun, &st.MaxChangedPagesPerRun, &st.MaxNewPagesPerRun,
 		&st.MaxDiscoveredPagesPerRun, &st.MaxDiscoveryDepth, &respectRobots, &useConditional,
 		&fallbackGet, &st.EnableJSRenderingForDelta, &st.RateLimitRequestsPerSecond,
@@ -887,6 +936,7 @@ func (s *Store) SaveProjectDeltaSettings(settings ProjectDeltaSettings) (*Projec
 			project_id, enabled, schedule_time, timezone,
 			source_sitemap, source_gsc, source_problem_pages, source_stale_pages, source_manual_queue,
 			sitemap_refresh_failure_mode,
+			sitemap_changed_limit, sitemap_canary_count,
 			stale_after_days, max_candidates_per_run, max_changed_pages_per_run, max_new_pages_per_run,
 			max_discovered_pages_per_run, max_discovery_depth, respect_robots_txt, use_conditional_requests,
 			fallback_to_get_when_head_fails, enable_js_rendering_for_delta, rate_limit_requests_per_second,
@@ -899,7 +949,7 @@ func (s *Store) SaveProjectDeltaSettings(settings ProjectDeltaSettings) (*Projec
 			require_confirmation_on_scope_change, require_confirmation_on_full_recrawl,
 			never_delete_previous_snapshot_before_success, pause_delta_when_full_crawl_running,
 			max_runtime_minutes, on_limit_reached, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id) DO UPDATE SET
 			enabled = excluded.enabled,
 			schedule_time = excluded.schedule_time,
@@ -910,6 +960,8 @@ func (s *Store) SaveProjectDeltaSettings(settings ProjectDeltaSettings) (*Projec
 			source_stale_pages = excluded.source_stale_pages,
 			source_manual_queue = excluded.source_manual_queue,
 			sitemap_refresh_failure_mode = excluded.sitemap_refresh_failure_mode,
+			sitemap_changed_limit = excluded.sitemap_changed_limit,
+			sitemap_canary_count = excluded.sitemap_canary_count,
 			stale_after_days = excluded.stale_after_days,
 			max_candidates_per_run = excluded.max_candidates_per_run,
 			max_changed_pages_per_run = excluded.max_changed_pages_per_run,
@@ -947,6 +999,7 @@ func (s *Store) SaveProjectDeltaSettings(settings ProjectDeltaSettings) (*Projec
 		settings.ProjectID, deltaBoolInt(settings.Enabled), settings.ScheduleTime, settings.Timezone,
 		deltaBoolInt(settings.SourceSitemap), deltaBoolInt(settings.SourceGSC), deltaBoolInt(settings.SourceProblemPages), deltaBoolInt(settings.SourceStalePages), deltaBoolInt(settings.SourceManualQueue),
 		settings.SitemapRefreshFailureMode,
+		settings.SitemapChangedLimit, settings.SitemapCanaryCount,
 		settings.StaleAfterDays, settings.MaxCandidatesPerRun, settings.MaxChangedPagesPerRun, settings.MaxNewPagesPerRun,
 		settings.MaxDiscoveredPagesPerRun, settings.MaxDiscoveryDepth, deltaBoolInt(settings.RespectRobotsTxt), deltaBoolInt(settings.UseConditionalRequests),
 		deltaBoolInt(settings.FallbackToGetWhenHeadFails), settings.EnableJSRenderingForDelta, settings.RateLimitRequestsPerSecond,

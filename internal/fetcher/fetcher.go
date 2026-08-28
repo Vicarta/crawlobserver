@@ -109,6 +109,12 @@ func (f *Fetcher) Fetch(targetURL string, depth int, foundOn string) *FetchResul
 
 // FetchWithContext retrieves a URL using the provided context for cancellation.
 func (f *Fetcher) FetchWithContext(ctx context.Context, targetURL string, depth int, foundOn string) *FetchResult {
+	return f.FetchWithContextValidators(ctx, targetURL, depth, foundOn, RequestValidators{})
+}
+
+// FetchWithContextValidators retrieves a URL with optional exact HTTP cache
+// validators. Empty values intentionally leave the request unconditional.
+func (f *Fetcher) FetchWithContextValidators(ctx context.Context, targetURL string, depth int, foundOn string, validators RequestValidators) *FetchResult {
 	result := &FetchResult{
 		URL:     targetURL,
 		Depth:   depth,
@@ -130,6 +136,12 @@ func (f *Fetcher) FetchWithContext(ctx context.Context, targetURL string, depth 
 	req.Header.Set("User-Agent", f.userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	if validators.ETag != "" {
+		req.Header.Set("If-None-Match", validators.ETag)
+	}
+	if validators.LastModified != "" {
+		req.Header.Set("If-Modified-Since", validators.LastModified)
+	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
@@ -140,6 +152,7 @@ func (f *Fetcher) FetchWithContext(ctx context.Context, targetURL string, depth 
 	defer resp.Body.Close()
 
 	result.StatusCode = resp.StatusCode
+	result.NotModified = resp.StatusCode == http.StatusNotModified
 	result.FinalURL = stripDefaultPort(resp.Request.URL.String())
 	result.RedirectChain = tracker.chain
 	result.ContentType = resp.Header.Get("Content-Type")

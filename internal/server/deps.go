@@ -17,6 +17,7 @@ import (
 type SessionStore interface {
 	ListSessions(ctx context.Context, projectID ...string) ([]storage.CrawlSession, error)
 	ListSessionsPaginated(ctx context.Context, limit, offset int, projectID, search string) ([]storage.CrawlSession, int, error)
+	EffectiveOriginsForSessions(ctx context.Context, sessions []storage.CrawlSession) (map[string]storage.EffectiveOrigin, error)
 	LatestProjectSession(ctx context.Context, projectID string) (*storage.CrawlSession, error)
 	GetSession(ctx context.Context, sessionID string) (*storage.CrawlSession, error)
 	DeleteSession(ctx context.Context, sessionID string) error
@@ -213,6 +214,7 @@ type StorageService interface {
 	ProviderStore
 	LogStore
 	DeltaSitemapCandidateURLs(ctx context.Context, sessionID string, limit int) ([]string, error)
+	LoadDeltaSitemapTerms(ctx context.Context, projectID, publishedSessionID, rawFallbackSessionID string, limit int) (*storage.DeltaSitemapTerms, error)
 	DeltaProblemPageURLs(ctx context.Context, sessionID string, limit int) ([]string, error)
 	DeltaStalePageURLs(ctx context.Context, sessionID string, staleBefore time.Time, limit int) ([]string, error)
 	DeltaKnownPageURLs(ctx context.Context, sessionID string, limit int) ([]string, error)

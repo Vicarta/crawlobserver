@@ -45,6 +45,168 @@ func TestNewSession(t *testing.T) {
 	}
 }
 
+func TestParseWorkerNotModifiedPersistsOnlyRawPageEvidence(t *testing.T) {
+	zeroBudget := 0
+	cfg := &config.Config{
+		Crawler: config.CrawlerConfig{DiscoveryBudget: &zeroBudget, Retry: config.RetryConfig{MaxRetries: 0, MaxGlobalErrorRate: 1}},
+		Storage: config.StorageConfig{BatchSize: 100, FlushInterval: time.Hour},
+	}
+	inserter := &e2eInserter{}
+	engine := NewEngine(cfg, nil)
+	engine.session = &Session{ID: "conditional-304"}
+	engine.buffer = storage.NewBuffer(inserter, 100, time.Hour, engine.session.ID)
+	engine.front = frontier.New(0, 100)
+	engine.resourceCh = make(chan resourceCheckItem, 1)
+	engine.checkResources = true
+
+	in := make(chan *fetcher.FetchResult, 1)
+	in <- &fetcher.FetchResult{
+		URL:        "https://example.test/unchanged",
+		FinalURL:   "https://example.test/unchanged",
+		StatusCode: http.StatusNotModified,
+		Headers:    map[string]string{"ETag": `W/"retained"`},
+		Depth:      2,
+		FoundOn:    "https://example.test/source",
+		Body:       []byte(`<html><a href="https://example.test/discovered">ignored</a><img src="/image.png"></html>`),
+	}
+	close(in)
+	engine.parseWorker(0, in)
+	engine.buffer.Flush()
+
+	if len(inserter.pages) != 1 {
+		t.Fatalf("raw 304 pages = %d, want 1", len(inserter.pages))
+	}
+	page := inserter.pages[0]
+	if page.StatusCode != http.StatusNotModified || page.URL != "https://example.test/unchanged" || page.FoundOn != "https://example.test/source" || page.Depth != 2 {
+		t.Fatalf("raw 304 page = %#v", page)
+	}
+	if page.Title != "" || page.BodyHTML != "" || page.InternalLinksOut != 0 || len(inserter.links) != 0 || engine.front.SeenCount() != 0 || len(engine.resourceCh) != 0 {
+		t.Fatalf("304 performed content/graph work: page=%#v links=%#v frontier=%d resources=%d", page, inserter.links, engine.front.SeenCount(), len(engine.resourceCh))
+	}
+	if engine.discoveredPages != 0 {
+		t.Fatalf("304 consumed discovery budget: discoveredPages=%d", engine.discoveredPages)
+	}
+}
+
+func newDiscoveryBudgetEngine(t *testing.T, budget *int, maxDepth, maxFrontier int) *Engine {
+	t.Helper()
+	cfg := &config.Config{Crawler: config.CrawlerConfig{
+		CrawlScope:      "host",
+		DiscoveryBudget: budget,
+		MaxDepth:        maxDepth,
+		MaxFrontierSize: maxFrontier,
+	}}
+	engine := NewEngine(cfg, nil)
+	engine.session = NewSession([]string{"https://example.test/seed"}, cfg)
+	engine.buildScope()
+	return engine
+}
+
+func TestDiscoveredBudgetZeroKeepsSeedsSeparate(t *testing.T) {
+	zero := 0
+	engine := newDiscoveryBudgetEngine(t, &zero, 0, 10)
+	engine.seedFrontier([]string{"https://example.test/seed"})
+
+	if got := engine.front.Len(); got != 1 {
+		t.Fatalf("seed frontier len = %d, want 1", got)
+	}
+	if engine.admitDiscoveredURL("https://example.test/discovered", 1, "https://example.test/seed") {
+		t.Fatal("zero discovery budget admitted a URL")
+	}
+	if engine.discoveredPages != 0 || engine.front.Len() != 1 {
+		t.Fatalf("zero budget accounting = discovered:%d frontier:%d, want 0 and 1", engine.discoveredPages, engine.front.Len())
+	}
+	stored := engine.session.ToStorageRow().Config
+	if !strings.Contains(stored, `"DiscoveryBudget":0`) {
+		t.Fatalf("saved session config did not preserve explicit zero: %s", stored)
+	}
+}
+
+func TestDiscoveredBudgetOnlyCountsSuccessfulUniqueAdmissions(t *testing.T) {
+	three := 3
+	engine := newDiscoveryBudgetEngine(t, &three, 1, 10)
+	engine.excludePatterns = []string{"/excluded"}
+
+	if !engine.admitDiscoveredURL("https://example.test/first", 1, "https://example.test/seed") {
+		t.Fatal("first unique discovery was not admitted")
+	}
+	for _, target := range []string{
+		"https://example.test/first",
+		"https://outside.test/page",
+		"https://example.test/excluded",
+		"https://example.test/too-deep",
+	} {
+		depth := 1
+		if strings.Contains(target, "too-deep") {
+			depth = 2
+		}
+		if engine.admitDiscoveredURL(target, depth, "https://example.test/seed") {
+			t.Fatalf("rejected discovery %q was admitted", target)
+		}
+	}
+	if engine.discoveredPages != 1 {
+		t.Fatalf("rejections consumed discovery budget: got %d, want 1", engine.discoveredPages)
+	}
+	if !engine.front.Add(frontier.CrawlURL{URL: "https://example.test/retry", Depth: 1, Attempt: 1}) {
+		t.Fatal("retry fixture was not added to frontier")
+	}
+	if engine.discoveredPages != 1 {
+		t.Fatalf("retry consumed discovery budget: got %d, want 1", engine.discoveredPages)
+	}
+
+	limited := newDiscoveryBudgetEngine(t, &three, 0, 1)
+	if !limited.admitDiscoveredURL("https://example.test/only", 1, "https://example.test/seed") {
+		t.Fatal("frontier capacity fixture did not admit initial URL")
+	}
+	if limited.admitDiscoveredURL("https://example.test/rejected-by-frontier", 1, "https://example.test/seed") {
+		t.Fatal("frontier-capacity rejection was admitted")
+	}
+	if limited.discoveredPages != 1 {
+		t.Fatalf("frontier rejection consumed discovery budget: got %d, want 1", limited.discoveredPages)
+	}
+
+	engine.cancel()
+	if engine.admitDiscoveredURL("https://example.test/cancelled", 1, "https://example.test/seed") {
+		t.Fatal("cancelled crawl admitted a discovery")
+	}
+	if engine.discoveredPages != 1 {
+		t.Fatalf("cancellation consumed discovery budget: got %d, want 1", engine.discoveredPages)
+	}
+}
+
+func TestStaticRenderedDiscoverySharesExactBudget(t *testing.T) {
+	for _, budget := range []int{0, 1, 3} {
+		budget := budget
+		t.Run(fmt.Sprintf("budget_%d", budget), func(t *testing.T) {
+			engine := newDiscoveryBudgetEngine(t, &budget, 0, 20)
+			start := make(chan struct{})
+			var workers sync.WaitGroup
+			admit := func(urls []string) {
+				defer workers.Done()
+				<-start
+				for _, target := range urls {
+					engine.admitDiscoveredURL(target, 1, "https://example.test/seed")
+				}
+			}
+			workers.Add(2)
+			go admit([]string{"https://example.test/shared", "https://example.test/static-one", "https://example.test/static-two"})
+			go admit([]string{"https://example.test/shared", "https://example.test/rendered-one", "https://example.test/rendered-two"})
+			close(start)
+			workers.Wait()
+
+			if engine.discoveredPages > budget {
+				t.Fatalf("discoveredPages = %d, budget = %d", engine.discoveredPages, budget)
+			}
+			if engine.front.Len() != engine.discoveredPages {
+				t.Fatalf("frontier len = %d, discoveredPages = %d", engine.front.Len(), engine.discoveredPages)
+			}
+			if engine.discoveredPages != budget {
+				t.Fatalf("discoveredPages = %d, want exact budget %d with enough unique URLs", engine.discoveredPages, budget)
+			}
+		})
+	}
+}
+
 func TestNeedsBrowserRenderMeasuresCWVRegardlessOfDetectionMode(t *testing.T) {
 	staticPage := &parser.PageData{
 		Title:     "Complete static page",

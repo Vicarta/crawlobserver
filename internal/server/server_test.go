@@ -34,51 +34,56 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockStore struct {
-	sessions             []storage.CrawlSession
-	pages                []storage.PageRow
-	pageIssues           []storage.PageIssue
-	coreWebVitalsReport  *storage.CoreWebVitalsReport
-	coreWebVitalsCalls   []coreWebVitalsCall
-	links                []storage.LinkRow
-	stats                *storage.SessionStats
-	pageHTML             string
-	page                 *storage.PageRow
-	pageLinks            *storage.PageLinksResult
-	pageDiscovery        *storage.PageDiscoveryEvidence
-	pageDiscoveryErr     error
-	storageStats         *storage.StorageStatsResult
-	sessionStorageStats  map[string]uint64
-	globalSessions       []storage.GlobalSessionStats
-	pagerankDist         *storage.PageRankDistributionResult
-	pagerankTreemap      []storage.PageRankTreemapEntry
-	pagerankTop          *storage.PageRankTopResult
-	robotsHosts          []storage.RobotsRow
-	robotsContent        *storage.RobotsRow
-	sitemaps             []storage.SitemapRow
-	sitemapURLs          []storage.SitemapURLRow
-	deltaSitemapURLs     []string
-	deltaProblemURLs     []string
-	deltaProblemEntered  chan struct{}
-	deltaProblemRelease  chan struct{}
-	orphanCandidates     []storage.Orphan404CleanupCandidate
-	pagerankEntered      chan struct{}
-	pagerankRelease      chan struct{}
-	urlsByHost           map[string][]string // host prefix -> URLs
-	compareStatsResult   *storage.CompareStatsResult
-	comparePagesResult   *storage.PageDiffResult
-	compareLinksResult   *storage.LinkDiffResult
-	auditResult          *storage.AuditResult
-	expiredDomainsResult *storage.ExpiredDomainsResult
-	hasStoredHTML        bool
-	pageBodies           []storage.PageBody
-	extractionResult     *extraction.ExtractionResult
-	err                  error
-	deleteSessionErr     error
-	deleteCalls          []string
-	updateProjectCalls   []updateProjectCall
-	getSessionByID       map[string]*storage.CrawlSession
-	listPagesCalls       []listPagesCall
-	deleteProviderCalls  []deleteProviderCall
+	sessions                  []storage.CrawlSession
+	pages                     []storage.PageRow
+	pageIssues                []storage.PageIssue
+	coreWebVitalsReport       *storage.CoreWebVitalsReport
+	coreWebVitalsCalls        []coreWebVitalsCall
+	links                     []storage.LinkRow
+	stats                     *storage.SessionStats
+	pageHTML                  string
+	page                      *storage.PageRow
+	pageLinks                 *storage.PageLinksResult
+	pageDiscovery             *storage.PageDiscoveryEvidence
+	pageDiscoveryErr          error
+	storageStats              *storage.StorageStatsResult
+	sessionStorageStats       map[string]uint64
+	globalSessions            []storage.GlobalSessionStats
+	pagerankDist              *storage.PageRankDistributionResult
+	pagerankTreemap           []storage.PageRankTreemapEntry
+	pagerankTop               *storage.PageRankTopResult
+	robotsHosts               []storage.RobotsRow
+	robotsContent             *storage.RobotsRow
+	sitemaps                  []storage.SitemapRow
+	sitemapURLs               []storage.SitemapURLRow
+	deltaSitemapURLs          []string
+	deltaSitemapTerms         *storage.DeltaSitemapTerms
+	deltaProblemURLs          []string
+	deltaProblemEntered       chan struct{}
+	deltaProblemRelease       chan struct{}
+	orphanCandidates          []storage.Orphan404CleanupCandidate
+	pagerankEntered           chan struct{}
+	pagerankRelease           chan struct{}
+	urlsByHost                map[string][]string // host prefix -> URLs
+	compareStatsResult        *storage.CompareStatsResult
+	comparePagesResult        *storage.PageDiffResult
+	compareLinksResult        *storage.LinkDiffResult
+	auditResult               *storage.AuditResult
+	expiredDomainsResult      *storage.ExpiredDomainsResult
+	hasStoredHTML             bool
+	pageBodies                []storage.PageBody
+	extractionResult          *extraction.ExtractionResult
+	err                       error
+	deleteSessionErr          error
+	deleteCalls               []string
+	updateProjectCalls        []updateProjectCall
+	getSessionByID            map[string]*storage.CrawlSession
+	effectiveOrigins          map[string]storage.EffectiveOrigin
+	effectiveOriginsErr       error
+	effectiveOriginCalls      int
+	effectiveOriginBatchSizes []int
+	listPagesCalls            []listPagesCall
+	deleteProviderCalls       []deleteProviderCall
 }
 
 type listPagesCall struct {
@@ -136,6 +141,60 @@ func (m *mockStore) ListSessionsPaginated(_ context.Context, limit, offset int, 
 		end = len(sessions)
 	}
 	return sessions[offset:end], len(sessions), nil
+}
+
+func (m *mockStore) EffectiveOriginsForSessions(_ context.Context, sessions []storage.CrawlSession) (map[string]storage.EffectiveOrigin, error) {
+	m.effectiveOriginCalls++
+	m.effectiveOriginBatchSizes = append(m.effectiveOriginBatchSizes, len(sessions))
+	if m.effectiveOriginsErr != nil {
+		return nil, m.effectiveOriginsErr
+	}
+	result := make(map[string]storage.EffectiveOrigin, len(sessions))
+	for _, session := range sessions {
+		result[session.ID] = storage.EffectiveOrigin{State: storage.EffectiveOriginUnavailable}
+		if origin, ok := m.effectiveOrigins[session.ID]; ok {
+			result[session.ID] = origin
+		}
+	}
+	return result, nil
+}
+
+func TestScopedSessionsPaginatesBeforeEffectiveOriginEnrichment(t *testing.T) {
+	srv, handler, ks := newTestServer(t)
+	project, err := ks.CreateProject("scoped-origin-page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ks.CreateAPIKey("scoped-origin-reader", "project", &project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := srv.store.(*mockStore)
+	base := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	ms.sessions = []storage.CrawlSession{
+		{ID: "newest", ProjectID: &project.ID, StartedAt: base.Add(2 * time.Hour)},
+		{ID: "middle", ProjectID: &project.ID, StartedAt: base.Add(time.Hour)},
+		{ID: "oldest", ProjectID: &project.ID, StartedAt: base},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions?limit=1&offset=1", nil)
+	req.Header.Set("X-API-Key", key.FullKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Sessions []map[string]interface{} `json:"sessions"`
+		Total    int                      `json:"total"`
+	}
+	decodeJSON(t, rec, &payload)
+	if payload.Total != 3 || len(payload.Sessions) != 1 || payload.Sessions[0]["ID"] != "middle" {
+		t.Fatalf("paginated payload = %#v", payload)
+	}
+	if !reflect.DeepEqual(ms.effectiveOriginBatchSizes, []int{1}) {
+		t.Fatalf("origin enrichment batch sizes = %#v; want [1]", ms.effectiveOriginBatchSizes)
+	}
 }
 
 func (m *mockStore) LatestProjectSession(ctx context.Context, projectID string) (*storage.CrawlSession, error) {
@@ -435,6 +494,13 @@ func (m *mockStore) DeltaGSCCandidateURLs(_ context.Context, _ string, _ int) ([
 
 func (m *mockStore) DeltaSitemapCandidateURLs(_ context.Context, _ string, _ int) ([]string, error) {
 	return append([]string(nil), m.deltaSitemapURLs...), m.err
+}
+
+func (m *mockStore) LoadDeltaSitemapTerms(_ context.Context, _ string, _ string, _ string, _ int) (*storage.DeltaSitemapTerms, error) {
+	if m.deltaSitemapTerms != nil {
+		return m.deltaSitemapTerms, m.err
+	}
+	return &storage.DeltaSitemapTerms{}, m.err
 }
 
 func (m *mockStore) DeltaProblemPageURLs(_ context.Context, _ string, _ int) ([]string, error) {
@@ -3462,6 +3528,78 @@ func TestSessionsListReturnsLivePagesCrawled(t *testing.T) {
 	second := pSessions[1].(map[string]interface{})
 	if second["PagesCrawled"] != float64(42) {
 		t.Errorf("paginated completed session: expected PagesCrawled=42, got %v", second["PagesCrawled"])
+	}
+}
+
+func TestSessionPayloadIncludesResponseOnlyEffectiveOrigin(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	ms := srv.store.(*mockStore)
+	ms.sessions = []storage.CrawlSession{
+		{ID: "proven", Status: "completed", SeedURLs: []string{"http://seed.example/"}},
+		{ID: "unavailable", Status: "failed", SeedURLs: []string{"https://seed.example/"}},
+		{ID: "ambiguous", Status: "completed", SeedURLs: []string{"https://seed.example/"}},
+	}
+	ms.effectiveOrigins = map[string]storage.EffectiveOrigin{
+		"proven":    {Origin: "https://www.example.test", State: storage.EffectiveOriginProven},
+		"ambiguous": {State: storage.EffectiveOriginAmbiguous},
+	}
+
+	request := func(path string) []map[string]interface{} {
+		t.Helper()
+		req := authRequest(httptest.NewRequest(http.MethodGet, path, nil))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: expected 200, got %d; body: %s", path, rec.Code, rec.Body.String())
+		}
+		var payload []map[string]interface{}
+		if strings.Contains(path, "limit=") {
+			var paginated struct {
+				Sessions []map[string]interface{} `json:"sessions"`
+			}
+			decodeJSON(t, rec, &paginated)
+			return paginated.Sessions
+		}
+		decodeJSON(t, rec, &payload)
+		return payload
+	}
+
+	for _, path := range []string{"/api/sessions", "/api/sessions?limit=10&offset=0"} {
+		sessions := request(path)
+		if len(sessions) != 3 {
+			t.Fatalf("GET %s: got %d sessions, want 3", path, len(sessions))
+		}
+		byID := make(map[string]map[string]interface{}, len(sessions))
+		for _, session := range sessions {
+			byID[session["ID"].(string)] = session
+		}
+		if byID["proven"]["effective_origin"] != "https://www.example.test" || byID["proven"]["effective_origin_state"] != "proven" {
+			t.Fatalf("proven origin payload = %#v", byID["proven"])
+		}
+		if byID["unavailable"]["effective_origin"] != "" || byID["unavailable"]["effective_origin_state"] != "unavailable" {
+			t.Fatalf("unavailable origin payload = %#v", byID["unavailable"])
+		}
+		if byID["ambiguous"]["effective_origin"] != "" || byID["ambiguous"]["effective_origin_state"] != "ambiguous" {
+			t.Fatalf("ambiguous origin payload = %#v", byID["ambiguous"])
+		}
+		if got := byID["unavailable"]["SeedURLs"].([]interface{}); len(got) != 1 || got[0] != "https://seed.example/" {
+			t.Fatalf("raw SeedURLs changed: %#v", got)
+		}
+	}
+
+	var detailPayload map[string]interface{}
+	req := authRequest(httptest.NewRequest(http.MethodGet, "/api/sessions/proven", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	decodeJSON(t, rec, &detailPayload)
+	if detailPayload["effective_origin"] != "https://www.example.test" || detailPayload["effective_origin_state"] != "proven" {
+		t.Fatalf("detail origin payload = %#v", detailPayload)
+	}
+	if ms.effectiveOriginCalls != 3 {
+		t.Fatalf("origin enrichment calls = %d, want one per response", ms.effectiveOriginCalls)
 	}
 }
 

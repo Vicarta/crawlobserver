@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getSessions,
+  getSessionsPaginated,
   getSession,
   getCoreWebVitals,
   getExternalLinks,
@@ -35,6 +36,26 @@ describe('fetchJSON', () => {
     const result = await getSessions();
     expect(result).toEqual([{ ID: '1' }]);
     expect(globalThis.fetch).toHaveBeenCalledWith('/api/sessions', {});
+  });
+
+  it('preserves effective-origin and raw-seed fields in paginated session responses', async () => {
+    const session = {
+      ID: 'session-1',
+      SeedURLs: ['http://example.test'],
+      effective_origin: 'https://www.example.test',
+      effective_origin_state: 'proven',
+    };
+    globalThis.fetch.mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify({ sessions: [session], total: 1 })),
+    });
+
+    const result = await getSessionsPaginated(30, 0, { projectId: 'project-1' });
+    expect(result.sessions[0]).toEqual(session);
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      '/api/sessions?limit=30&offset=0&project_id=project-1',
+      {},
+    );
   });
 
   it('throws with error message from JSON body on 404', async () => {

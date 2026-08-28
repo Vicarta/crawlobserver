@@ -60,11 +60,11 @@ func TestHasPort(t *testing.T) {
 		{"127.0.0.1:80", true},
 		{"[::1]:443", true},
 		{"example.com", false},
-		{"example.com:", true},                     // SplitHostPort accepts empty port
-		{"[::1]", false},                           // IPv6 without port
-		{"", false},                                // empty string
-		{"192.168.1.1", false},                     // bare IPv4
-		{"sub.domain.example.com:9090", true},      // deep subdomain with port
+		{"example.com:", true},                // SplitHostPort accepts empty port
+		{"[::1]", false},                      // IPv6 without port
+		{"", false},                           // empty string
+		{"192.168.1.1", false},                // bare IPv4
+		{"sub.domain.example.com:9090", true}, // deep subdomain with port
 	}
 
 	for _, tt := range tests {
@@ -105,6 +105,48 @@ func TestFetchResultIsHTML(t *testing.T) {
 				t.Errorf("FetchResult{ContentType: %q}.IsHTML() = %v, want %v", tt.ct, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSitemapLastModStrictComparison(t *testing.T) {
+	tests := []struct {
+		name       string
+		candidate  string
+		baseline   string
+		comparison int
+		comparable bool
+	}{
+		{"forward date", "2026-08-26", "2026-08-25", 1, true},
+		{"equal date", "2026-08-26", "2026-08-26", 0, true},
+		{"backward date", "2026-08-25", "2026-08-26", -1, true},
+		{"forward instant", "2026-08-26T09:00:01Z", "2026-08-26T09:00:00Z", 1, true},
+		{"same instant offsets", "2026-08-26T12:00:00+03:00", "2026-08-26T09:00:00Z", 0, true},
+		{"mixed precision same UTC day", "2026-08-26T23:59:59-03:00", "2026-08-27", 0, true},
+		{"mixed precision next UTC day", "2026-08-27T00:00:00Z", "2026-08-26", 1, true},
+		{"missing", "", "2026-08-26", 0, false},
+		{"invalid", "yesterday", "2026-08-26", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, comparable := CompareSitemapLastMod(tt.candidate, tt.baseline)
+			if got != tt.comparison || comparable != tt.comparable {
+				t.Fatalf("CompareSitemapLastMod(%q, %q) = (%d, %t), want (%d, %t)", tt.candidate, tt.baseline, got, comparable, tt.comparison, tt.comparable)
+			}
+			if SitemapLastModStrictlyForward(tt.candidate, tt.baseline) != (tt.comparable && tt.comparison > 0) {
+				t.Fatalf("SitemapLastModStrictlyForward(%q, %q) mismatch", tt.candidate, tt.baseline)
+			}
+		})
+	}
+}
+
+func TestParseSitemapLastModPreservesRawValue(t *testing.T) {
+	parsed, err := ParseSitemapLastMod(" 2026-08-26 ")
+	if err != nil {
+		t.Fatalf("ParseSitemapLastMod() error = %v", err)
+	}
+	if parsed.Raw != " 2026-08-26 " || !parsed.DateOnly || parsed.Time.Location() != time.UTC {
+		t.Fatalf("parsed sitemap lastmod = %#v, want raw date-only UTC value", parsed)
 	}
 }
 

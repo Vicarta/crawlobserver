@@ -226,6 +226,92 @@ func cloneDeltaSitemapRefresh(value *config.DeltaSitemapRefresh) *config.DeltaSi
 	return &clone
 }
 
+func deltaSitemapSelectionURLs(rows []storage.SitemapURLRow, settings *apikeys.ProjectDeltaSettings) []DeltaSitemapSelectionURL {
+	values := make([]DeltaSitemapSelectionURL, 0, len(rows))
+	for _, row := range rows {
+		normalized, err := normalizeDeltaURL(row.Loc, settings)
+		if err != nil || normalized == "" {
+			continue
+		}
+		values = append(values, DeltaSitemapSelectionURL{URL: normalized, LastMod: row.LastMod})
+	}
+	return values
+}
+
+func deltaSitemapSelectionURLsFromObservation(observation storage.DeltaSitemapObservation, settings *apikeys.ProjectDeltaSettings) []DeltaSitemapSelectionURL {
+	values := make([]DeltaSitemapSelectionURL, 0, len(observation.URLs))
+	for _, row := range observation.URLs {
+		normalized, err := normalizeDeltaURL(row.Loc, settings)
+		if err != nil || normalized == "" {
+			continue
+		}
+		values = append(values, DeltaSitemapSelectionURL{URL: normalized, LastMod: row.LastMod})
+	}
+	return values
+}
+
+func deltaSitemapRotationEpoch(observedAt time.Time) time.Time {
+	if observedAt.IsZero() {
+		return time.Time{}
+	}
+	utc := observedAt.UTC()
+	return time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func deltaSitemapSelectionConfig(selection DeltaSitemapSelection, terms *storage.DeltaSitemapTerms, lineage *storage.ProjectCurrentSnapshot, observedAt time.Time) *config.DeltaSitemapSelection {
+	if terms == nil || lineage == nil {
+		return nil
+	}
+	return &config.DeltaSitemapSelection{
+		SelectorRevision:                   DeltaSitemapSelectorRevision,
+		RawObservationSessionID:            terms.Raw.SessionID,
+		RawObservedAt:                      terms.Raw.ObservedAt,
+		PublishedSessionID:                 lineage.CurrentSessionID,
+		PublishedSnapshotRevision:          lineage.SnapshotRevision,
+		PublishedContentWatermarkSessionID: lineage.ContentWatermarkSessionID,
+		RotationEpoch:                      deltaSitemapRotationEpoch(observedAt),
+		EventTotal:                         selection.EventTotal,
+		EventSelected:                      selection.EventSelected,
+		EventDeferred:                      selection.EventDeferred,
+		CanarySelected:                     selection.CanarySelected,
+		SelectionComplete:                  selection.SelectionComplete,
+		SourceByURL:                        copyStringStringMap(selection.SourceByURL),
+	}
+}
+
+func cloneDeltaSitemapSelection(value *config.DeltaSitemapSelection) *config.DeltaSitemapSelection {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	clone.SourceByURL = copyStringStringMap(value.SourceByURL)
+	return &clone
+}
+
+func copyStringStringMap(value map[string]string) map[string]string {
+	if value == nil {
+		return nil
+	}
+	clone := make(map[string]string, len(value))
+	for key, item := range value {
+		clone[key] = item
+	}
+	return clone
+}
+
+func sitemapSelectionPendingCount(selection *config.DeltaSitemapSelection) int {
+	if selection == nil {
+		return 0
+	}
+	count := 0
+	for _, source := range selection.SourceByURL {
+		if source == DeltaSitemapSourcePendingUnpublished {
+			count++
+		}
+	}
+	return count
+}
+
 func copySitemapRows(rows []storage.SitemapRow) []storage.SitemapRow {
 	return append([]storage.SitemapRow(nil), rows...)
 }

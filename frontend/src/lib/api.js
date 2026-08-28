@@ -8,6 +8,8 @@
  * @property {string} StartedAt
  * @property {string} FinishedAt
  * @property {boolean} is_running
+ * @property {string} effective_origin
+ * @property {'proven'|'unavailable'|'ambiguous'} effective_origin_state
  */
 
 /**
@@ -76,6 +78,15 @@
  * @typedef {Object} Project
  * @property {string} id
  * @property {string} name
+ */
+
+/**
+ * @typedef {Object} DeltaPreview
+ * @property {number} sitemap_events
+ * @property {number} sitemap_pending_unpublished
+ * @property {number} sitemap_canaries
+ * @property {number} sitemap_deferred
+ * @property {string=} held_publication_reason
  */
 
 /**

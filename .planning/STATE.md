@@ -5,7 +5,7 @@
 See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 **Core value:** A server operator can deploy, start, secure, verify, and recover CrawlObserver without guessing critical runtime steps.
-**Current focus:** Phase 26: Trustworthy sitemap availability and lastmod validation
+**Current focus:** Phase 25.2: Bounded changed-only Daily Delta and verified effective origins
 
 ## Current Status
 
@@ -36,11 +36,34 @@ See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 ## Next Action
 
-Execute the planned Phase 26 sitemap availability and lastmod validation work.
+Finish Phase 25.2 plan 05 gates, commit/push, then deploy app-only through the
+active-crawl-blocking safe restart. Do not start a crawl or mutate production data.
 
 ## Accumulated Context
 
 ### Roadmap Evolution
+
+- Phase 25.2 inserted after Phase 25.1: bounded changed-only Daily Delta and
+  verified effective origins (URGENT).
+  - Fresh sitemap planning compares both the newest complete raw observation and
+    the materialized Current Snapshot sitemap observation. The published
+    materialized observation remains the authoritative safety term, so capped,
+    deferred, failed, or untrusted work cannot consume a pending added or
+    forward-lastmod event.
+  - Every evidence-backed changed event is eligible by default, followed by up
+    to 50 deterministic rotating canaries. Existing changed/new/global limits
+    remain safety ceilings: quiet sites normally stay near the requested small
+    daily set, while genuine broad changes may use the configured capacity.
+  - Conditional-request mode sends real validators; `304` outcomes preserve
+    current page and link evidence instead of replacing it with empty evidence.
+  - Static and rendered discovery share one exact independent zero/N budget.
+  - Session list/detail responses derive `effective_origin` only from durable
+    launched/final-redirect evidence. Raw `SeedURLs` remain unchanged provenance
+    and ProjectPage displays both.
+  - Five implementation plans include focused tests, full local gates,
+    `ProductFeatures.md` ownership, and guarded app-only deployment. Live crawls
+    and production data mutation are explicitly excluded.
+  - Phase 26 remains planned and now depends on Phase 25.2.
 
 - Phase 25.1 inserted after Phase 25: PageRank quality evidence consistency (URGENT).
   - At phase start, production session `cecabb70-b621-48a1-9dc4-1feb3c3757cb` was marked
@@ -173,7 +196,7 @@ Execute the planned Phase 26 sitemap availability and lastmod validation work.
 - Whether to build the Compose image on the server or push/pull a registry image later.
 
 ---
-*Last updated: 2026-08-08 after Phase 25.1 production acceptance*
+*Last updated: 2026-08-28 during Phase 25.2 execution*
 
 - Phase 13 added: PageRank Lab access, automatic PageRank recalculation after settings changes, and confirmed erroneous-page pruning.
 - Phase 14 added: structured crawl stop reasons plus deploy guard to prevent silent crawl interruption during app restarts.

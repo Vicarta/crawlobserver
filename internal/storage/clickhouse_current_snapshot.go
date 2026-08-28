@@ -18,6 +18,7 @@ import (
 const (
 	CurrentSnapshotLabel         = "Current Snapshot"
 	CurrentBaselineSnapshotLabel = "Current Baseline Snapshot"
+	deltaSitemapSelectorRevision = "v1"
 )
 
 var currentSnapshotPromotionLocks sync.Map
@@ -566,6 +567,13 @@ func (s *Store) PromoteDeltaToCurrentSnapshot(ctx context.Context, projectID, de
 		}
 		return snap, nil
 	}
+	// This is deliberately before every materialized mutation. An idempotent
+	// retry returns above before comparing against the snapshot revision it has
+	// already advanced.
+	publishSitemaps, err := s.deltaSitemapPublicationPreflight(ctx, snap, deltaSessionID)
+	if err != nil {
+		return snap, err
+	}
 
 	// A fold clears content markers, but an equal durable watermark still proves
 	// the delta content is already present. Re-evaluation may update only the
@@ -588,9 +596,7 @@ func (s *Store) PromoteDeltaToCurrentSnapshot(ctx context.Context, projectID, de
 		if err := s.ComputePageRankWithOptions(ctx, snap.CurrentSessionID, opts); err != nil {
 			return nil, err
 		}
-		if fresh, err := s.deltaHasFreshSitemapObservation(ctx, deltaSessionID); err != nil {
-			return nil, err
-		} else if fresh {
+		if publishSitemaps {
 			if err := s.replaceCurrentSnapshotSitemaps(ctx, snap.CurrentSessionID, deltaSessionID); err != nil {
 				return nil, fmt.Errorf("replacing current snapshot sitemap membership: %w", err)
 			}
@@ -607,6 +613,46 @@ func (s *Store) PromoteDeltaToCurrentSnapshot(ctx context.Context, projectID, de
 		}
 	}
 	return s.finalizeCurrentSnapshotDelta(ctx, *snap, deltaSessionID, maxDeltas, foldIntervalDays, binding)
+}
+
+// deltaSitemapPublicationPreflight accepts publication only for a new
+// selector-aware Delta whose fresh observation was planned against this exact
+// materialized Current Snapshot. An incomplete selection can still overlay the
+// selected page evidence, but it must leave the published sitemap safety term
+// unchanged so deferred events remain pending on the next plan.
+func (s *Store) deltaSitemapPublicationPreflight(ctx context.Context, snap *ProjectCurrentSnapshot, deltaSessionID string) (bool, error) {
+	if snap == nil {
+		return false, ErrCurrentSnapshotSourceSuperseded
+	}
+	delta, err := s.GetSession(ctx, deltaSessionID)
+	if err != nil {
+		return false, err
+	}
+	var saved config.Config
+	if err := json.Unmarshal([]byte(delta.Config), &saved); err != nil || saved.Crawler.DeltaPlan == nil {
+		return false, nil
+	}
+	plan := saved.Crawler.DeltaPlan
+	return deltaSitemapPublicationBindingMatches(plan, snap)
+}
+
+func deltaSitemapPublicationBindingMatches(plan *config.DeltaPlanConfig, snap *ProjectCurrentSnapshot) (bool, error) {
+	if plan == nil || plan.SitemapRefresh == nil || plan.SitemapRefresh.Mode != "fresh" {
+		return false, nil
+	}
+	selection := plan.SitemapSelection
+	if selection == nil {
+		// Legacy fresh Deltas retain their existing content-overlay behavior but
+		// cannot advance the new published sitemap term.
+		return false, nil
+	}
+	if snap == nil || plan.SitemapRefresh.FetchedAt.IsZero() || selection.SelectorRevision != deltaSitemapSelectorRevision || selection.RawObservationSessionID == "" || selection.RawObservedAt.IsZero() ||
+		selection.PublishedSessionID != snap.CurrentSessionID ||
+		selection.PublishedSnapshotRevision != snap.SnapshotRevision ||
+		selection.PublishedContentWatermarkSessionID != snap.ContentWatermarkSessionID {
+		return false, ErrCurrentSnapshotSourceSuperseded
+	}
+	return selection.SelectionComplete, nil
 }
 
 func (s *Store) finalizeCurrentSnapshotDelta(ctx context.Context, snap ProjectCurrentSnapshot, deltaSessionID string, maxDeltas, foldIntervalDays int, binding CrawlQualityPromotionEvent) (*ProjectCurrentSnapshot, error) {
@@ -1100,7 +1146,7 @@ func (s *Store) overlayDeltaPages(ctx context.Context, currentSessionID, deltaSe
 		INSERT INTO crawlobserver.pages (%s)
 		SELECT toUUID(?), %s
 		FROM crawlobserver.pages FINAL
-		WHERE crawl_session_id = ?`, snapshotPageColumns, snapshotPageSelectColumns),
+		WHERE crawl_session_id = ? AND status_code != 304`, snapshotPageColumns, snapshotPageSelectColumns),
 		currentSessionID, deltaSessionID,
 	)
 }
@@ -1110,14 +1156,23 @@ func (s *Store) overlayDeltaLinks(ctx context.Context, currentSessionID, deltaSe
 		ALTER TABLE crawlobserver.links DELETE
 		WHERE crawl_session_id = ?
 		  AND source_url IN (
-			SELECT url FROM crawlobserver.pages FINAL WHERE crawl_session_id = ?
+			SELECT url FROM crawlobserver.pages FINAL WHERE crawl_session_id = ? AND status_code != 304
 		  )
 		SETTINGS mutations_sync = 1`,
 		currentSessionID, deltaSessionID,
 	); err != nil {
 		return fmt.Errorf("removing current links for delta pages: %w", err)
 	}
-	return s.copySnapshotLinks(ctx, deltaSessionID, currentSessionID)
+	return s.conn.Exec(ctx, `
+		INSERT INTO crawlobserver.links (
+			crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag, link_location, crawled_at
+		)
+		SELECT toUUID(?), source_url, target_url, anchor_text, rel, is_internal, tag, link_location, crawled_at
+		FROM crawlobserver.links
+		WHERE crawl_session_id = ?
+		  AND source_url NOT IN (
+				SELECT url FROM crawlobserver.pages FINAL WHERE crawl_session_id = ? AND status_code = 304
+		  )`, currentSessionID, deltaSessionID, deltaSessionID)
 }
 
 func (s *Store) copySnapshotPages(ctx context.Context, sourceSessionID, targetSessionID string) error {
