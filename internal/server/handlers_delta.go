@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -37,6 +38,9 @@ type deltaPreview struct {
 	SitemapPending                      int                           `json:"sitemap_pending_unpublished"`
 	SitemapCanaries                     int                           `json:"sitemap_canaries"`
 	SitemapDeferred                     int                           `json:"sitemap_deferred"`
+	SitemapPublishedDifferences         *int                          `json:"sitemap_published_differences,omitempty"`
+	SitemapActionable                   *int                          `json:"sitemap_actionable,omitempty"`
+	SitemapStableAcknowledged           *int                          `json:"sitemap_stable_acknowledged,omitempty"`
 	HeldPublicationReason               string                        `json:"held_publication_reason,omitempty"`
 }
 
@@ -59,6 +63,20 @@ type deltaCandidateResult struct {
 	heldPublicationReason    string
 	preview                  deltaPreview
 }
+
+var (
+	errDeltaLaunchNoCandidates  = errors.New("no delta candidates to crawl")
+	errDeltaLaunchBusy          = errors.New("project has a running or queued crawl session")
+	errDeltaLaunchEvidenceStale = errors.New("delta launch evidence changed before the crawl could be reserved")
+	errDeltaLaunchNotDue        = errors.New("scheduled daily delta is no longer due")
+)
+
+type deltaLaunchMode uint8
+
+const (
+	deltaLaunchManual deltaLaunchMode = iota
+	deltaLaunchScheduled
+)
 
 func (s *Server) handleProjectDeltaSettings(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
@@ -407,41 +425,18 @@ func (s *Server) handleProjectDeltaRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.buildDeltaCandidates(r.Context(), projectID)
+	result, sessionID, err := s.launchProjectDelta(r.Context(), projectID, deltaLaunchManual)
 	if err != nil {
-		if strings.Contains(err.Error(), "no baseline session") || strings.Contains(err.Error(), "no delta candidates") {
+		if strings.Contains(err.Error(), "no baseline session") || errors.Is(err, errDeltaLaunchNoCandidates) {
 			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errors.Is(err, errDeltaLaunchBusy) || errors.Is(err, errDeltaLaunchEvidenceStale) {
+			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
 		internalError(w, r, err)
 		return
-	}
-	if result.preview.WillLaunch == 0 {
-		writeError(w, http.StatusBadRequest, "no delta candidates to crawl")
-		return
-	}
-	if result.settings.PauseDeltaWhenFullCrawlRunning && s.projectHasRunningSession(r.Context(), projectID) {
-		writeError(w, http.StatusConflict, "project has a running or queued crawl session")
-		return
-	}
-
-	req, err := s.deltaCrawlRequest(result)
-	if err != nil {
-		internalError(w, r, err)
-		return
-	}
-	sessionID, err := s.manager.StartCrawl(req)
-	if err != nil {
-		internalError(w, r, err)
-		return
-	}
-	now := time.Now().UTC()
-	if err := s.keyStore.MarkProjectDeltaRun(projectID, sessionID, now); err != nil {
-		internalError(w, r, err)
-		return
-	}
-	if len(result.manual) > 0 {
-		_ = s.keyStore.MarkProjectDeltaManualURLsConsumed(projectID, result.manual, now)
 	}
 	writeJSON(w, map[string]interface{}{
 		"session_id": sessionID,
@@ -499,27 +494,209 @@ func (s *Server) runDueDeltaProjects(ctx context.Context) {
 		if !deltaScheduleDue(st, time.Now()) {
 			continue
 		}
-		if st.PauseDeltaWhenFullCrawlRunning && s.projectHasRunningSession(ctx, st.ProjectID) {
+		if _, _, err := s.launchProjectDelta(ctx, st.ProjectID, deltaLaunchScheduled); err != nil {
 			continue
-		}
-		result, err := s.buildDeltaCandidates(ctx, st.ProjectID)
-		if err != nil || len(result.urls) == 0 {
-			continue
-		}
-		req, err := s.deltaCrawlRequest(result)
-		if err != nil {
-			continue
-		}
-		sessionID, err := s.manager.StartCrawl(req)
-		if err != nil {
-			continue
-		}
-		now := time.Now().UTC()
-		_ = s.keyStore.MarkProjectDeltaRun(st.ProjectID, sessionID, now)
-		if len(result.manual) > 0 {
-			_ = s.keyStore.MarkProjectDeltaManualURLsConsumed(st.ProjectID, result.manual, now)
 		}
 	}
+}
+
+// launchProjectDelta uses qualityPromotionLock(projectID) as the per-project
+// launch reservation. The lazy snapshot initialization must finish before the
+// reservation is acquired because it may use the same lock. Once held, every
+// executable entry point shares the final planning re-read, active-session
+// check, crawler start, and durable last-run mark.
+func (s *Server) launchProjectDelta(ctx context.Context, projectID string, mode deltaLaunchMode) (*deltaCandidateResult, string, error) {
+	if _, err := s.deltaBaselineSession(ctx, projectID); err != nil {
+		if strings.Contains(err.Error(), sql.ErrNoRows.Error()) {
+			return nil, "", fmt.Errorf("no baseline session found for project")
+		}
+		return nil, "", err
+	}
+
+	lock := qualityPromotionLock(projectID)
+	lock.Lock()
+	defer lock.Unlock()
+	if reservation, retained := s.deltaLaunchReservations.Load(projectID); retained && reservation != nil {
+		return nil, "", errDeltaLaunchBusy
+	}
+	if mode == deltaLaunchScheduled {
+		settings, err := s.keyStore.GetProjectDeltaSettings(projectID)
+		if err != nil {
+			return nil, "", err
+		}
+		if !settings.Enabled || !deltaScheduleDue(*settings, time.Now()) {
+			return nil, "", errDeltaLaunchNotDue
+		}
+	}
+
+	result, err := s.buildDeltaCandidatesLocked(ctx, projectID)
+	if err != nil {
+		return nil, "", err
+	}
+	return s.launchDeltaCandidateLocked(ctx, projectID, result)
+}
+
+// launchDeltaCandidateLocked consumes one already-planned candidate set while
+// the caller owns qualityPromotionLock(projectID). Keeping this narrow helper
+// separate makes it impossible for manual and scheduler launches to leave a
+// gap between evidence validation and the durable run reservation.
+func (s *Server) launchDeltaCandidateLocked(ctx context.Context, projectID string, result *deltaCandidateResult) (*deltaCandidateResult, string, error) {
+	if result == nil || result.settings == nil || result.baseline == nil || result.preview.WillLaunch == 0 || len(result.urls) == 0 {
+		return result, "", errDeltaLaunchNoCandidates
+	}
+	if err := s.validateDeltaLaunchReservation(ctx, projectID, result); err != nil {
+		return result, "", err
+	}
+	if s.deltaLaunchHasActiveSession(ctx, projectID, result.settings) {
+		return result, "", errDeltaLaunchBusy
+	}
+
+	req, err := s.deltaCrawlRequest(result)
+	if err != nil {
+		return result, "", err
+	}
+	sessionID, err := s.manager.StartCrawl(req)
+	if err != nil {
+		return result, "", err
+	}
+	// A started session must be visible to every local launch path before the
+	// SQLite receipt is written. Otherwise a transient MarkProjectDeltaRun
+	// failure leaves no durable last_session_id and permits a duplicate launch.
+	s.deltaLaunchReservations.Store(projectID, sessionID)
+	now := time.Now().UTC()
+	if err := s.markDeltaRun(projectID, sessionID, now); err != nil {
+		// Stop only the session created by this failed reservation. StopCrawl
+		// waits for the engine's terminal finalization; retaining the reservation
+		// when that cannot be confirmed is safer than allowing a duplicate retry.
+		if stopErr := s.manager.StopCrawl(sessionID); stopErr == nil &&
+			!s.manager.IsRunning(sessionID) && !s.manager.IsQueued(sessionID) {
+			s.deltaLaunchReservations.Delete(projectID)
+			return result, sessionID, fmt.Errorf("marking started delta crawl: %w; started session %s was rolled back", err, sessionID)
+		} else if stopErr != nil {
+			return result, sessionID, fmt.Errorf("marking started delta crawl: %w; rollback of session %s failed: %v; reservation retained", err, sessionID, stopErr)
+		}
+		return result, sessionID, fmt.Errorf("marking started delta crawl: %w; rollback of session %s is not yet terminal; reservation retained", err, sessionID)
+	}
+	s.deltaLaunchReservations.Delete(projectID)
+	if len(result.manual) > 0 {
+		_ = s.keyStore.MarkProjectDeltaManualURLsConsumed(projectID, result.manual, now)
+	}
+	return result, sessionID, nil
+}
+
+// validateDeltaLaunchReservation re-reads only durable Current Snapshot and
+// raw-proof facts. The fetched sitemap observation is already retained on the
+// candidate result; re-fetching it here would make Preview/run disagree and
+// would turn a read-only validation into another external operation.
+func (s *Server) validateDeltaLaunchReservation(ctx context.Context, projectID string, result *deltaCandidateResult) error {
+	if result == nil || result.baseline == nil {
+		return errDeltaLaunchEvidenceStale
+	}
+	lineage, err := s.deltaPlanLineage(ctx, projectID, result.baseline.ID)
+	if err != nil {
+		return fmt.Errorf("%w: current snapshot lineage is unavailable: %v", errDeltaLaunchEvidenceStale, err)
+	}
+	if lineage.CurrentSessionID != result.baseline.ID ||
+		lineage.SourceSessionID != result.baselineSourceID ||
+		lineage.SnapshotRevision != result.baselineSnapshotRev ||
+		lineage.ContentWatermarkSessionID != result.baselineWatermarkID ||
+		lineage.QualityEvaluationRevision != result.baselineEvaluation ||
+		lineage.BaselineQualityEvaluationRevision != result.baselineSourceEvaluation {
+		return fmt.Errorf("%w: current snapshot lineage changed", errDeltaLaunchEvidenceStale)
+	}
+
+	selection := result.sitemapSelection
+	if selection == nil {
+		return nil
+	}
+	if result.sitemapRefresh == nil || result.sitemapRefresh.Mode != deltaSitemapRefreshFresh {
+		return fmt.Errorf("%w: sitemap selection is not backed by a fresh observation", errDeltaLaunchEvidenceStale)
+	}
+	terms, err := s.store.LoadDeltaSitemapTerms(ctx, projectID, lineage.CurrentSessionID, lineage.SourceSessionID, deltaSitemapComparisonLimit)
+	if err != nil || terms == nil {
+		if err == nil {
+			err = errors.New("empty terms")
+		}
+		return fmt.Errorf("%w: raw sitemap proof is unavailable: %v", errDeltaLaunchEvidenceStale, err)
+	}
+	reloaded := SelectDeltaSitemapCandidates(deltaSitemapSelectionInput(projectID, lineage, result.sitemapRefresh, result.sitemapURLRows, terms, result.settings, result.baseline))
+	expected := deltaSitemapSelectionConfig(reloaded, terms, lineage, result.sitemapRefresh.FetchedAt)
+	if !deltaSitemapSelectionReservationMatches(selection, expected) {
+		return fmt.Errorf("%w: sitemap proof pair, digest, or URL partition changed", errDeltaLaunchEvidenceStale)
+	}
+	return nil
+}
+
+// deltaSitemapSelectionReservationMatches intentionally compares the durable
+// Published-vs-Raw partition, rather than the later global launch cap. Manual,
+// stale, and GSC sources may constrain the final selected count without
+// invalidating the sitemap evidence that was read under this reservation.
+func deltaSitemapSelectionReservationMatches(planned, reloaded *config.DeltaSitemapSelection) bool {
+	if planned == nil || reloaded == nil {
+		return planned == reloaded
+	}
+	if planned.SelectorRevision != reloaded.SelectorRevision ||
+		planned.RawObservationSessionID != reloaded.RawObservationSessionID ||
+		!planned.RawObservedAt.Equal(reloaded.RawObservedAt) ||
+		planned.PublishedSessionID != reloaded.PublishedSessionID ||
+		planned.PublishedSnapshotRevision != reloaded.PublishedSnapshotRevision ||
+		planned.PublishedContentWatermarkSessionID != reloaded.PublishedContentWatermarkSessionID ||
+		planned.PublishedDifferenceTotal != reloaded.PublishedDifferenceTotal ||
+		planned.ActionableTotal != reloaded.ActionableTotal ||
+		planned.StableAcknowledgedTotal != reloaded.StableAcknowledgedTotal ||
+		planned.PublicationHeld != reloaded.PublicationHeld ||
+		planned.StabilityOlderSessionID != reloaded.StabilityOlderSessionID ||
+		planned.StabilityNewerSessionID != reloaded.StabilityNewerSessionID ||
+		planned.StabilityProofDigest != reloaded.StabilityProofDigest ||
+		planned.StabilityLegacyCompletePair != reloaded.StabilityLegacyCompletePair {
+		return false
+	}
+	return deltaSitemapSourcePartitionMatches(planned.SourceByURL, reloaded.SourceByURL)
+}
+
+func deltaSitemapSourcePartitionMatches(planned, reloaded map[string]string) bool {
+	for url, source := range planned {
+		if source == DeltaSitemapSourceCanary {
+			continue
+		}
+		if reloaded[url] != source {
+			return false
+		}
+	}
+	for url, source := range reloaded {
+		if source == DeltaSitemapSourceCanary {
+			continue
+		}
+		if planned[url] != source {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) deltaLaunchHasActiveSession(ctx context.Context, projectID string, settings *apikeys.ProjectDeltaSettings) bool {
+	if reservation, ok := s.deltaLaunchReservations.Load(projectID); ok && reservation != nil {
+		// A MarkProjectDeltaRun failure after StartCrawl is resolved only after an
+		// explicit rollback verifies the session is inactive. Until then this is
+		// an unconditional per-project reservation, independent of any optional
+		// full-crawl pause setting.
+		return true
+	}
+	if settings != nil && settings.LastSessionID != "" &&
+		(s.manager.IsRunning(settings.LastSessionID) || s.manager.IsQueued(settings.LastSessionID)) {
+		return true
+	}
+	// Existing settings keep their meaning: a project can opt out of waiting for
+	// an unrelated full crawl. The LastSessionID check above is unconditional so
+	// two Daily Delta entry points cannot race into duplicate sessions.
+	return settings != nil && settings.PauseDeltaWhenFullCrawlRunning && s.projectHasRunningSession(ctx, projectID)
+}
+
+func (s *Server) markDeltaRun(projectID, sessionID string, when time.Time) error {
+	if s.markProjectDeltaRun != nil {
+		return s.markProjectDeltaRun(projectID, sessionID, when)
+	}
+	return s.keyStore.MarkProjectDeltaRun(projectID, sessionID, when)
 }
 
 func deltaScheduleDue(settings apikeys.ProjectDeltaSettings, now time.Time) bool {
@@ -618,6 +795,9 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 		if termsErr != nil {
 			return nil, fmt.Errorf("loading delta sitemap safety terms: %w", termsErr)
 		}
+		if terms == nil {
+			return nil, fmt.Errorf("loading delta sitemap safety terms: empty result")
+		}
 		refreshed, refreshErr := s.refreshDeltaSitemap(ctx, baseline, settings, perSourceLimit)
 		if refreshErr != nil {
 			return nil, refreshErr
@@ -627,17 +807,7 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 		sitemapURLRows = refreshed.SitemapURLRows
 		switch sitemapRefresh.Mode {
 		case deltaSitemapRefreshFresh:
-			selection := SelectDeltaSitemapCandidates(DeltaSitemapSelectionInput{
-				ProjectID:                 projectID,
-				PublishedSnapshotRevision: lineage.SnapshotRevision,
-				RotationEpoch:             deltaSitemapRotationEpoch(sitemapRefresh.FetchedAt),
-				Fresh:                     deltaSitemapSelectionURLs(refreshed.SitemapURLRows, settings),
-				Raw:                       deltaSitemapSelectionURLsFromObservation(terms.Raw, settings),
-				Published:                 deltaSitemapSelectionURLsFromObservation(terms.Published, settings),
-				ChangedLimit:              settings.SitemapChangedLimit,
-				CanaryCount:               settings.SitemapCanaryCount,
-				MaxCandidates:             settings.MaxCandidatesPerRun,
-			})
+			selection := SelectDeltaSitemapCandidates(deltaSitemapSelectionInput(projectID, lineage, sitemapRefresh, refreshed.SitemapURLRows, terms, settings, baseline))
 			sitemapSelection = deltaSitemapSelectionConfig(selection, terms, lineage, sitemapRefresh.FetchedAt)
 			selected := make([]string, 0, len(selection.Selected))
 			for _, candidate := range selection.Selected {
@@ -649,9 +819,7 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 				addSource(candidate.Source, []string{candidate.URL})
 			}
 			bySource["sitemap"] = len(selected)
-			if !selection.SelectionComplete {
-				heldPublicationReason = fmt.Sprintf("Sitemap publication held: %d changed event candidates are deferred.", selection.EventDeferred)
-			}
+			heldPublicationReason = deltaSitemapPublicationHoldReason(selection.PublicationHeld, selection.SelectionComplete, selection.EventDeferred)
 		case deltaSitemapRefreshSnapshotFallback:
 			heldPublicationReason = "Sitemap publication held: the sitemap refresh used the snapshot fallback."
 		case deltaSitemapRefreshSkipped:
@@ -731,9 +899,8 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 			sitemapSelection.EventDeferred += unlaunchedEvents
 			sitemapSelection.SelectionComplete = false
 		}
-		if !sitemapSelection.SelectionComplete {
-			heldPublicationReason = fmt.Sprintf("Sitemap publication held: %d changed event candidates are deferred.", sitemapSelection.EventDeferred)
-		}
+		sitemapSelection.SelectedTotal = sitemapSelection.EventSelected + sitemapSelection.CanarySelected
+		heldPublicationReason = deltaSitemapPublicationHoldReason(sitemapSelection.PublicationHeld, sitemapSelection.SelectionComplete, sitemapSelection.EventDeferred)
 	}
 	candidateSources := deltaCandidateSourcesForLaunched(filtered, sourceSets)
 	manual := launchedManualURLs(manualRaw, filtered, settings)
@@ -769,10 +936,7 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 		HeldPublicationReason:               heldPublicationReason,
 	}
 	if sitemapSelection != nil {
-		preview.SitemapEvents = sitemapSelection.EventSelected
-		preview.SitemapPending = sitemapSelectionPendingCount(sitemapSelection)
-		preview.SitemapCanaries = sitemapSelection.CanarySelected
-		preview.SitemapDeferred = sitemapSelection.EventDeferred
+		applyDeltaSitemapPreview(&preview, sitemapSelection)
 	}
 	return &deltaCandidateResult{
 		settings:                 settings,
@@ -793,6 +957,101 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 		heldPublicationReason:    heldPublicationReason,
 		preview:                  preview,
 	}, nil
+}
+
+func deltaSitemapSelectionInput(projectID string, lineage *storage.ProjectCurrentSnapshot, refresh *config.DeltaSitemapRefresh, freshRows []storage.SitemapURLRow, terms *storage.DeltaSitemapTerms, settings *apikeys.ProjectDeltaSettings, baseline *storage.CrawlSession) DeltaSitemapSelectionInput {
+	var seedURLs []string
+	scope := "host"
+	if baseline != nil {
+		seedURLs = baseline.SeedURLs
+		scope = baselineCrawlScope(baseline)
+	}
+	input := DeltaSitemapSelectionInput{
+		ProjectID:     projectID,
+		Fresh:         deltaSitemapSelectionURLsInScope(deltaSitemapSelectionURLs(freshRows, settings), seedURLs, scope, settings),
+		ChangedLimit:  settings.SitemapChangedLimit,
+		CanaryCount:   settings.SitemapCanaryCount,
+		MaxCandidates: settings.MaxCandidatesPerRun,
+	}
+	if lineage != nil {
+		input.PublishedSnapshotRevision = lineage.SnapshotRevision
+	}
+	if refresh != nil {
+		input.RotationEpoch = deltaSitemapRotationEpoch(refresh.FetchedAt)
+	}
+	if terms == nil {
+		return input
+	}
+	input.Raw = deltaSitemapSelectionURLsInScope(deltaSitemapSelectionURLsFromObservation(terms.Raw, settings), seedURLs, scope, settings)
+	input.Published = deltaSitemapSelectionURLsInScope(deltaSitemapSelectionURLsFromObservation(terms.Published, settings), seedURLs, scope, settings)
+	if stability := terms.Stability; stability != nil {
+		input.Stable = deltaSitemapStabilityProofs(stability, seedURLs, scope, settings)
+		input.StabilityOlderSessionID = stability.OlderSessionID
+		input.StabilityNewerSessionID = stability.NewerSessionID
+		input.StabilityProofDigest = stability.ProofDigest
+		input.StabilityLegacyPair = stability.LegacyCompletePair
+	}
+	return input
+}
+
+func deltaSitemapSelectionURLsInScope(values []DeltaSitemapSelectionURL, seedURLs []string, scope string, settings *apikeys.ProjectDeltaSettings) []DeltaSitemapSelectionURL {
+	result := make([]DeltaSitemapSelectionURL, 0, len(values))
+	for _, value := range values {
+		if deltaURLAllowedByPatterns(value.URL, settings) && deltaURLInScope(value.URL, seedURLs, scope) {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func deltaSitemapStabilityProofs(stability *storage.DeltaSitemapStability, seedURLs []string, scope string, settings *apikeys.ProjectDeltaSettings) []DeltaSitemapStabilityProof {
+	if stability == nil || len(stability.URLs) == 0 {
+		return nil
+	}
+	proofs := make([]DeltaSitemapStabilityProof, 0, len(stability.URLs))
+	for _, proof := range stability.URLs {
+		normalized, err := normalizeDeltaURL(proof.Loc, settings)
+		if err != nil || normalized == "" {
+			continue
+		}
+		if !deltaURLAllowedByPatterns(normalized, settings) || !deltaURLInScope(normalized, seedURLs, scope) {
+			continue
+		}
+		proofs = append(proofs, DeltaSitemapStabilityProof{URL: normalized, LastMod: proof.LastMod})
+	}
+	return proofs
+}
+
+func deltaSitemapPublicationHoldReason(publicationHeld, selectionComplete bool, eventDeferred int) string {
+	if publicationHeld && !selectionComplete {
+		return fmt.Sprintf("Sitemap publication held: %d changed event candidates are deferred; raw-stable sitemap differences are not publication evidence.", eventDeferred)
+	}
+	if publicationHeld {
+		return "Sitemap publication held: raw-stable sitemap differences are not publication evidence."
+	}
+	if !selectionComplete {
+		return fmt.Sprintf("Sitemap publication held: %d changed event candidates are deferred.", eventDeferred)
+	}
+	return ""
+}
+
+func applyDeltaSitemapPreview(preview *deltaPreview, selection *config.DeltaSitemapSelection) {
+	if preview == nil || selection == nil {
+		return
+	}
+	preview.SitemapEvents = selection.EventSelected
+	preview.SitemapPending = sitemapSelectionPendingCount(selection)
+	preview.SitemapCanaries = selection.CanarySelected
+	preview.SitemapDeferred = selection.EventDeferred
+	if selection.SelectorRevision != DeltaSitemapSelectorRevision {
+		return
+	}
+	publishedDifferences := selection.PublishedDifferenceTotal
+	actionable := selection.ActionableTotal
+	stableAcknowledged := selection.StableAcknowledgedTotal
+	preview.SitemapPublishedDifferences = &publishedDifferences
+	preview.SitemapActionable = &actionable
+	preview.SitemapStableAcknowledged = &stableAcknowledged
 }
 
 // deltaBaselineSessionReadOnly resolves the canonical materialized session

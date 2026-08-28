@@ -117,6 +117,7 @@ func (s *Server) refreshDeltaSitemap(ctx context.Context, baseline *storage.Craw
 	}
 	result.Candidates = sortedSet(freshSet)
 	result.Refresh.FreshURLCount = len(result.Candidates)
+	result.Refresh.RawURLRowCount = len(result.SitemapURLRows)
 	baselineSet := uniqueNormalizedDeltaURLs(baselineURLs, settings)
 	result.Refresh.AddedCount = countSetDifference(freshSet, baselineSet)
 	result.Refresh.RemovedCount = countSetDifference(baselineSet, freshSet)
@@ -273,8 +274,17 @@ func deltaSitemapSelectionConfig(selection DeltaSitemapSelection, terms *storage
 		EventTotal:                         selection.EventTotal,
 		EventSelected:                      selection.EventSelected,
 		EventDeferred:                      selection.EventDeferred,
+		PublishedDifferenceTotal:           selection.PublishedDifferenceTotal,
+		ActionableTotal:                    selection.ActionableTotal,
+		StableAcknowledgedTotal:            selection.StableAcknowledgedTotal,
+		SelectedTotal:                      selection.SelectedTotal,
 		CanarySelected:                     selection.CanarySelected,
 		SelectionComplete:                  selection.SelectionComplete,
+		PublicationHeld:                    selection.PublicationHeld,
+		StabilityOlderSessionID:            selection.StabilityOlderSessionID,
+		StabilityNewerSessionID:            selection.StabilityNewerSessionID,
+		StabilityProofDigest:               selection.StabilityProofDigest,
+		StabilityLegacyCompletePair:        selection.StabilityLegacyPair,
 		SourceByURL:                        copyStringStringMap(selection.SourceByURL),
 	}
 }

@@ -60,6 +60,65 @@ func TestPageHTTPValidatorsRetainExactCaseInsensitiveHeaders(t *testing.T) {
 	}
 }
 
+func TestDeltaSitemapPageEvidenceRejectsAmbiguousNormalizedIdentity(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	sessionID := uuid.NewString()
+	t.Cleanup(func() { cleanupDeltaTestSession(t, s, sessionID) })
+	if err := s.InsertSession(ctx, &CrawlSession{ID: sessionID, StartedAt: time.Now().UTC(), Status: "completed", Label: "Daily Delta Crawl"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertPages(ctx, []PageRow{
+		{CrawlSessionID: sessionID, URL: "https://example.test/path", StatusCode: 200, ContentHash: 101, CrawledAt: time.Now().UTC()},
+		{CrawlSessionID: sessionID, URL: "https://example.test:443/path", StatusCode: 200, ContentHash: 101, CrawledAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	evidence, err := s.loadDeltaSitemapPageEvidence(ctx, []string{sessionID}, []string{
+		"https://example.test/path",
+		"https://example.test:443/path",
+	}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence[sessionID]) != 0 {
+		t.Fatalf("ambiguous normalized identity produced evidence: %#v", evidence[sessionID])
+	}
+}
+
+func TestDeltaSitemapPageEvidenceRequiresCompleteSuccessfulBody(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	sessionID := uuid.NewString()
+	t.Cleanup(func() { cleanupDeltaTestSession(t, s, sessionID) })
+	if err := s.InsertSession(ctx, &CrawlSession{ID: sessionID, StartedAt: time.Now().UTC(), Status: "completed", Label: "Daily Delta Crawl"}); err != nil {
+		t.Fatal(err)
+	}
+	urls := []string{
+		"https://example.test/good",
+		"https://example.test/truncated",
+		"https://example.test/not-found",
+		"https://example.test/server-error",
+	}
+	if err := s.InsertPages(ctx, []PageRow{
+		{CrawlSessionID: sessionID, URL: urls[0], StatusCode: 200, ContentHash: 101, CrawledAt: time.Now().UTC()},
+		{CrawlSessionID: sessionID, URL: urls[1], StatusCode: 200, ContentHash: 102, BodyTruncated: true, CrawledAt: time.Now().UTC()},
+		{CrawlSessionID: sessionID, URL: urls[2], StatusCode: 404, ContentHash: 103, CrawledAt: time.Now().UTC()},
+		{CrawlSessionID: sessionID, URL: urls[3], StatusCode: 500, ContentHash: 104, CrawledAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	evidence, err := s.loadDeltaSitemapPageEvidence(ctx, []string{sessionID}, urls, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence[sessionID]) != 1 || evidence[sessionID][urls[0]].ContentHash != 101 {
+		t.Fatalf("ineligible page evidence was accepted: %#v", evidence[sessionID])
+	}
+}
+
 func TestConditional304OverlayPreservesCurrentPageAndLinks(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -158,7 +217,7 @@ func TestDeltaSitemapObservationTermsUseNewestFreshRawAndExactPublishedTerm(t *t
 	})
 
 	freshConfig, err := json.Marshal(config.Config{Crawler: config.CrawlerConfig{DeltaPlan: &config.DeltaPlanConfig{
-		SitemapRefresh: &config.DeltaSitemapRefresh{Mode: "fresh", FetchedAt: time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC)},
+		SitemapRefresh: &config.DeltaSitemapRefresh{Mode: "fresh", FetchedAt: time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC), FreshURLCount: 1, RawURLRowCount: 1},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +253,86 @@ func TestDeltaSitemapObservationTermsUseNewestFreshRawAndExactPublishedTerm(t *t
 	}
 	if terms.Published.SessionID != publishedID || len(terms.Published.URLs) != 1 || terms.Published.URLs[0].Loc != "https://example.test/published" {
 		t.Fatalf("published term = %#v, want exact materialized session", terms.Published)
+	}
+}
+
+func TestDeltaSitemapStabilityUsesOnlyExactCompletedFreshPair(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	projectID := "delta-sitemap-stability-" + uuid.NewString()
+	publishedID := uuid.NewString()
+	olderID := uuid.NewString()
+	newerID := uuid.NewString()
+	ids := []string{publishedID, olderID, newerID}
+	for _, id := range ids {
+		cleanupDeltaTestSession(t, s, id)
+	}
+	t.Cleanup(func() {
+		for _, id := range ids {
+			cleanupDeltaTestSession(t, s, id)
+		}
+	})
+
+	freshConfig, err := json.Marshal(config.Config{Crawler: config.CrawlerConfig{DeltaPlan: &config.DeltaPlanConfig{
+		SitemapRefresh: &config.DeltaSitemapRefresh{Mode: "fresh", FetchedAt: time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC), FreshURLCount: 2, RawURLRowCount: 2},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	for _, session := range []*CrawlSession{
+		{ID: publishedID, StartedAt: now.Add(-4 * time.Hour), FinishedAt: now.Add(-3 * time.Hour), Status: "completed", ProjectID: &projectID, Label: CurrentSnapshotLabel},
+		{ID: olderID, StartedAt: now.Add(-3 * time.Hour), FinishedAt: now.Add(-2 * time.Hour), Status: "completed", ProjectID: &projectID, Label: "Daily Delta Crawl", Config: string(freshConfig)},
+		{ID: newerID, StartedAt: now.Add(-2 * time.Hour), FinishedAt: now.Add(-time.Hour), Status: "completed", ProjectID: &projectID, Label: "Daily Delta Crawl", Config: string(freshConfig)},
+	} {
+		if err := s.InsertSession(ctx, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stableURL := "https://example.test/stable"
+	changedURL := "https://example.test/changed"
+	for _, row := range []SitemapURLRow{
+		{CrawlSessionID: publishedID, SitemapURL: "https://example.test/sitemap.xml", Loc: stableURL, LastMod: "2026-08-01"},
+		{CrawlSessionID: olderID, SitemapURL: "https://example.test/sitemap.xml", Loc: stableURL, LastMod: "2026-08-15T16:53:17Z"},
+		{CrawlSessionID: olderID, SitemapURL: "https://example.test/sitemap.xml", Loc: changedURL, LastMod: "2026-08-15T16:53:17Z"},
+		{CrawlSessionID: newerID, SitemapURL: "https://example.test/sitemap.xml", Loc: stableURL, LastMod: "2026-08-15T16:53:17Z"},
+		{CrawlSessionID: newerID, SitemapURL: "https://example.test/sitemap.xml", Loc: changedURL, LastMod: "2026-08-15T16:53:17Z"},
+	} {
+		if err := s.InsertSitemapURLs(ctx, []SitemapURLRow{row}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range []PageRow{
+		{CrawlSessionID: olderID, URL: stableURL, StatusCode: 200, ContentHash: 42, CrawledAt: now.Add(-2 * time.Hour)},
+		{CrawlSessionID: olderID, URL: changedURL, StatusCode: 200, ContentHash: 43, CrawledAt: now.Add(-2 * time.Hour)},
+		{CrawlSessionID: newerID, URL: stableURL, StatusCode: 200, ContentHash: 42, CrawledAt: now.Add(-time.Hour)},
+		{CrawlSessionID: newerID, URL: changedURL, StatusCode: 200, ContentHash: 44, CrawledAt: now.Add(-time.Hour)},
+	} {
+		if err := s.InsertPages(ctx, []PageRow{row}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	terms, err := s.LoadDeltaSitemapTerms(ctx, projectID, publishedID, publishedID, 100)
+	if err != nil {
+		t.Fatalf("LoadDeltaSitemapTerms: %v", err)
+	}
+	if terms.Raw.SessionID != newerID || terms.Stability == nil {
+		t.Fatalf("terms = %#v, want newest raw plus stability", terms)
+	}
+	if terms.Stability.OlderSessionID != olderID || terms.Stability.NewerSessionID != newerID || !terms.Stability.LegacyCompletePair || len(terms.Stability.URLs) != 1 {
+		t.Fatalf("stability = %#v", terms.Stability)
+	}
+	if proof := terms.Stability.URLs[0]; proof.Loc != stableURL || proof.LastMod != "2026-08-15T16:53:17Z" || proof.ContentHash != 42 || terms.Stability.ProofDigest == "" {
+		t.Fatalf("proof = %#v, stability = %#v", proof, terms.Stability)
+	}
+	bounded, err := s.loadDeltaSitemapObservation(ctx, newerID, now, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bounded.Truncated || len(bounded.URLs) != 1 {
+		t.Fatalf("bounded observation = %#v, want one row plus truncation sentinel", bounded)
 	}
 }
 

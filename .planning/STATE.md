@@ -5,7 +5,7 @@
 See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 **Core value:** A server operator can deploy, start, secure, verify, and recover CrawlObserver without guessing critical runtime steps.
-**Current focus:** Phase 26: Trustworthy sitemap availability and lastmod validation (planned)
+**Current focus:** Phase 25.3: Raw-stabilized sitemap retry suppression
 
 ## Current Status
 
@@ -36,12 +36,26 @@ See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 ## Next Action
 
-Phase 25.2 is complete and deployed. Phase 26 is planned; begin it only on
-explicit product direction and keep its sitemap-reporting scope separate.
+Plan and execute urgent Phase 25.3. Keep Current Snapshot publication fail-closed,
+do not run a live crawl/rescan, and use read-only Preview for production acceptance.
 
 ## Accumulated Context
 
 ### Roadmap Evolution
+
+- Phase 25.3 inserted after Phase 25.2: raw-stabilized sitemap retry
+  suppression (URGENT).
+  - Production DI evidence disproved the apparent 2,063-page change set:
+    1,975 sitemap URLs shared one bulk 2026-08-15 timestamp, while the 27/28
+    August Delta sessions had identical content hashes, status, title, and H1
+    for all 2,094 joined pages.
+  - The Phase 25.2 selector correctly held Published Snapshot safety, but
+    incorrectly made already verified `pending_unpublished` tuples actionable
+    every day. Phase 25.3 separates publication differences from refetch work.
+  - Two completed per-URL raw observations with identical valid lastmod and
+    equal nonzero content hash may suppress refetch only. They cannot promote
+    Current Snapshot or relax quality.
+  - Phase 26 remains separate and now depends on Phase 25.3.
 
 - Phase 25.2 inserted after Phase 25.1: bounded changed-only Daily Delta and
   verified effective origins (URGENT).

@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	CurrentSnapshotLabel         = "Current Snapshot"
-	CurrentBaselineSnapshotLabel = "Current Baseline Snapshot"
-	deltaSitemapSelectorRevision = "v1"
+	CurrentSnapshotLabel           = "Current Snapshot"
+	CurrentBaselineSnapshotLabel   = "Current Baseline Snapshot"
+	deltaSitemapSelectorRevisionV1 = "v1"
+	deltaSitemapSelectorRevisionV2 = "v2"
 )
 
 var currentSnapshotPromotionLocks sync.Map
@@ -646,13 +647,22 @@ func deltaSitemapPublicationBindingMatches(plan *config.DeltaPlanConfig, snap *P
 		// cannot advance the new published sitemap term.
 		return false, nil
 	}
-	if snap == nil || plan.SitemapRefresh.FetchedAt.IsZero() || selection.SelectorRevision != deltaSitemapSelectorRevision || selection.RawObservationSessionID == "" || selection.RawObservedAt.IsZero() ||
+	if snap == nil || plan.SitemapRefresh.FetchedAt.IsZero() || !isSupportedDeltaSitemapSelectorRevision(selection.SelectorRevision) || selection.RawObservationSessionID == "" || selection.RawObservedAt.IsZero() ||
 		selection.PublishedSessionID != snap.CurrentSessionID ||
 		selection.PublishedSnapshotRevision != snap.SnapshotRevision ||
 		selection.PublishedContentWatermarkSessionID != snap.ContentWatermarkSessionID {
 		return false, ErrCurrentSnapshotSourceSuperseded
 	}
+	// Raw stability is deliberately execution-only. It can prove that a
+	// refetch is redundant, never that the published sitemap term may advance.
+	if selection.PublicationHeld || selection.StableAcknowledgedTotal > 0 {
+		return false, nil
+	}
 	return selection.SelectionComplete, nil
+}
+
+func isSupportedDeltaSitemapSelectorRevision(value string) bool {
+	return value == deltaSitemapSelectorRevisionV1 || value == deltaSitemapSelectorRevisionV2
 }
 
 func (s *Store) finalizeCurrentSnapshotDelta(ctx context.Context, snap ProjectCurrentSnapshot, deltaSessionID string, maxDeltas, foldIntervalDays int, binding CrawlQualityPromotionEvent) (*ProjectCurrentSnapshot, error) {

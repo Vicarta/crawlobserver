@@ -474,6 +474,16 @@ shared rendered metadata shell diagnostics без site-specific правил.
   project maximums remain unchanged. Canaries fill remaining capacity
   after changed, manual, and problem candidates instead of displacing them;
   changed-event, canary, and global candidate limits are editable in Daily Delta.
+- Selector v2 can suppress only an exact redundant refetch after two distinct
+  completed fresh raw observations for the same project prove the same normalized
+  URL, valid `lastmod`, terminal page evidence, and equal nonzero content hash.
+  This is read-only execution evidence: it records proof-pair lineage/digest,
+  stable versus actionable published differences, and keeps Current Snapshot
+  sitemap publication explicitly held. Missing, invalid, changed, or zero-hash
+  evidence remains actionable; the first bulk change is never auto-acknowledged.
+  Saved candidate limits remain upper safety ceilings, not a 50-80 URL target:
+  a genuine site-wide change can schedule most or all affected pages up to those
+  ceilings, regardless of cohort size.
 
 ## 19. Current Snapshot
 

@@ -148,6 +148,82 @@ func TestDeltaSitemapSelectionZeroGlobalMaximumDefersAllEventsAndCanaries(t *tes
 	}
 }
 
+func TestDeltaSitemapSelectionStableUnpublishedSuppressesOnlyExactProof(t *testing.T) {
+	input := DeltaSitemapSelectionInput{
+		ProjectID:                 "project-a",
+		PublishedSnapshotRevision: 7,
+		RotationEpoch:             time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC),
+		Fresh: []DeltaSitemapSelectionURL{
+			{URL: "https://example.test/stable", LastMod: "2026-08-26T00:00:00Z"},
+			{URL: "https://example.test/missing-proof", LastMod: "2026-08-26T00:00:00Z"},
+			{URL: "https://example.test/newer-than-proof", LastMod: "2026-08-27T00:00:00Z"},
+			{URL: "https://example.test/unchanged", LastMod: "2026-08-25"},
+		},
+		Published: []DeltaSitemapSelectionURL{
+			{URL: "https://example.test/stable", LastMod: "2026-08-25"},
+			{URL: "https://example.test/missing-proof", LastMod: "2026-08-25"},
+			{URL: "https://example.test/newer-than-proof", LastMod: "2026-08-25"},
+			{URL: "https://example.test/unchanged", LastMod: "2026-08-25"},
+		},
+		Stable: []DeltaSitemapStabilityProof{
+			{URL: "https://example.test/stable", LastMod: "2026-08-26T00:00:00Z"},
+			{URL: "https://example.test/newer-than-proof", LastMod: "2026-08-26T00:00:00Z"},
+		},
+		StabilityOlderSessionID: "older",
+		StabilityNewerSessionID: "newer",
+		StabilityProofDigest:    "proof-digest",
+		StabilityLegacyPair:     true,
+		ChangedLimit:            30,
+		CanaryCount:             50,
+		MaxCandidates:           80,
+	}
+
+	selection := SelectDeltaSitemapCandidates(input)
+	if selection.PublishedDifferenceTotal != 3 || selection.ActionableTotal != 2 || selection.StableAcknowledgedTotal != 1 {
+		t.Fatalf("difference classification = %#v", selection)
+	}
+	if selection.EventTotal != 2 || selection.EventSelected != 2 || selection.EventDeferred != 0 || selection.SelectedTotal != 3 {
+		t.Fatalf("actionable event counts = %#v", selection)
+	}
+	if selection.SourceByURL["https://example.test/stable"] != DeltaSitemapSourceStableUnpublished {
+		t.Fatalf("stable source = %#v", selection.SourceByURL)
+	}
+	if selection.SourceByURL["https://example.test/missing-proof"] != DeltaSitemapSourceLastModForward ||
+		selection.SourceByURL["https://example.test/newer-than-proof"] != DeltaSitemapSourceLastModForward {
+		t.Fatalf("unproven/newer tuples must remain actionable: %#v", selection.SourceByURL)
+	}
+	if !selection.PublicationHeld || !selection.SelectionComplete {
+		t.Fatalf("stable-only acknowledgement must hold publication without pretending work is deferred: %#v", selection)
+	}
+	if selection.StabilityOlderSessionID != "older" || selection.StabilityNewerSessionID != "newer" ||
+		selection.StabilityProofDigest != "proof-digest" || !selection.StabilityLegacyPair {
+		t.Fatalf("stability lineage = %#v", selection)
+	}
+	for _, candidate := range append(selection.Selected, selection.DeferredEvents...) {
+		if candidate.URL == "https://example.test/stable" {
+			t.Fatalf("stable evidence was scheduled: %#v", selection)
+		}
+	}
+}
+
+func TestDeltaSitemapSelectionWithoutProofRetainsV1EventBehavior(t *testing.T) {
+	input := selectionFixture(1, 0)
+	selection := SelectDeltaSitemapCandidates(input)
+	if selection.PublishedDifferenceTotal != 1 || selection.ActionableTotal != 1 || selection.StableAcknowledgedTotal != 0 || selection.PublicationHeld {
+		t.Fatalf("proof-free selection changed v1 behavior: %#v", selection)
+	}
+}
+
+func TestDeltaSitemapSelectionPrecisionDriftRemainsActionable(t *testing.T) {
+	input := selectionFixture(1, 0)
+	input.Fresh[0].LastMod = "2026-08-26T16:53:17Z"
+	input.Stable = []DeltaSitemapStabilityProof{{URL: input.Fresh[0].URL, LastMod: "2026-08-26"}}
+	selection := SelectDeltaSitemapCandidates(input)
+	if selection.ActionableTotal != 1 || selection.StableAcknowledgedTotal != 0 {
+		t.Fatalf("mixed-precision lastmod was suppressed: %#v", selection)
+	}
+}
+
 func selectionFixture(eventCount, canaryCount int) DeltaSitemapSelectionInput {
 	fresh := make([]DeltaSitemapSelectionURL, 0, eventCount+canaryCount)
 	published := make([]DeltaSitemapSelectionURL, 0, canaryCount)

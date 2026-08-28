@@ -425,6 +425,53 @@ Plans:
 - [x] 25.2-04: Exact shared static/rendered discovered-URL budget
 - [x] 25.2-05: Proven effective-origin response/UI, aggregate gates, and safe production rollout
 
+### Phase 25.3: Raw-stabilized sitemap retry suppression (INSERTED)
+
+**Goal:** Stop repeatedly refetching a bulk sitemap `lastmod` reset after two
+durable completed raw observations prove the same per-URL lastmod and unchanged
+content, while retaining Current Snapshot as the only publication authority.
+
+**Requirements**:
+- **STABLE-253-01:** Derive per-URL stability only from two distinct ordered,
+  completed, project-bound fresh sitemap observations with the same normalized
+  URL, valid lastmod, complete page evidence, and equal nonzero content hash.
+- **STABLE-253-02:** A stable raw URL+lastmod tuple is not launched again solely
+  because Published Snapshot is behind; missing, failed, partial, invalid,
+  cross-project, zero-hash, or newly-forward evidence remains actionable.
+- **SNAP-253-01:** Raw stability suppresses network execution only. It cannot
+  advance or replace Current Snapshot, satisfy quality, consume publication
+  lineage, or make a slim canary run publication-eligible.
+- **HTTP-253-01:** Conditional requests remain bound to Current Snapshot
+  validators; raw evidence cannot produce a `304` that would retain stale
+  published content without an exact overlay-source contract.
+- **API-253-01:** Preview and persisted Delta provenance separately report
+  published differences, actionable refetches, raw-stable acknowledged URLs,
+  canaries, deferral, and proof lineage/digest.
+- **UI-253-01:** Daily Delta shows the same distinction and explicitly states
+  that raw stability avoids refetch but is not publication evidence.
+- **COMPAT-253-01:** Preserve legacy session/config/API decoding, Phase 25.2
+  caps/canaries, immutable raw evidence, authorization, and all Current
+  Snapshot/quality rules.
+- **TEST-253-01:** Cover selector v2, ClickHouse FINAL/project/terminal/coverage
+  proof, legacy DI bootstrap, race/idempotency, Current Snapshot-bound
+  conditional requests, API/UI, and the full regression matrix.
+- **DOC-253-01:** Update `ProductFeatures.md` and Phase 25.3 evidence in the same
+  change; do not run a live crawl/rescan or rewrite historical production data.
+- **DEPLOY-253-01:** Build/restart only the app through two zero-active-crawl
+  gates without force, then verify health, ClickHouse continuity, logs, and a
+  read-only DI Preview showing stable acknowledgement instead of ~2k refetches.
+
+**Covers:** STABLE-253-01, STABLE-253-02, SNAP-253-01, HTTP-253-01,
+API-253-01, UI-253-01, COMPAT-253-01, TEST-253-01, DOC-253-01,
+DEPLOY-253-01
+**Depends on:** Phase 21, Phase 25.1, Phase 25.2
+**Plans:** 3 plans
+
+Plans:
+- [ ] 25.3-01: Derived raw-stability evidence and selector v2
+- [ ] 25.3-02: Planner, fail-closed publication binding, persisted provenance, and UI
+- [ ] 25.3-03: Regression closure, documentation, and safe production rollout
+
 ### Phase 26: Trustworthy sitemap availability and lastmod validation
 
 **Goal:** Make sitemap-versus-crawl reporting distinguish observed missing URLs
@@ -471,7 +518,7 @@ overstating partial or legacy data.
 **Covers:** SITEMAP-26-01, SITEMAP-26-02, AVAIL-26-01, AVAIL-26-02,
 DATE-26-01, DATE-26-02, API-26-01, UI-26-01, COMPAT-26-01, TEST-26-01,
 DEPLOY-26-01
-**Depends on:** Phase 21, Phase 24, Phase 25.2
+**Depends on:** Phase 21, Phase 24, Phase 25.3
 **Plans:** 10 plans
 
 Plans:

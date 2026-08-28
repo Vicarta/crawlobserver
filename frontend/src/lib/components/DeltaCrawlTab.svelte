@@ -126,6 +126,10 @@
     return Number(value || 0).toLocaleString();
   }
 
+  function formatOptionalInt(value) {
+    return value == null ? '\u2014' : formatInt(value);
+  }
+
   function sourceLabel(source) {
     return source.replaceAll('_', ' ').replace(/\b\w/g, (m) => m.toUpperCase());
   }
@@ -152,6 +156,56 @@
     if (mode === 'snapshot_fallback') return 'Snapshot fallback';
     if (mode === 'skipped') return 'Sitemap skipped';
     return 'Sitemap unavailable';
+  }
+
+  function hasSitemapV2() {
+    const selection = preview?.sitemap_selection;
+    return (
+      preview?.sitemap_published_differences != null ||
+      preview?.sitemap_actionable != null ||
+      preview?.sitemap_stable_acknowledged != null ||
+      selection?.published_difference_total != null ||
+      selection?.actionable_total != null ||
+      selection?.stable_acknowledged_total != null ||
+      selection?.stability_older_session_id ||
+      selection?.stability_newer_session_id ||
+      selection?.stability_proof_digest ||
+      selection?.stability_legacy_complete_pair != null ||
+      selection?.publication_held != null
+    );
+  }
+
+  function selectionCount(topLevelKey, selectionKey, legacyKey) {
+    const topLevel = preview?.[topLevelKey];
+    if (topLevel != null) return topLevel;
+    const selected = preview?.sitemap_selection?.[selectionKey];
+    if (selected != null) return selected;
+    return legacyKey ? preview?.[legacyKey] : null;
+  }
+
+  function proofPairLabel() {
+    const selection = preview?.sitemap_selection;
+    if (!selection?.stability_older_session_id && !selection?.stability_newer_session_id)
+      return 'Not available';
+    if (!selection.stability_older_session_id || !selection.stability_newer_session_id)
+      return 'Incomplete proof pair';
+    return `${selection.stability_older_session_id} -> ${selection.stability_newer_session_id}`;
+  }
+
+  function proofStatusLabel() {
+    const selection = preview?.sitemap_selection;
+    if (selection?.stability_legacy_complete_pair) return 'Legacy complete pair';
+    if (selection?.stability_older_session_id && selection?.stability_newer_session_id)
+      return 'Two-session proof';
+    return 'Proof unavailable';
+  }
+
+  function showPublicationHold() {
+    const selection = preview?.sitemap_selection;
+    return (
+      selection?.publication_held === true ||
+      Number(selectionCount('sitemap_stable_acknowledged', 'stable_acknowledged_total')) > 0
+    );
   }
 
   onMount(load);
@@ -238,7 +292,70 @@
         </div>
       </div>
 
-      {#if preview?.sitemap_selection}
+      {#if hasSitemapV2()}
+        <div class="delta-summary sitemap-selection-summary sitemap-v2-summary">
+          <div>
+            <strong
+              >{formatOptionalInt(
+                selectionCount('sitemap_published_differences', 'published_difference_total'),
+              )}</strong
+            >
+            <span>Published differences</span>
+          </div>
+          <div class="summary-primary">
+            <strong
+              >{formatOptionalInt(
+                selectionCount('sitemap_actionable', 'actionable_total', 'sitemap_events'),
+              )}</strong
+            >
+            <span>Actionable refetches</span>
+          </div>
+          <div>
+            <strong
+              >{formatOptionalInt(
+                selectionCount('sitemap_stable_acknowledged', 'stable_acknowledged_total'),
+              )}</strong
+            >
+            <span>Raw-stable acknowledged</span>
+          </div>
+          <div>
+            <strong
+              >{formatOptionalInt(selectionCount('sitemap_canaries', 'canary_selected'))}</strong
+            >
+            <span>Canaries</span>
+          </div>
+          <div title="Actionable candidates kept for a later Delta plan.">
+            <strong
+              >{formatOptionalInt(selectionCount('sitemap_deferred', 'event_deferred'))}</strong
+            >
+            <span>Deferred</span>
+          </div>
+        </div>
+
+        <div class="sitemap-provenance">
+          <div class="section-heading compact">
+            <h4>Sitemap decision provenance</h4>
+            <span>{proofStatusLabel()}</span>
+          </div>
+          <div class="provenance-grid">
+            <div>
+              <span>Proof pair</span>
+              <strong title={proofPairLabel()}>{proofPairLabel()}</strong>
+            </div>
+            <div>
+              <span>Proof digest</span>
+              <strong title={preview?.sitemap_selection?.stability_proof_digest || ''}
+                >{preview?.sitemap_selection?.stability_proof_digest || 'Not available'}</strong
+              >
+            </div>
+          </div>
+          {#if showPublicationHold()}
+            <div class="delta-note warning">
+              Current Snapshot retained; raw stability is not publication evidence.
+            </div>
+          {/if}
+        </div>
+      {:else if preview?.sitemap_selection}
         <div class="delta-summary sitemap-selection-summary">
           <div>
             <strong>{formatInt(preview?.sitemap_events)}</strong>
@@ -956,6 +1073,45 @@
     border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
   }
 
+  .sitemap-v2-summary {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .sitemap-provenance {
+    display: grid;
+    gap: 12px;
+    margin: 16px 0;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+  }
+
+  .provenance-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 18px;
+  }
+
+  .provenance-grid > div {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .provenance-grid span {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .provenance-grid strong {
+    overflow: hidden;
+    color: var(--text);
+    font-size: 13px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .section-heading.compact {
     margin: 0;
   }
@@ -1249,7 +1405,9 @@
     .settings-grid,
     .textarea-grid,
     .source-grid,
-    .checks-grid {
+    .checks-grid,
+    .sitemap-v2-summary,
+    .provenance-grid {
       grid-template-columns: 1fr;
     }
 

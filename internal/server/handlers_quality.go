@@ -1469,8 +1469,15 @@ func addDeltaPlanMetrics(metrics map[string]interface{}, plan *config.DeltaPlanC
 		metrics["sitemap_event_total"] = selection.EventTotal
 		metrics["sitemap_event_selected"] = selection.EventSelected
 		metrics["sitemap_event_deferred"] = selection.EventDeferred
+		metrics["sitemap_published_difference_total"] = selection.PublishedDifferenceTotal
+		metrics["sitemap_actionable_total"] = selection.ActionableTotal
+		metrics["sitemap_stable_acknowledged_total"] = selection.StableAcknowledgedTotal
 		metrics["sitemap_canary_selected"] = selection.CanarySelected
 		metrics["sitemap_selection_complete"] = selection.SelectionComplete
+		metrics["sitemap_publication_held"] = selection.PublicationHeld
+		metrics["sitemap_stability_older_session_id"] = selection.StabilityOlderSessionID
+		metrics["sitemap_stability_newer_session_id"] = selection.StabilityNewerSessionID
+		metrics["sitemap_stability_proof_digest"] = selection.StabilityProofDigest
 		metrics["sitemap_pending_unpublished"] = sitemapSelectionPendingCount(selection)
 	}
 }

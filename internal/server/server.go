@@ -110,6 +110,11 @@ type Server struct {
 	pageRankRecomputeMu     sync.Mutex
 	pageRankRecomputeStatus map[string]*pageRankRecomputeStatus // projectID -> status
 	projectRescanMu         sync.Mutex
+	// deltaLaunchReservations retains a started Daily Delta until its durable
+	// project run receipt is written or its rollback is verified. It prevents a
+	// transient local settings-store failure from creating a second live crawl.
+	deltaLaunchReservations sync.Map // projectID -> sessionID
+	markProjectDeltaRun     func(projectID, sessionID string, when time.Time) error
 
 	// Setup mode fields (desktop onboarding)
 	SetupMode        bool

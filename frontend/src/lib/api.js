@@ -81,11 +81,31 @@
  */
 
 /**
+ * @typedef {Object} DeltaSitemapSelection
+ * @property {number=} published_difference_total Number of Fresh-vs-Published differences.
+ * @property {number=} actionable_total Differences that still require network execution.
+ * @property {number=} stable_acknowledged_total Differences acknowledged by raw stability proof.
+ * @property {number=} event_selected
+ * @property {number=} event_deferred
+ * @property {number=} canary_selected
+ * @property {boolean=} selection_complete
+ * @property {string=} stability_older_session_id
+ * @property {string=} stability_newer_session_id
+ * @property {string=} stability_proof_digest
+ * @property {boolean=} stability_legacy_complete_pair
+ * @property {boolean=} publication_held
+ */
+
+/**
  * @typedef {Object} DeltaPreview
  * @property {number} sitemap_events
  * @property {number} sitemap_pending_unpublished
  * @property {number} sitemap_canaries
  * @property {number} sitemap_deferred
+ * @property {number=} sitemap_published_differences
+ * @property {number=} sitemap_actionable
+ * @property {number=} sitemap_stable_acknowledged
+ * @property {DeltaSitemapSelection=} sitemap_selection
  * @property {string=} held_publication_reason
  */
 

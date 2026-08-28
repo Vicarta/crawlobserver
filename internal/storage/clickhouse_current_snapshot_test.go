@@ -39,10 +39,65 @@ func TestDeltaSitemapPublicationBindingRequiresExactCompleteSelection(t *testing
 		t.Fatalf("incomplete selection publish=%t err=%v, want held publication", publish, err)
 	}
 	plan.SitemapSelection.SelectionComplete = true
+	plan.SitemapSelection.SelectorRevision = "v2"
+	plan.SitemapSelection.PublicationHeld = true
+	publish, err = deltaSitemapPublicationBindingMatches(plan, snap)
+	if err != nil || publish {
+		t.Fatalf("raw-stable v2 selection publish=%t err=%v, want held publication", publish, err)
+	}
+	plan.SitemapSelection.PublicationHeld = false
+	publish, err = deltaSitemapPublicationBindingMatches(plan, snap)
+	if err != nil || !publish {
+		t.Fatalf("v2 complete actionable selection publish=%t err=%v", publish, err)
+	}
 	plan.SitemapSelection.PublishedSnapshotRevision++
 	_, err = deltaSitemapPublicationBindingMatches(plan, snap)
 	if !errors.Is(err, ErrCurrentSnapshotSourceSuperseded) {
 		t.Fatalf("stale published binding err=%v, want superseded", err)
+	}
+}
+
+func TestDeltaSitemapPublicationBindingV2FailsClosedForRawStability(t *testing.T) {
+	snap := &ProjectCurrentSnapshot{CurrentSessionID: "current", SnapshotRevision: 12, ContentWatermarkSessionID: "watermark"}
+	selection := &config.DeltaSitemapSelection{
+		SelectorRevision:                   "v2",
+		RawObservationSessionID:            "raw",
+		RawObservedAt:                      time.Now().UTC(),
+		PublishedSessionID:                 "current",
+		PublishedSnapshotRevision:          12,
+		PublishedContentWatermarkSessionID: "watermark",
+		SelectionComplete:                  true,
+	}
+	plan := &config.DeltaPlanConfig{
+		SitemapRefresh:   &config.DeltaSitemapRefresh{Mode: "fresh", FetchedAt: time.Now().UTC()},
+		SitemapSelection: selection,
+	}
+
+	selection.PublicationHeld = true
+	if publish, err := deltaSitemapPublicationBindingMatches(plan, snap); err != nil || publish {
+		t.Fatalf("held v2 binding publish=%t err=%v, want held without error", publish, err)
+	}
+
+	selection.PublicationHeld = false
+	selection.StableAcknowledgedTotal = 1
+	if publish, err := deltaSitemapPublicationBindingMatches(plan, snap); err != nil || publish {
+		t.Fatalf("stable v2 binding publish=%t err=%v, want fail-closed hold", publish, err)
+	}
+
+	selection.StableAcknowledgedTotal = 0
+	if publish, err := deltaSitemapPublicationBindingMatches(plan, snap); err != nil || !publish {
+		t.Fatalf("complete actionable v2 binding publish=%t err=%v, want publish", publish, err)
+	}
+
+	selection.SelectorRevision = "v1"
+	selection.PublicationHeld = true
+	if publish, err := deltaSitemapPublicationBindingMatches(plan, snap); err != nil || publish {
+		t.Fatalf("held v1 binding publish=%t err=%v, want fail-closed hold", publish, err)
+	}
+	selection.PublicationHeld = false
+	selection.StableAcknowledgedTotal = 1
+	if publish, err := deltaSitemapPublicationBindingMatches(plan, snap); err != nil || publish {
+		t.Fatalf("stable v1 binding publish=%t err=%v, want fail-closed hold", publish, err)
 	}
 }
 

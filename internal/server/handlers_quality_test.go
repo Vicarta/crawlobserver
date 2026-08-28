@@ -119,6 +119,34 @@ func TestEvaluateDeltaPlanGateReportsDeferredSitemapEventsWithoutBlockingPromoti
 	t.Fatalf("expected deferred sitemap finding, got %#v", findings)
 }
 
+func TestAddDeltaPlanMetricsPersistsSitemapStabilityProvenance(t *testing.T) {
+	metrics := map[string]interface{}{}
+	addDeltaPlanMetrics(metrics, &config.DeltaPlanConfig{SitemapSelection: &config.DeltaSitemapSelection{
+		PublishedDifferenceTotal: 2063,
+		ActionableTotal:          1,
+		StableAcknowledgedTotal:  2062,
+		PublicationHeld:          true,
+		StabilityOlderSessionID:  "older",
+		StabilityNewerSessionID:  "newer",
+		StabilityProofDigest:     "digest",
+	}})
+
+	want := map[string]interface{}{
+		"sitemap_published_difference_total": 2063,
+		"sitemap_actionable_total":           1,
+		"sitemap_stable_acknowledged_total":  2062,
+		"sitemap_publication_held":           true,
+		"sitemap_stability_older_session_id": "older",
+		"sitemap_stability_newer_session_id": "newer",
+		"sitemap_stability_proof_digest":     "digest",
+	}
+	for key, expected := range want {
+		if got := metrics[key]; got != expected {
+			t.Fatalf("metric %s = %#v, want %#v", key, got, expected)
+		}
+	}
+}
+
 func TestEvaluateDeltaPlanGateBlocksMissingLaunchedCandidateCoverage(t *testing.T) {
 	srv := &Server{}
 	qs := qualityGateMock{matched: 1}

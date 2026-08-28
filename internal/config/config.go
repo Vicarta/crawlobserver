@@ -117,8 +117,17 @@ type DeltaSitemapSelection struct {
 	EventTotal                         int               `json:"event_total" mapstructure:"event_total"`
 	EventSelected                      int               `json:"event_selected" mapstructure:"event_selected"`
 	EventDeferred                      int               `json:"event_deferred" mapstructure:"event_deferred"`
+	PublishedDifferenceTotal           int               `json:"published_difference_total,omitempty" mapstructure:"published_difference_total"`
+	ActionableTotal                    int               `json:"actionable_total,omitempty" mapstructure:"actionable_total"`
+	StableAcknowledgedTotal            int               `json:"stable_acknowledged_total,omitempty" mapstructure:"stable_acknowledged_total"`
+	SelectedTotal                      int               `json:"selected_total,omitempty" mapstructure:"selected_total"`
 	CanarySelected                     int               `json:"canary_selected" mapstructure:"canary_selected"`
 	SelectionComplete                  bool              `json:"selection_complete" mapstructure:"selection_complete"`
+	PublicationHeld                    bool              `json:"publication_held,omitempty" mapstructure:"publication_held"`
+	StabilityOlderSessionID            string            `json:"stability_older_session_id,omitempty" mapstructure:"stability_older_session_id"`
+	StabilityNewerSessionID            string            `json:"stability_newer_session_id,omitempty" mapstructure:"stability_newer_session_id"`
+	StabilityProofDigest               string            `json:"stability_proof_digest,omitempty" mapstructure:"stability_proof_digest"`
+	StabilityLegacyCompletePair        bool              `json:"stability_legacy_complete_pair,omitempty" mapstructure:"stability_legacy_complete_pair"`
 	SourceByURL                        map[string]string `json:"source_by_url,omitempty" mapstructure:"source_by_url"`
 }
 
@@ -131,6 +140,7 @@ type DeltaSitemapRefresh struct {
 	DeclaredSitemapURLs []string                  `json:"declared_sitemap_urls,omitempty" mapstructure:"declared_sitemap_urls"`
 	FetchedSitemapURLs  []string                  `json:"fetched_sitemap_urls,omitempty" mapstructure:"fetched_sitemap_urls"`
 	FreshURLCount       int                       `json:"fresh_url_count" mapstructure:"fresh_url_count"`
+	RawURLRowCount      int                       `json:"raw_url_row_count,omitempty" mapstructure:"raw_url_row_count"`
 	SnapshotURLCount    int                       `json:"snapshot_url_count" mapstructure:"snapshot_url_count"`
 	AddedCount          int                       `json:"added_count" mapstructure:"added_count"`
 	RemovedCount        int                       `json:"removed_count" mapstructure:"removed_count"`

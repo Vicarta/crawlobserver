@@ -11,11 +11,13 @@ import (
 )
 
 const (
-	DeltaSitemapSelectorRevision = "v1"
+	DeltaSitemapSelectorRevisionV1 = "v1"
+	DeltaSitemapSelectorRevision   = "v2"
 
 	DeltaSitemapSourceAdded              = "sitemap_added"
 	DeltaSitemapSourceLastModForward     = "sitemap_lastmod_forward"
 	DeltaSitemapSourcePendingUnpublished = "sitemap_pending_unpublished"
+	DeltaSitemapSourceStableUnpublished  = "sitemap_stable_unpublished"
 	DeltaSitemapSourceCanary             = "sitemap_canary"
 )
 
@@ -23,6 +25,14 @@ const (
 // lastmod evidence. URL normalization happens at the planner boundary; this
 // selector intentionally has no URL policy or storage dependency.
 type DeltaSitemapSelectionURL struct {
+	URL     string
+	LastMod string
+}
+
+// DeltaSitemapStabilityProof is the project-normalized projection of one
+// storage-derived, two-observation stability tuple. It carries no authority to
+// publish sitemap membership or quality evidence.
+type DeltaSitemapStabilityProof struct {
 	URL     string
 	LastMod string
 }
@@ -36,6 +46,11 @@ type DeltaSitemapSelectionInput struct {
 	Fresh                     []DeltaSitemapSelectionURL
 	Raw                       []DeltaSitemapSelectionURL
 	Published                 []DeltaSitemapSelectionURL
+	Stable                    []DeltaSitemapStabilityProof
+	StabilityOlderSessionID   string
+	StabilityNewerSessionID   string
+	StabilityProofDigest      string
+	StabilityLegacyPair       bool
 	ChangedLimit              int
 	CanaryCount               int
 	MaxCandidates             int
@@ -55,14 +70,23 @@ type DeltaSitemapSelectedURL struct {
 // planning. DeferredEvents always contains every event that was not selected;
 // SelectionComplete is false whenever that set is non-empty.
 type DeltaSitemapSelection struct {
-	Selected          []DeltaSitemapSelectedURL
-	DeferredEvents    []DeltaSitemapSelectedURL
-	EventTotal        int
-	EventSelected     int
-	EventDeferred     int
-	CanarySelected    int
-	SelectionComplete bool
-	SourceByURL       map[string]string
+	Selected                 []DeltaSitemapSelectedURL
+	DeferredEvents           []DeltaSitemapSelectedURL
+	EventTotal               int
+	EventSelected            int
+	EventDeferred            int
+	PublishedDifferenceTotal int
+	ActionableTotal          int
+	StableAcknowledgedTotal  int
+	SelectedTotal            int
+	CanarySelected           int
+	SelectionComplete        bool
+	PublicationHeld          bool
+	StabilityOlderSessionID  string
+	StabilityNewerSessionID  string
+	StabilityProofDigest     string
+	StabilityLegacyPair      bool
+	SourceByURL              map[string]string
 }
 
 // SelectDeltaSitemapCandidates compares Fresh against Published (the safety
@@ -72,9 +96,12 @@ func SelectDeltaSitemapCandidates(input DeltaSitemapSelectionInput) DeltaSitemap
 	fresh := canonicalSitemapSelectionURLs(input.Fresh)
 	raw := sitemapSelectionURLMap(input.Raw)
 	published := sitemapSelectionURLMap(input.Published)
+	stable := sitemapStabilityProofMap(input.Stable)
 
 	events := make([]DeltaSitemapSelectedURL, 0)
+	stableAcknowledged := make([]DeltaSitemapSelectedURL, 0)
 	unchanged := make([]DeltaSitemapSelectionURL, 0)
+	publishedDifferenceTotal := 0
 	for _, candidate := range fresh {
 		baseline, existsInPublished := published[candidate.URL]
 		kind := ""
@@ -85,6 +112,16 @@ func SelectDeltaSitemapCandidates(input DeltaSitemapSelectionInput) DeltaSitemap
 			kind = DeltaSitemapSourceLastModForward
 		default:
 			unchanged = append(unchanged, candidate)
+			continue
+		}
+		publishedDifferenceTotal++
+		if stabilityProofMatches(candidate, stable[candidate.URL]) {
+			stableAcknowledged = append(stableAcknowledged, DeltaSitemapSelectedURL{
+				URL:       candidate.URL,
+				LastMod:   candidate.LastMod,
+				Source:    DeltaSitemapSourceStableUnpublished,
+				EventKind: kind,
+			})
 			continue
 		}
 
@@ -105,6 +142,12 @@ func SelectDeltaSitemapCandidates(input DeltaSitemapSelectionInput) DeltaSitemap
 			return events[i].URL < events[j].URL
 		}
 		return events[i].EventKind < events[j].EventKind
+	})
+	sort.Slice(stableAcknowledged, func(i, j int) bool {
+		if stableAcknowledged[i].URL != stableAcknowledged[j].URL {
+			return stableAcknowledged[i].URL < stableAcknowledged[j].URL
+		}
+		return stableAcknowledged[i].EventKind < stableAcknowledged[j].EventKind
 	})
 
 	changedLimit := nonNegative(input.ChangedLimit)
@@ -149,22 +192,34 @@ func SelectDeltaSitemapCandidates(input DeltaSitemapSelectionInput) DeltaSitemap
 		}
 	}
 
-	sources := make(map[string]string, len(selected)+len(deferred))
+	sources := make(map[string]string, len(selected)+len(deferred)+len(stableAcknowledged))
 	for _, candidate := range selected {
 		sources[candidate.URL] = candidate.Source
 	}
 	for _, candidate := range deferred {
 		sources[candidate.URL] = candidate.Source
 	}
+	for _, candidate := range stableAcknowledged {
+		sources[candidate.URL] = candidate.Source
+	}
 	return DeltaSitemapSelection{
-		Selected:          selected,
-		DeferredEvents:    deferred,
-		EventTotal:        len(events),
-		EventSelected:     eventCapacity,
-		EventDeferred:     len(deferred),
-		CanarySelected:    canaryCount,
-		SelectionComplete: len(deferred) == 0,
-		SourceByURL:       sources,
+		Selected:                 selected,
+		DeferredEvents:           deferred,
+		EventTotal:               len(events),
+		EventSelected:            eventCapacity,
+		EventDeferred:            len(deferred),
+		PublishedDifferenceTotal: publishedDifferenceTotal,
+		ActionableTotal:          len(events),
+		StableAcknowledgedTotal:  len(stableAcknowledged),
+		SelectedTotal:            len(selected),
+		CanarySelected:           canaryCount,
+		SelectionComplete:        len(deferred) == 0,
+		PublicationHeld:          len(stableAcknowledged) > 0,
+		StabilityOlderSessionID:  input.StabilityOlderSessionID,
+		StabilityNewerSessionID:  input.StabilityNewerSessionID,
+		StabilityProofDigest:     input.StabilityProofDigest,
+		StabilityLegacyPair:      input.StabilityLegacyPair,
+		SourceByURL:              sources,
 	}
 }
 
@@ -210,6 +265,32 @@ func sitemapSelectionURLMap(values []DeltaSitemapSelectionURL) map[string]DeltaS
 		result[value.URL] = value
 	}
 	return result
+}
+
+func sitemapStabilityProofMap(values []DeltaSitemapStabilityProof) map[string]DeltaSitemapStabilityProof {
+	result := make(map[string]DeltaSitemapStabilityProof, len(values))
+	for _, value := range values {
+		value.URL = strings.TrimSpace(value.URL)
+		if value.URL == "" {
+			continue
+		}
+		existing, found := result[value.URL]
+		if !found || sitemapSelectionValueAfter(value.LastMod, existing.LastMod) {
+			result[value.URL] = value
+		}
+	}
+	return result
+}
+
+func stabilityProofMatches(candidate DeltaSitemapSelectionURL, proof DeltaSitemapStabilityProof) bool {
+	if proof.URL == "" {
+		return false
+	}
+	candidateLastMod, candidateErr := fetcher.ParseSitemapLastMod(candidate.LastMod)
+	proofLastMod, proofErr := fetcher.ParseSitemapLastMod(proof.LastMod)
+	return candidateErr == nil && proofErr == nil &&
+		candidateLastMod.DateOnly == proofLastMod.DateOnly &&
+		candidateLastMod.Time.Equal(proofLastMod.Time)
 }
 
 func rawHasURL(values map[string]DeltaSitemapSelectionURL, url string) bool {
