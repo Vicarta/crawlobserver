@@ -904,10 +904,10 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 	}
 	candidateSources := deltaCandidateSourcesForLaunched(filtered, sourceSets)
 	manual := launchedManualURLs(manualRaw, filtered, settings)
-	launchLimit := len(filtered) + settings.MaxDiscoveredPagesPerRun
-	if launchLimit <= 0 {
-		launchLimit = len(filtered)
-	}
+	// Delta seeds are the complete execution plan. Link discovery is disabled
+	// for the request below, so the launch limit must describe only selected
+	// candidates rather than adding an unrelated discovery allowance.
+	launchLimit := len(filtered)
 	baselineSitemapCount := 0
 	if settings.SourceSitemap {
 		if count, countErr := s.store.CountSitemapURLs(ctx, baseline.ID); countErr == nil {
@@ -1152,15 +1152,18 @@ func (s *Server) deltaCrawlRequest(result *deltaCandidateResult) (crawler.CrawlR
 	if result.settings.RateLimitRequestsPerSecond > 0 {
 		delay = time.Duration(float64(time.Second) / result.settings.RateLimitRequestsPerSecond)
 	}
-	maxPages := result.preview.LaunchLimit
+	maxPages := len(result.urls)
 	if maxPages <= 0 {
-		maxPages = len(result.urls)
+		maxPages = result.preview.LaunchLimit
 	}
 	projectID := result.settings.ProjectID
 	checkExternal := false
 	checkResources := cfg.Crawler.CheckPageResources == nil || *cfg.Crawler.CheckPageResources
 	retries := result.settings.RetryCount
-	discoveryBudget := result.settings.MaxDiscoveredPagesPerRun
+	// A Delta plan is an explicit URL set. Do not turn links found on selected
+	// pages into a second crawl; regular full crawls keep their own discovery
+	// policy.
+	discoveryBudget := 0
 	req := crawler.CrawlRequest{
 		Seeds:               result.urls,
 		SessionSeedURLs:     append([]string(nil), result.baseline.SeedURLs...),

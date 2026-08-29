@@ -446,9 +446,12 @@ shared rendered metadata shell diagnostics без site-specific правил.
 - Fresh sitemap refresh перед preview/run/scheduled plan.
 - Explicit skip або labelled snapshot fallback, якщо sitemap refresh неуспішний.
 - Candidate source counts, launch counts, deferred counts і launch limit.
-- Limits для candidates, changed pages, new pages, discovered pages, discovery
-  depth і runtime.
-- Follow internal links із new/changed pages у межах configured limits.
+- Limits для candidates, changed pages, new pages, discovery depth і runtime;
+  Daily Delta використовує явний нульовий discovered-page budget, тоді як
+  звичайні full crawls можуть follow internal links у межах своїх limits.
+- Delta запускає лише URL із зафіксованого candidate plan (змінені сторінки та
+  canaries) і не ставить знайдені на них внутрішні посилання в додаткову чергу;
+  знайдені посилання залишаються доступними як evidence.
 - Rate limit, retries, backoff і JS rendering для Delta.
 - robots compliance, conditional GET requests з exact retained `ETag` і
   `Last-Modified` validators. Якщо server

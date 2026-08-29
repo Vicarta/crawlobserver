@@ -125,7 +125,7 @@ func TestDeltaCrawlRequestPreservesBaselineSeedURLs(t *testing.T) {
 			RespectRobotsTxt:         true,
 			RetryCount:               2,
 			RetryBackoffSeconds:      3,
-			MaxDiscoveredPagesPerRun: 0,
+			MaxDiscoveredPagesPerRun: 2000,
 		},
 		baseline: &storage.CrawlSession{
 			ID:       "baseline-session",
@@ -139,7 +139,7 @@ func TestDeltaCrawlRequestPreservesBaselineSeedURLs(t *testing.T) {
 		urls:                     deltaURLs,
 		preview: deltaPreview{
 			TotalCandidates: len(deltaURLs),
-			LaunchLimit:     len(deltaURLs),
+			LaunchLimit:     len(deltaURLs) + 2000,
 			WillLaunch:      len(deltaURLs),
 			BySource:        map[string]int{"sitemap": len(deltaURLs)},
 		},
@@ -159,6 +159,9 @@ func TestDeltaCrawlRequestPreservesBaselineSeedURLs(t *testing.T) {
 	}
 	if req.DiscoveryBudget == nil || *req.DiscoveryBudget != 0 {
 		t.Fatalf("req.DiscoveryBudget = %#v, want explicit 0", req.DiscoveryBudget)
+	}
+	if req.MaxPages != len(deltaURLs) {
+		t.Fatalf("req.MaxPages = %d, want selected URL count %d", req.MaxPages, len(deltaURLs))
 	}
 	if req.CheckPageResources == nil || !*req.CheckPageResources {
 		t.Fatalf("req.CheckPageResources = %#v, want true", req.CheckPageResources)
