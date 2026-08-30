@@ -141,6 +141,32 @@ func runBackupScheduler(ctx context.Context, cfg *config.Config, opts *backup.SQ
 
 	exportDir := filepath.Join(opts.BackupDir, "exports")
 
+	if cfg.Backup.Time != "" {
+		location := time.Local
+		if cfg.Backup.Timezone != "" {
+			loaded, loadErr := time.LoadLocation(cfg.Backup.Timezone)
+			if loadErr != nil {
+				applog.Errorf("cli", "Auto-backup disabled: invalid timezone %q: %v", cfg.Backup.Timezone, loadErr)
+				return
+			}
+			location = loaded
+		}
+		applog.Infof("cli", "Auto-backup enabled: daily at %s (%s), retaining %d backups in %s", cfg.Backup.Time, location, retain, opts.BackupDir)
+		for {
+			delay := nextScheduledBackupDelayAt(opts.BackupDir, interval, cfg.Backup.Time, location, time.Now())
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+				performBackup(ctx, opts, retain, store, exportDir)
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			}
+		}
+	}
+
 	applog.Infof("cli", "Auto-backup enabled: every %s, retaining %d backups in %s", interval, retain, opts.BackupDir)
 
 	// Preserve the interval across app restarts. A recent backup postpones the
@@ -169,16 +195,44 @@ func runBackupScheduler(ctx context.Context, cfg *config.Config, opts *backup.SQ
 const scheduledBackupStartupDelay = 90 * time.Second
 
 func nextScheduledBackupDelay(backupDir string, interval time.Duration, now time.Time) time.Duration {
+	return nextScheduledBackupDelayAt(backupDir, interval, "", time.Local, now)
+}
+
+func nextScheduledBackupDelayAt(backupDir string, interval time.Duration, scheduleTime string, location *time.Location, now time.Time) time.Duration {
 	backups, err := backup.ListBackups(backupDir)
-	if err != nil || len(backups) == 0 {
+	if scheduleTime == "" {
+		if err != nil || len(backups) == 0 {
+			return scheduledBackupStartupDelay
+		}
+
+		remaining := interval - now.Sub(backups[0].CreatedAt)
+		if remaining < scheduledBackupStartupDelay {
+			return scheduledBackupStartupDelay
+		}
+		return remaining
+	}
+
+	parsed, err := time.Parse("15:04", scheduleTime)
+	if err != nil {
+		return scheduledBackupStartupDelay
+	}
+	if location == nil {
+		location = time.Local
+	}
+	localNow := now.In(location)
+	todaySchedule := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), parsed.Hour(), parsed.Minute(), 0, 0, location)
+	if len(backups) > 0 {
+		latest := backups[0].CreatedAt.In(location)
+		if !latest.Before(todaySchedule) {
+			todaySchedule = todaySchedule.Add(24 * time.Hour)
+		} else if !localNow.Before(todaySchedule) {
+			return scheduledBackupStartupDelay
+		}
+	} else if !localNow.Before(todaySchedule) {
 		return scheduledBackupStartupDelay
 	}
 
-	remaining := interval - now.Sub(backups[0].CreatedAt)
-	if remaining < scheduledBackupStartupDelay {
-		return scheduledBackupStartupDelay
-	}
-	return remaining
+	return todaySchedule.Sub(localNow)
 }
 
 func performBackup(ctx context.Context, opts *backup.SQLBackupOptions, retain int, store *storage.Store, exportDir string) {

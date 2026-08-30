@@ -73,3 +73,50 @@ func TestNextScheduledBackupDelay(t *testing.T) {
 		}
 	})
 }
+
+func TestNextScheduledBackupDelayAt(t *testing.T) {
+	location, err := time.LoadLocation("Europe/Kyiv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	interval := 24 * time.Hour
+
+	t.Run("waits until configured time before daily run", func(t *testing.T) {
+		now := time.Date(2026, 8, 31, 0, 10, 0, 0, location)
+		if got := nextScheduledBackupDelayAt(t.TempDir(), interval, "00:20", location, now); got != 10*time.Minute {
+			t.Fatalf("delay = %s, want 10m", got)
+		}
+	})
+
+	t.Run("runs after startup delay when daily time was missed", func(t *testing.T) {
+		now := time.Date(2026, 8, 31, 0, 30, 0, 0, location)
+		if got := nextScheduledBackupDelayAt(t.TempDir(), interval, "00:20", location, now); got != scheduledBackupStartupDelay {
+			t.Fatalf("delay = %s, want %s", got, scheduledBackupStartupDelay)
+		}
+	})
+
+	t.Run("next run is tomorrow after today's backup", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "backup-v1.0.0-20260831T002100.tar.gz")
+		if err := os.WriteFile(path, []byte("backup"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		createdAt := time.Date(2026, 8, 31, 0, 21, 0, 0, location)
+		if err := os.Chtimes(path, createdAt, createdAt); err != nil {
+			t.Fatal(err)
+		}
+
+		now := time.Date(2026, 8, 31, 1, 0, 0, 0, location)
+		want := 23*time.Hour + 20*time.Minute
+		if got := nextScheduledBackupDelayAt(dir, interval, "00:20", location, now); got != want {
+			t.Fatalf("delay = %s, want %s", got, want)
+		}
+	})
+
+	t.Run("interprets time in configured timezone", func(t *testing.T) {
+		now := time.Date(2026, 8, 30, 21, 10, 0, 0, time.UTC)
+		if got := nextScheduledBackupDelayAt(t.TempDir(), interval, "00:20", location, now); got != 10*time.Minute {
+			t.Fatalf("delay = %s, want 10m", got)
+		}
+	})
+}

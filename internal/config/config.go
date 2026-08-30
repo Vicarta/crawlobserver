@@ -273,6 +273,8 @@ type GSCConfig struct {
 type BackupConfig struct {
 	Enabled  bool   `mapstructure:"enabled"`
 	Interval string `mapstructure:"interval"` // duration string: "12h", "24h"
+	Time     string `mapstructure:"time"`     // optional daily wall-clock time: "HH:MM"
+	Timezone string `mapstructure:"timezone"` // optional IANA timezone for Time
 	Dir      string `mapstructure:"dir"`      // backup directory, "" = <dataDir>/backups
 	Retain   int    `mapstructure:"retain"`   // number of backups to keep
 }
@@ -358,6 +360,8 @@ func SetDefaults() {
 
 	viper.SetDefault("backup.enabled", true)
 	viper.SetDefault("backup.interval", "24h")
+	viper.SetDefault("backup.time", "")
+	viper.SetDefault("backup.timezone", "")
 	viper.SetDefault("backup.dir", "")
 	viper.SetDefault("backup.retain", 2)
 
@@ -593,6 +597,17 @@ func validate(cfg *Config) error {
 		interval, err := time.ParseDuration(cfg.Backup.Interval)
 		if err != nil || interval < time.Hour {
 			return fmt.Errorf("backup.interval must be a valid duration >= 1h")
+		}
+		if cfg.Backup.Time != "" {
+			parsed, err := time.Parse("15:04", cfg.Backup.Time)
+			if err != nil || parsed.Format("15:04") != cfg.Backup.Time {
+				return fmt.Errorf("backup.time must be a valid 24-hour HH:MM value")
+			}
+		}
+		if cfg.Backup.Timezone != "" {
+			if _, err := time.LoadLocation(cfg.Backup.Timezone); err != nil {
+				return fmt.Errorf("backup.timezone must be a valid IANA timezone: %w", err)
+			}
 		}
 		if cfg.Backup.Retain < 1 {
 			return fmt.Errorf("backup.retain must be >= 1")

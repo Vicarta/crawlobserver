@@ -223,10 +223,12 @@ The policy:
 The app and ClickHouse Docker `json-file` logs are independently capped at
 three 20 MB files. Scheduled application backups default to every 24 hours with
 two retained generations; app restarts preserve the due time instead of
-creating an extra archive. A successful separate critical export allows the
-scheduled full archive to omit `gsc_analytics` rows; if that export fails, the
-full archive keeps those rows automatically. Manual full backups always keep
-all table data.
+creating an extra archive. Set `backup.time` to a daily `HH:MM` wall-clock time
+and optionally `backup.timezone` to an IANA timezone (for example,
+`Europe/Kyiv`) when a fixed local schedule is required. A successful separate
+critical export allows the scheduled full archive to omit `gsc_analytics` rows;
+if that export fails, the full archive keeps those rows automatically. Manual
+full backups always keep all table data.
 
 The default paths assume the Compose project name is `deploy`. If the project
 name changes, update `deploy/logrotate/crawlobserver-clickhouse` before

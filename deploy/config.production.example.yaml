@@ -60,6 +60,9 @@ gsc:
 backup:
   enabled: true
   interval: 24h
+  # Optional daily wall-clock schedule. Uses the server's local timezone when omitted.
+  time: ""
+  timezone: ""
   dir: /var/backups/crawlobserver
   retain: 2
 

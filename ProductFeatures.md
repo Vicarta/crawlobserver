@@ -682,8 +682,11 @@ flags. Web UI компілюється в Go binary, тому production не п
 - SQLite store для users, API keys, project settings та integration metadata.
 - Manual backup list/create/restore/delete через API/UI.
 - Scheduled backups за замовчуванням виконуються раз на 24 години та зберігають
-  дві останні копії; interval і retention залишаються configurable. App restart
-  не створює зайву копію, якщо останній scheduled archive ще не прострочений.
+  дві останні копії; interval і retention залишаються configurable. Для
+  фіксованого щоденного часу можна задати `backup.time` у форматі `HH:MM` і
+  `backup.timezone` як IANA timezone; без timezone використовується локальна
+  timezone сервера. App restart не створює зайву копію, якщо останній
+  scheduled archive ще не прострочений.
 - Critical-data export є окремим recovery-шляхом. Scheduled full archive зберігає
   DDL `gsc_analytics`, але не дублює її rows, які входять до critical export;
   manual full backup залишається самодостатнім і містить усі таблиці.

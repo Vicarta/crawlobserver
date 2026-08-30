@@ -47,6 +47,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Backup.Interval != "24h" {
 		t.Errorf("Backup.Interval = %q, want 24h", cfg.Backup.Interval)
 	}
+	if cfg.Backup.Time != "" {
+		t.Errorf("Backup.Time = %q, want empty", cfg.Backup.Time)
+	}
+	if cfg.Backup.Timezone != "" {
+		t.Errorf("Backup.Timezone = %q, want empty", cfg.Backup.Timezone)
+	}
 	if cfg.Backup.Retain != 2 {
 		t.Errorf("Backup.Retain = %d, want 2", cfg.Backup.Retain)
 	}
@@ -89,6 +95,8 @@ func TestValidateRejectsInvalid(t *testing.T) {
 		{"zero flush_interval", func(c *Config) { c.Storage.FlushInterval = 0 }},
 		{"invalid backup interval", func(c *Config) { c.Backup.Interval = "daily" }},
 		{"short backup interval", func(c *Config) { c.Backup.Interval = "30m" }},
+		{"invalid backup time", func(c *Config) { c.Backup.Time = "25:00" }},
+		{"invalid backup timezone", func(c *Config) { c.Backup.Timezone = "Not/A_Timezone" }},
 		{"zero backup retention", func(c *Config) { c.Backup.Retain = 0 }},
 	}
 
@@ -151,6 +159,9 @@ clickhouse:
 storage:
   batch_size: 500
   flush_interval: "3s"
+backup:
+  time: "00:20"
+  timezone: "Europe/Kyiv"
 server:
   password: "strong-test-password"
 `
@@ -183,6 +194,12 @@ server:
 	}
 	if cfg.Storage.BatchSize != 500 {
 		t.Errorf("BatchSize = %d, want 500", cfg.Storage.BatchSize)
+	}
+	if cfg.Backup.Time != "00:20" {
+		t.Errorf("Backup.Time = %q, want 00:20", cfg.Backup.Time)
+	}
+	if cfg.Backup.Timezone != "Europe/Kyiv" {
+		t.Errorf("Backup.Timezone = %q, want Europe/Kyiv", cfg.Backup.Timezone)
 	}
 }
 
