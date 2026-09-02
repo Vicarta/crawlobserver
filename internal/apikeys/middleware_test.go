@@ -156,6 +156,12 @@ func TestAuthenticateNoCredentials(t *testing.T) {
 	if rec.Header().Get("WWW-Authenticate") != "" {
 		t.Fatal("did not expect WWW-Authenticate header for API request")
 	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	if got := rec.Body.String(); got != "{\"error\":\"unauthorized\"}\n" {
+		t.Fatalf("body = %q, want unauthorized JSON", got)
+	}
 }
 
 func TestAuthenticateNoCredentialsHTMLChallenge(t *testing.T) {
@@ -191,5 +197,14 @@ func TestAuthenticateInvalidAPIKey(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); got != "" {
+		t.Fatalf("WWW-Authenticate = %q, want empty", got)
+	}
+	if got := rec.Body.String(); got != "{\"error\":\"invalid api key\"}\n" {
+		t.Fatalf("body = %q, want invalid api key JSON", got)
 	}
 }

@@ -401,6 +401,10 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	fileServer := http.FileServer(http.FS(distFS))
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
+		if path == "/api" || strings.HasPrefix(path, "/api/") {
+			writeError(w, http.StatusNotFound, "API endpoint not found")
+			return
+		}
 		if path == "/" {
 			w.Header().Set("Cache-Control", "no-cache")
 			fileServer.ServeHTTP(w, r)
@@ -948,10 +952,12 @@ func basicAuth(next http.Handler, username, password string) http.Handler {
 		if !ok ||
 			subtle.ConstantTimeCompare([]byte(user), []byte(username)) != 1 ||
 			subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
-			if !strings.HasPrefix(r.URL.Path, "/api/") {
+			if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+			} else {
 				w.Header().Set("WWW-Authenticate", `Basic realm="CrawlObserver"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			}
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 		next.ServeHTTP(w, r)

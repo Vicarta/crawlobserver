@@ -5,7 +5,7 @@
 See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 **Core value:** A server operator can deploy, start, secure, verify, and recover CrawlObserver without guessing critical runtime steps.
-**Current focus:** Phase 25.3 complete; Phase 26 remains planned
+**Current focus:** Phase 25.4 urgent API routing gap; Phase 26 remains planned
 
 ## Current Status
 
@@ -36,13 +36,23 @@ See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 ## Next Action
 
-Phase 25.3 is closed and deployed. Keep the current app-only rollout in place;
-plan the next approved Phase 26 work before making any further production
-change. Do not run a live crawl/rescan as part of this closeout.
+Execute and close the approved urgent Phase 25.4. Preserve Phase 26 as planned,
+and do not run a live crawl/rescan or change data during the Phase 25.4 rollout.
 
 ## Accumulated Context
 
 ### Roadmap Evolution
+
+- Phase 25.4 inserted after Phase 25: fail-closed unknown API routing for
+  integrations (URGENT).
+  - Production already serves the exact Current Snapshot endpoint as JSON, and
+    SEO Dashboard already normalizes its configured root URL to `/api`.
+  - A standalone diagnostic bypassed that normalization and produced the
+    original false positive. Independently, authenticated unknown GET `/api`
+    paths do fall through the embedded SPA handler and return HTML with 200.
+  - The phase is limited to a JSON 404 boundary, JSON API authentication
+    errors, focused regression coverage, documentation, and an app-only safe
+    rollout. It does not touch Dashboard, Delta selection, crawls, or data.
 
 - Phase 25.3 inserted after Phase 25.2: raw-stabilized sitemap retry
   suppression (URGENT).

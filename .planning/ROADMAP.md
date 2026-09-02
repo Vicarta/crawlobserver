@@ -312,6 +312,26 @@ Plans:
 - [x] 25-01: Discovery evidence contract, URL Detail block, regression tests,
   and app-only rollout
 
+### Phase 25.4: Fail-closed unknown API routing for integrations (INSERTED)
+
+**Goal:** Ensure integrations cannot mistake the embedded SPA document for an
+API response when an authenticated GET targets an unknown `/api` path.
+**Requirements**:
+- **API-254-01:** Preserve the exact authenticated
+  `GET /api/projects/{id}/current-snapshot` JSON contract and public health JSON.
+- **API-254-02:** Return a stable `404 application/json` error for authenticated
+  unknown GET `/api` paths instead of serving the SPA document.
+- **API-254-03:** Return API authentication failures as `401 application/json`
+  without adding an HTML Basic-auth challenge to API paths.
+- **API-254-04:** Add focused regression coverage and update
+  `ProductFeatures.md`; do not crawl, rescan, rewrite data, or change Dashboard.
+**Depends on:** Phase 25
+**Plans:** 1 plan
+
+Plans:
+- [ ] 25.4-01: Fail-closed API fallback, JSON auth errors, regression tests, and
+  guarded app-only rollout
+
 ### Phase 25.1: PageRank quality evidence consistency (INSERTED)
 
 **Goal:** Make terminal crawl state, Internal PageRank reports, Quality Gate,

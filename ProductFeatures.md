@@ -47,6 +47,10 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
 - Rate limiting для загальних і authentication endpoints.
 - Public health, theme, setup status та login endpoints; інші API маршрути
   проходять authentication/authorization middleware.
+- Відомі API endpoints повертають typed JSON; authenticated GET до невідомого
+  `/api` path завершується `404 application/json` і ніколи не маскується SPA
+  документом. Authentication failure для API повертається як `401
+  application/json`, тоді як browser routes зберігають SPA history fallback.
 
 ## 3. Проєкти та сесії
 

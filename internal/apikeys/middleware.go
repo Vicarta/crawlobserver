@@ -3,6 +3,7 @@ package apikeys
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"net/http"
 	"strings"
 )
@@ -75,7 +76,11 @@ func Authenticate(keyStore *Store, basicUser, basicPass string) func(http.Handle
 			if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
 				result := keyStore.ValidateKey(apiKey)
 				if result == nil {
-					http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
+					if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+						writeUnauthorized(w, r, "invalid api key")
+					} else {
+						http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
+					}
 					return
 				}
 				info := &AuthInfo{
@@ -118,10 +123,18 @@ func Authenticate(keyStore *Store, basicUser, basicPass string) func(http.Handle
 				}
 			}
 
-			if !strings.HasPrefix(r.URL.Path, "/api/") {
-				w.Header().Set("WWW-Authenticate", `Basic realm="CrawlObserver"`)
-			}
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeUnauthorized(w, r, "unauthorized")
 		})
 	}
+}
+
+func writeUnauthorized(w http.ResponseWriter, r *http.Request, message string) {
+	if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+		return
+	}
+	w.Header().Set("WWW-Authenticate", `Basic realm="CrawlObserver"`)
+	http.Error(w, message, http.StatusUnauthorized)
 }

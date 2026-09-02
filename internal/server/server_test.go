@@ -9599,6 +9599,14 @@ func TestBuildHandler_BasicAuthOnly(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected public health 200, got %d", rec.Code)
 	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("health Content-Type = %q, want application/json", got)
+	}
+	var health map[string]string
+	decodeJSON(t, rec, &health)
+	if health["status"] != "ok" {
+		t.Errorf("health status = %q, want ok", health["status"])
+	}
 
 	// Other API endpoints should still require basic auth.
 	req = httptest.NewRequest("GET", "/api/sessions", nil)
@@ -9606,6 +9614,17 @@ func TestBuildHandler_BasicAuthOnly(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 without auth, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); got != "" {
+		t.Errorf("WWW-Authenticate = %q, want empty", got)
+	}
+	var unauthorized map[string]string
+	decodeJSON(t, rec, &unauthorized)
+	if unauthorized["error"] != "unauthorized" {
+		t.Errorf("error = %q, want unauthorized", unauthorized["error"])
 	}
 
 	// Should work with correct basic auth
@@ -9615,6 +9634,92 @@ func TestBuildHandler_BasicAuthOnly(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 with auth, got %d", rec.Code)
+	}
+}
+
+func TestProjectCurrentSnapshotRouteReturnsJSON(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{Username: "admin", Password: "secret"}}
+	keyStore, err := apikeys.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = keyStore.Close() })
+	project, err := keyStore.CreateProject("route-contract")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID := project.ID
+	currentID := "25400000-0000-4000-8000-000000000002"
+	baselineID := "25400000-0000-4000-8000-000000000001"
+	rulesRevision, err := (&Server{keyStore: keyStore}).currentQualityRulesRevision(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := &storage.PageRankEvidence{SessionID: baselineID, AttemptID: "evidence-254", State: storage.PageRankEvidenceFinalized, PredicateVersion: storage.PageRankEligiblePredicateVersion}
+	quality := &storage.CrawlQualityResult{SessionID: baselineID, ProjectID: projectID, EvaluationRevision: "quality-254", EvaluatorRevision: qualityEvaluatorRevision, RulesRevision: rulesRevision, PageRankEvidenceRevision: evidence.AttemptID, PageRankPredicateVersion: storage.PageRankEligiblePredicateVersion, Trusted: true, Status: "trusted", IsFullCrawl: true}
+	snapshot := &storage.ProjectCurrentSnapshot{ProjectID: projectID, CurrentSessionID: currentID, BaselineSessionID: baselineID, QualityBaselineSessionID: baselineID, QualityEvaluationRevision: quality.EvaluationRevision, PageRankEvidenceRevision: evidence.AttemptID, QualityEvaluatorRevision: qualityEvaluatorRevision, QualityRulesRevision: rulesRevision, QualityPromotionStatus: "applied"}
+	store := qualitySnapshotServerStore{
+		mockStore: &mockStore{getSessionByID: map[string]*storage.CrawlSession{
+			currentID: {ID: currentID, ProjectID: &projectID}, baselineID: {ID: baselineID, ProjectID: &projectID},
+		}},
+		qualityGateMock:         qualityGateMock{current: quality, evidence: evidence},
+		currentSnapshotGateMock: currentSnapshotGateMock{snapshot: snapshot, quality: quality, evidence: evidence},
+	}
+	handler, err := NewWithDeps(cfg, store, keyStore, newMockManager()).buildHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := authRequest(httptest.NewRequest(http.MethodGet, "/api/projects/"+projectID+"/current-snapshot", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var got storage.ProjectCurrentSnapshot
+	decodeJSON(t, rec, &got)
+	if !reflect.DeepEqual(got, *snapshot) {
+		t.Fatalf("snapshot response = %#v, want %#v", got, *snapshot)
+	}
+}
+
+func TestUnknownAPIRoutesDoNotFallThroughToSPA(t *testing.T) {
+	_, handler, _ := newTestServer(t)
+
+	for _, path := range []string{"/api", "/api/projects/project-1/current-snapshot/"} {
+		t.Run(path, func(t *testing.T) {
+			req := authRequest(httptest.NewRequest(http.MethodGet, path, nil))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", got)
+			}
+			var payload map[string]string
+			decodeJSON(t, rec, &payload)
+			if payload["error"] != "API endpoint not found" {
+				t.Fatalf("error = %q, want API endpoint not found", payload["error"])
+			}
+		})
+	}
+}
+
+func TestUnknownFrontendRouteStillFallsThroughToSPA(t *testing.T) {
+	_, handler, _ := newTestServer(t)
+
+	req := authRequest(httptest.NewRequest(http.MethodGet, "/projects/project-1", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", got)
 	}
 }
 
