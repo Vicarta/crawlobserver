@@ -162,6 +162,12 @@ Expected result:
 
 ## Operations
 
+### ClickHouse Memory
+
+The production Compose profile reserves up to `2g` for ClickHouse. This leaves
+enough query working memory for page-detail and aggregate reports that read
+compressed stored HTML; do not lower it to `1g` on the current production host.
+
 ```bash
 cd deploy
 sudo docker compose ps

@@ -713,7 +713,9 @@ flags. Web UI компілюється в Go binary, тому production не п
 - Read-only `CHECK_ONLY=1` preflight.
 - Production правило: не перезапускати ClickHouse під час app rollout.
 - Automatic migrations, startup logging і recent-log inspection.
-- Runtime resource limits для memory та GOMAXPROCS.
+- Runtime resource limits для memory та GOMAXPROCS. Docker deployment reserves
+  up to 2 GiB for ClickHouse query working memory, preventing large page-detail
+  and aggregate reports from failing at the former 1 GiB container cap.
 - Self-update status і apply flow для supported installations.
 
 ## 28. Відомі межі

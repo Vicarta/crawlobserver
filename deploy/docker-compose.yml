@@ -13,6 +13,8 @@ services:
         condition: service_healthy
     command: ["serve", "--config", "/etc/crawlobserver/config.yaml"]
     user: "${APP_UID:-1005}:${APP_GID:-1005}"
+    cpus: 0.50
+    mem_limit: 1536m
     environment:
       HOME: /var/lib/crawlobserver
       GSC_CLIENT_ID: ${GSC_CLIENT_ID:-}
@@ -52,6 +54,10 @@ services:
     image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION:-25.5}
     container_name: crawlobserver-clickhouse
     restart: unless-stopped
+    cpus: 0.35
+    # Page-detail and aggregate reports may need over 1 GiB while reading
+    # compressed stored HTML. Keep enough working memory for those requests.
+    mem_limit: 2g
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/.env}
