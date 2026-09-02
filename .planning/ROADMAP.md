@@ -329,7 +329,7 @@ API response when an authenticated GET targets an unknown `/api` path.
 **Plans:** 1 plan
 
 Plans:
-- [ ] 25.4-01: Fail-closed API fallback, JSON auth errors, regression tests, and
+- [x] 25.4-01: Fail-closed API fallback, JSON auth errors, regression tests, and
   guarded app-only rollout
 
 ### Phase 25.1: PageRank quality evidence consistency (INSERTED)

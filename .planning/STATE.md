@@ -5,7 +5,7 @@
 See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 **Core value:** A server operator can deploy, start, secure, verify, and recover CrawlObserver without guessing critical runtime steps.
-**Current focus:** Phase 25.4 urgent API routing gap; Phase 26 remains planned
+**Current focus:** Phase 25.4 complete; Phase 26 remains planned
 
 ## Current Status
 
@@ -36,8 +36,8 @@ See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 ## Next Action
 
-Execute and close the approved urgent Phase 25.4. Preserve Phase 26 as planned,
-and do not run a live crawl/rescan or change data during the Phase 25.4 rollout.
+Phase 25.4 is complete and deployed. Preserve Phase 26 as planned and wait for
+explicit approval before starting it or any other scope.
 
 ## Accumulated Context
 
@@ -53,6 +53,14 @@ and do not run a live crawl/rescan or change data during the Phase 25.4 rollout.
   - The phase is limited to a JSON 404 boundary, JSON API authentication
     errors, focused regression coverage, documentation, and an app-only safe
     rollout. It does not touch Dashboard, Delta selection, crawls, or data.
+  - Completed and deployed on 2026-09-02 from implementation commit
+    `a5441d3`. Both no-force active-crawl gates passed. Only the app container
+    was recreated; ClickHouse container identity remained unchanged and its
+    health plus `SELECT 1` passed.
+  - Production acceptance proved exact Current Snapshot `200 JSON`, unknown
+    API `404 JSON`, unauthenticated API `401 JSON` without browser challenge,
+    public health `ok`, and zero recent app error lines. No crawl, rescan,
+    migration, publication, or data rewrite was invoked.
 
 - Phase 25.3 inserted after Phase 25.2: raw-stabilized sitemap retry
   suppression (URGENT).
