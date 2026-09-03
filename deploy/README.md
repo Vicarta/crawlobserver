@@ -164,9 +164,11 @@ Expected result:
 
 ### ClickHouse Memory
 
-The production Compose profile reserves up to `2g` for ClickHouse. This leaves
-enough query working memory for page-detail and aggregate reports that read
-compressed stored HTML; do not lower it to `1g` on the current production host.
+The production Compose profile does not impose a Docker memory cap on
+ClickHouse. ClickHouse retains its per-query and spill-to-disk safeguards, while
+the host makes working memory available to page-detail and aggregate reports.
+Before rollout, confirm that the host has sufficient free RAM for ClickHouse and
+the separately capped application container.
 
 ```bash
 cd deploy

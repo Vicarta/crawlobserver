@@ -133,6 +133,7 @@ type Server struct {
 	qualitySchedulerCancel            context.CancelFunc
 	qualitySchedulerCursor            int
 	qualitySchedulerCursorInitialized bool
+	qualitySchedulerBackoffUntil      time.Time
 	qualitySchedulerNow               func() time.Time
 }
 

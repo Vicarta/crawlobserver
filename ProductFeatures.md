@@ -584,8 +584,10 @@ shared rendered metadata shell diagnostics без site-specific правил.
   evaluation, не змінюючи full-baseline revisions; повторний scheduler replay
   працює ідемпотентно без finding-count collision.
 - Scheduler використовує bounded fair scan, тому старі stale/missing сесії не
-  блокуються новішими no-op результатами; restart змінює scan offset
-  детерміновано і не порушує idempotency.
+  блокуються новішими no-op результатами; він не виконує reconciliation, поки
+  active crawl включно з PageRank finalization, а після ClickHouse memory-limit
+  error (`code 241`) застосовує п'ятихвилинний backoff. Restart змінює scan
+  offset детерміновано і не порушує idempotency.
 - Legacy quality result і повний набір findings імпортуються в history без
   перезапису, тому попередній stale verdict залишається доступним для audit.
 - Quality details показують evaluated time, evaluation/evidence revisions,
@@ -718,11 +720,12 @@ flags. Web UI компілюється в Go binary, тому production не п
 - Safe restart guard перевіряє active/queued crawl sessions і відмовляється
   перезапускати app за замовчуванням.
 - Read-only `CHECK_ONLY=1` preflight.
-- Production правило: не перезапускати ClickHouse під час app rollout.
+- Production правило: не перезапускати ClickHouse під час звичайного app rollout.
 - Automatic migrations, startup logging і recent-log inspection.
-- Runtime resource limits для memory та GOMAXPROCS. Docker deployment reserves
-  up to 2 GiB for ClickHouse query working memory, preventing large page-detail
-  and aggregate reports from failing at the former 1 GiB container cap.
+- Runtime resource limits для application memory та GOMAXPROCS. Docker
+  deployment не встановлює ClickHouse cgroup memory cap; per-query і
+  spill-to-disk safeguards лишаються увімкненими, а production rollout
+  перевіряє достатній host RAM.
 - Self-update status і apply flow для supported installations.
 
 ## 28. Відомі межі

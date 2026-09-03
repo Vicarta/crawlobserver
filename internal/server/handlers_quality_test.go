@@ -1133,6 +1133,88 @@ func TestQualitySchedulerHistoricalReplayConvergesAtNewestSnapshot(t *testing.T)
 	}
 }
 
+func TestQualitySchedulerSkipsReconciliationWhileCrawlActive(t *testing.T) {
+	keyStore, err := apikeys.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keyStore.Close()
+
+	projectID := "project-active-crawl"
+	sessionID := "25100000-0000-4000-8000-000000000010"
+	publishes := []string{}
+	store := qualityServerStore{
+		mockStore: &mockStore{sessions: []storage.CrawlSession{{ID: sessionID, ProjectID: &projectID, Status: "completed", PagesCrawled: 1}}},
+		qualityGateMock: qualityGateMock{
+			metrics:   &storage.CrawlQualityMetrics{HTMLPages: 1},
+			evidence:  &storage.PageRankEvidence{SessionID: sessionID, AttemptID: "evidence", State: storage.PageRankEvidenceFinalized, PredicateVersion: storage.PageRankEligiblePredicateVersion, EligiblePageCount: 1, PositivePageCount: 1},
+			publishes: &publishes,
+		},
+	}
+	manager := newMockManager()
+	manager.running["active-crawl"] = true
+	srv := &Server{store: store, keyStore: keyStore, manager: manager}
+
+	srv.evaluateMissingQuality(context.Background(), 20)
+
+	if store.mockStore.listSessionsCalls != 0 {
+		t.Fatalf("scheduler queried sessions during active crawl: %d calls", store.mockStore.listSessionsCalls)
+	}
+	if len(publishes) != 0 {
+		t.Fatalf("scheduler published quality during active crawl: %#v", publishes)
+	}
+}
+
+func TestQualitySchedulerBacksOffAfterClickHouseMemoryLimit(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	store := qualityServerStore{
+		mockStore:       &mockStore{err: errors.New("code: 241, memory limit exceeded")},
+		qualityGateMock: qualityGateMock{},
+	}
+	srv := &Server{store: store, qualitySchedulerNow: func() time.Time { return now }}
+
+	srv.evaluateMissingQuality(context.Background(), 20)
+	if got, want := store.mockStore.listSessionsCalls, 1; got != want {
+		t.Fatalf("initial scheduler calls = %d, want %d", got, want)
+	}
+	if got, want := srv.qualitySchedulerBackoffUntil, now.Add(qualitySchedulerMemoryBackoff); !got.Equal(want) {
+		t.Fatalf("scheduler backoff = %s, want %s", got, want)
+	}
+
+	now = now.Add(4 * time.Minute)
+	store.mockStore.err = nil
+	srv.evaluateMissingQuality(context.Background(), 20)
+	if got, want := store.mockStore.listSessionsCalls, 1; got != want {
+		t.Fatalf("scheduler ran during memory backoff: %d calls", got)
+	}
+
+	now = now.Add(time.Minute)
+	srv.evaluateMissingQuality(context.Background(), 20)
+	if got, want := store.mockStore.listSessionsCalls, 2; got != want {
+		t.Fatalf("scheduler did not resume after memory backoff: %d calls", got)
+	}
+}
+
+func TestQualitySchedulerBacksOffWhenPageRankOptionsHitClickHouseMemoryLimit(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	projectID := "project-options-memory-limit"
+	sessionID := "25100000-0000-4000-8000-000000000011"
+	store := qualityServerStore{
+		mockStore: &mockStore{
+			sessions:      []storage.CrawlSession{{ID: sessionID, ProjectID: &projectID, Status: "completed", PagesCrawled: 1}},
+			getSessionErr: errors.New("code: 241, memory limit exceeded"),
+		},
+		qualityGateMock: qualityGateMock{},
+	}
+	srv := &Server{store: store, qualitySchedulerNow: func() time.Time { return now }}
+
+	srv.evaluateMissingQuality(context.Background(), 20)
+
+	if got, want := srv.qualitySchedulerBackoffUntil, now.Add(qualitySchedulerMemoryBackoff); !got.Equal(want) {
+		t.Fatalf("scheduler backoff = %s, want %s", got, want)
+	}
+}
+
 func TestQualityAuditRedactsSecretLikeValues(t *testing.T) {
 	event := sanitizeQualityActionEvent(storage.CrawlQualityActionEvent{
 		Actor: "apikey:general sk-secretvalue123456", Reason: "token=abc123456789 password:visible Bearer qwertyuiop123456",

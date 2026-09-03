@@ -24,6 +24,7 @@ import (
 const (
 	qualityEvaluatorRevision      = "quality-evaluator-v2"
 	qualityDeltaEvaluatorRevision = "quality-evaluator-v3"
+	qualitySchedulerMemoryBackoff = 5 * time.Minute
 )
 
 type qualityStorage interface {
@@ -682,12 +683,22 @@ func (s *Server) evaluateMissingQuality(ctx context.Context, limit int) {
 	if limit <= 0 {
 		return
 	}
+	now := s.qualitySchedulerTime()
+	if s.qualitySchedulerBackoffActive(now) {
+		return
+	}
+	// The manager retains an engine through PageRank finalization. Avoiding any
+	// reconciliation while it is active keeps the heaviest ClickHouse reads apart.
+	if s.manager != nil && len(s.manager.ActiveSessions()) > 0 {
+		return
+	}
 	qs, ok := s.qualityStore()
 	if !ok {
 		return
 	}
 	sessions, err := s.store.ListSessions(ctx)
 	if err != nil {
+		s.backOffQualitySchedulerForMemoryError(err)
 		return
 	}
 	sort.SliceStable(sessions, func(i, j int) bool {
@@ -719,17 +730,27 @@ func (s *Server) evaluateMissingQuality(ctx context.Context, limit int) {
 		previous, importErr := qs.EnsureLegacyQualityImported(ctx, sess.ID)
 		if importErr != nil && !isNotFoundErr(importErr) {
 			applog.Warnf("server", "quality legacy import failed for session %s: %v", sess.ID, importErr)
+			if s.backOffQualitySchedulerForMemoryError(importErr) {
+				return
+			}
 			continue
 		}
 		evidence, evidenceErr := qs.LatestPageRankEvidence(ctx, sess.ID)
 		if evidenceErr != nil && (errors.Is(evidenceErr, storage.ErrNoFinalizedPageRankEvidence) || isNotFoundErr(evidenceErr)) {
 			opts, optsErr := s.pageRankOptionsForSession(ctx, sess.ID)
-			if optsErr == nil {
+			if optsErr != nil {
+				if s.backOffQualitySchedulerForMemoryError(optsErr) {
+					return
+				}
+			} else {
 				evidence, evidenceErr = qs.AdoptObservedPageRankEvidence(ctx, sess.ID, opts)
 			}
 		}
 		if evidenceErr != nil {
 			applog.Warnf("server", "quality pagerank evidence unavailable for session %s: %v", sess.ID, evidenceErr)
+			if s.backOffQualitySchedulerForMemoryError(evidenceErr) {
+				return
+			}
 			continue
 		}
 		expectedRevision := ""
@@ -739,12 +760,46 @@ func (s *Server) evaluateMissingQuality(ctx context.Context, limit int) {
 		_, changed, promotionChanged, _, err := s.evaluateAndPublishSessionQuality(ctx, sess, evidence, "scheduler", expectedRevision, "scheduler reconciliation")
 		if err != nil {
 			applog.Warnf("server", "quality evaluation failed for session %s: %v", sess.ID, err)
+			if s.backOffQualitySchedulerForMemoryError(err) {
+				return
+			}
 		}
 		if changed || promotionChanged {
 			done++
 		}
 	}
 	s.setQualitySchedulerCursor((start + scanned) % len(sessions))
+}
+
+func (s *Server) qualitySchedulerTime() time.Time {
+	if s.qualitySchedulerNow != nil {
+		return s.qualitySchedulerNow().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (s *Server) qualitySchedulerBackoffActive(now time.Time) bool {
+	s.qualitySchedulerMu.Lock()
+	defer s.qualitySchedulerMu.Unlock()
+	if s.qualitySchedulerBackoffUntil.After(now) {
+		return true
+	}
+	s.qualitySchedulerBackoffUntil = time.Time{}
+	return false
+}
+
+func (s *Server) backOffQualitySchedulerForMemoryError(err error) bool {
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "code: 241") {
+		return false
+	}
+	until := s.qualitySchedulerTime().Add(qualitySchedulerMemoryBackoff)
+	s.qualitySchedulerMu.Lock()
+	if until.After(s.qualitySchedulerBackoffUntil) {
+		s.qualitySchedulerBackoffUntil = until
+	}
+	s.qualitySchedulerMu.Unlock()
+	applog.Warnf("server", "quality scheduler paused until %s after ClickHouse memory limit: %v", until.Format(time.RFC3339), err)
+	return true
 }
 
 func (s *Server) qualitySchedulerStart(total int) int {
@@ -756,10 +811,7 @@ func (s *Server) qualitySchedulerStart(total int) int {
 	if s.qualitySchedulerCursorInitialized {
 		return s.qualitySchedulerCursor % total
 	}
-	now := time.Now().UTC()
-	if s.qualitySchedulerNow != nil {
-		now = s.qualitySchedulerNow().UTC()
-	}
+	now := s.qualitySchedulerTime()
 	// A time-derived initial offset prevents a process restart from repeatedly
 	// pinning bounded scans to the newest sessions. Subsequent passes use the
 	// in-memory cursor, while independent restarts still advance each minute.

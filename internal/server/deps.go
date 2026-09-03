@@ -222,6 +222,7 @@ type StorageService interface {
 
 // CrawlService is the subset of crawler.Manager used by the HTTP server.
 type CrawlService interface {
+	ActiveSessions() []string
 	IsRunning(sessionID string) bool
 	IsQueued(sessionID string) bool
 	Progress(sessionID string) (int64, int, bool)

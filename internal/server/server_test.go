@@ -78,12 +78,14 @@ type mockStore struct {
 	deleteCalls               []string
 	updateProjectCalls        []updateProjectCall
 	getSessionByID            map[string]*storage.CrawlSession
+	getSessionErr             error
 	effectiveOrigins          map[string]storage.EffectiveOrigin
 	effectiveOriginsErr       error
 	effectiveOriginCalls      int
 	effectiveOriginBatchSizes []int
 	listPagesCalls            []listPagesCall
 	deleteProviderCalls       []deleteProviderCall
+	listSessionsCalls         int
 }
 
 type listPagesCall struct {
@@ -113,6 +115,7 @@ type updateProjectCall struct {
 }
 
 func (m *mockStore) ListSessions(_ context.Context, projectID ...string) ([]storage.CrawlSession, error) {
+	m.listSessionsCalls++
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -209,6 +212,9 @@ func (m *mockStore) LatestProjectSession(ctx context.Context, projectID string) 
 }
 
 func (m *mockStore) GetSession(_ context.Context, sessionID string) (*storage.CrawlSession, error) {
+	if m.getSessionErr != nil {
+		return nil, m.getSessionErr
+	}
 	if m.getSessionByID != nil {
 		if s, ok := m.getSessionByID[sessionID]; ok {
 			return s, nil
@@ -810,6 +816,16 @@ func newMockManager() *mockManager {
 
 func (m *mockManager) IsRunning(sessionID string) bool {
 	return m.running[sessionID]
+}
+
+func (m *mockManager) ActiveSessions() []string {
+	active := make([]string, 0, len(m.running))
+	for sessionID, running := range m.running {
+		if running {
+			active = append(active, sessionID)
+		}
+	}
+	return active
 }
 
 func (m *mockManager) Progress(sessionID string) (int64, int, bool) {

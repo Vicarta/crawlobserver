@@ -55,9 +55,6 @@ services:
     container_name: crawlobserver-clickhouse
     restart: unless-stopped
     cpus: 0.35
-    # Page-detail and aggregate reports may need over 1 GiB while reading
-    # compressed stored HTML. Keep enough working memory for those requests.
-    mem_limit: 2g
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in deploy/.env}
