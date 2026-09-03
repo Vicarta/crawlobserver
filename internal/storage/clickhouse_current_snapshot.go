@@ -20,6 +20,7 @@ const (
 	CurrentBaselineSnapshotLabel   = "Current Baseline Snapshot"
 	deltaSitemapSelectorRevisionV1 = "v1"
 	deltaSitemapSelectorRevisionV2 = "v2"
+	deltaSitemapSelectorRevisionV3 = "v3"
 )
 
 var currentSnapshotPromotionLocks sync.Map
@@ -662,7 +663,7 @@ func deltaSitemapPublicationBindingMatches(plan *config.DeltaPlanConfig, snap *P
 }
 
 func isSupportedDeltaSitemapSelectorRevision(value string) bool {
-	return value == deltaSitemapSelectorRevisionV1 || value == deltaSitemapSelectorRevisionV2
+	return value == deltaSitemapSelectorRevisionV1 || value == deltaSitemapSelectorRevisionV2 || value == deltaSitemapSelectorRevisionV3
 }
 
 func (s *Store) finalizeCurrentSnapshotDelta(ctx context.Context, snap ProjectCurrentSnapshot, deltaSessionID string, maxDeltas, foldIntervalDays int, binding CrawlQualityPromotionEvent) (*ProjectCurrentSnapshot, error) {

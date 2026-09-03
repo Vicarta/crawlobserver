@@ -50,6 +50,11 @@ func TestDeltaSitemapPublicationBindingRequiresExactCompleteSelection(t *testing
 	if err != nil || !publish {
 		t.Fatalf("v2 complete actionable selection publish=%t err=%v", publish, err)
 	}
+	plan.SitemapSelection.SelectorRevision = "v3"
+	publish, err = deltaSitemapPublicationBindingMatches(plan, snap)
+	if err != nil || !publish {
+		t.Fatalf("v3 complete actionable selection publish=%t err=%v", publish, err)
+	}
 	plan.SitemapSelection.PublishedSnapshotRevision++
 	_, err = deltaSitemapPublicationBindingMatches(plan, snap)
 	if !errors.Is(err, ErrCurrentSnapshotSourceSuperseded) {

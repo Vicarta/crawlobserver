@@ -12,7 +12,8 @@ import (
 
 const (
 	DeltaSitemapSelectorRevisionV1 = "v1"
-	DeltaSitemapSelectorRevision   = "v2"
+	DeltaSitemapSelectorRevisionV2 = "v2"
+	DeltaSitemapSelectorRevision   = "v3"
 
 	DeltaSitemapSourceAdded              = "sitemap_added"
 	DeltaSitemapSourceLastModForward     = "sitemap_lastmod_forward"
@@ -167,7 +168,7 @@ func SelectDeltaSitemapCandidates(input DeltaSitemapSelectionInput) DeltaSitemap
 	deferred := append([]DeltaSitemapSelectedURL(nil), events[eventCapacity:]...)
 
 	remaining := maxCandidates - len(selected)
-	canaryCount := nonNegative(input.CanaryCount)
+	canaryCount := boundedSitemapCanaryCount(input.CanaryCount, len(unchanged))
 	if remaining < canaryCount {
 		canaryCount = remaining
 	}
@@ -221,6 +222,20 @@ func SelectDeltaSitemapCandidates(input DeltaSitemapSelectionInput) DeltaSitemap
 		StabilityLegacyPair:      input.StabilityLegacyPair,
 		SourceByURL:              sources,
 	}
+}
+
+func boundedSitemapCanaryCount(configuredLimit, unchangedCount int) int {
+	configuredLimit = nonNegative(configuredLimit)
+	if configuredLimit == 0 || unchangedCount <= 0 {
+		return 0
+	}
+	// Canary coverage scales with the site instead of making a fixed default
+	// consume a large share of every small, otherwise unchanged sitemap.
+	proportionalLimit := (unchangedCount + 9) / 10
+	if configuredLimit < proportionalLimit {
+		return configuredLimit
+	}
+	return proportionalLimit
 }
 
 func canonicalSitemapSelectionURLs(values []DeltaSitemapSelectionURL) []DeltaSitemapSelectionURL {

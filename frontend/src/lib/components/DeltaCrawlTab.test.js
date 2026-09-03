@@ -51,7 +51,7 @@ describe('DeltaCrawlTab sitemap selection', () => {
     expect(text).toContain('Sitemap deferred');
     expect(text).toContain('Sitemap publication held');
     expect(text).toContain('Changed sitemap cap (0 = all)');
-    expect(text).toContain('Rotating sitemap canaries');
+    expect(text).toContain('Max rotating sitemap canaries (10% sample)');
   });
 
   it('shows v2 publication differences, actionable refetches, stability proof, and hold', async () => {

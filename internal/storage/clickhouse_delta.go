@@ -546,7 +546,7 @@ func deltaSitemapStabilityDigest(olderSessionID, newerSessionID string, proofs [
 }
 
 func deltaSitemapSelectorSupportsStability(selection *config.DeltaSitemapSelection) bool {
-	return selection == nil || selection.SelectorRevision == "v1" || selection.SelectorRevision == "v2"
+	return selection == nil || selection.SelectorRevision == "v1" || selection.SelectorRevision == "v2" || selection.SelectorRevision == "v3"
 }
 
 func deltaSitemapFreshObservationMetadataValid(plan *config.DeltaPlanConfig) bool {

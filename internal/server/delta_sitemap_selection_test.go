@@ -41,10 +41,13 @@ func TestDeltaSitemapSelectionPublishedTermControlsPendingEvents(t *testing.T) {
 		selection.SourceByURL["https://example.test/forward"] != DeltaSitemapSourcePendingUnpublished {
 		t.Fatalf("raw-observed events lost pending provenance: %#v", selection.SourceByURL)
 	}
-	if selection.SourceByURL["https://example.test/equal"] != DeltaSitemapSourceCanary ||
-		selection.SourceByURL["https://example.test/backward"] != DeltaSitemapSourceCanary ||
-		selection.SourceByURL["https://example.test/invalid"] != DeltaSitemapSourceCanary {
-		t.Fatalf("unchanged values should be eligible canaries: %#v", selection.SourceByURL)
+	if selection.CanarySelected != 1 || len(selection.Selected) != 3 {
+		t.Fatalf("small unchanged cohort should contribute one canary after two events: %#v", selection)
+	}
+	for _, url := range []string{"https://example.test/equal", "https://example.test/backward", "https://example.test/invalid"} {
+		if source := selection.SourceByURL[url]; source != "" && source != DeltaSitemapSourceCanary {
+			t.Fatalf("unchanged URL %q became unexpected source %q", url, source)
+		}
 	}
 }
 
@@ -60,8 +63,8 @@ func TestDeltaSitemapSelectionBoundsEventsBeforeCanaries(t *testing.T) {
 			if selection.EventTotal != eventCount || selection.EventSelected != wantEvents || selection.EventDeferred != eventCount-wantEvents {
 				t.Fatalf("event counts = %#v, want total=%d selected=%d deferred=%d", selection, eventCount, wantEvents, eventCount-wantEvents)
 			}
-			if selection.CanarySelected != 50 || len(selection.Selected) != wantEvents+50 {
-				t.Fatalf("canary bound = %#v, want %d events then 50 canaries", selection, wantEvents)
+			if selection.CanarySelected != 6 || len(selection.Selected) != wantEvents+6 {
+				t.Fatalf("canary bound = %#v, want %d events then 10%% of 60 unchanged URLs", selection, wantEvents)
 			}
 			if selection.SelectionComplete != (eventCount <= 30) {
 				t.Fatalf("SelectionComplete = %t, want %t", selection.SelectionComplete, eventCount <= 30)
@@ -76,10 +79,10 @@ func TestDeltaSitemapSelectionBoundsEventsBeforeCanaries(t *testing.T) {
 }
 
 func TestDeltaSitemapSelectionCanaryCountsAndRotation(t *testing.T) {
-	for _, canaryPool := range []int{49, 50, 100} {
+	for _, canaryPool := range []int{1, 9, 10, 49, 50, 100, 158, 500} {
 		t.Run(fmt.Sprintf("%d canaries", canaryPool), func(t *testing.T) {
 			selection := SelectDeltaSitemapCandidates(selectionFixture(0, canaryPool))
-			want := canaryPool
+			want := (canaryPool + 9) / 10
 			if want > 50 {
 				want = 50
 			}
@@ -87,6 +90,13 @@ func TestDeltaSitemapSelectionCanaryCountsAndRotation(t *testing.T) {
 				t.Fatalf("canary selection = %#v, want %d", selection, want)
 			}
 		})
+	}
+
+	configuredCap := selectionFixture(0, 2000)
+	configuredCap.CanaryCount = 25
+	selection := SelectDeltaSitemapCandidates(configuredCap)
+	if selection.CanarySelected != 25 {
+		t.Fatalf("configured canary cap = %d, want 25", selection.CanarySelected)
 	}
 
 	input := selectionFixture(0, 200)
@@ -130,8 +140,18 @@ func TestDeltaSitemapSelectionZeroChangedLimitMeansAllEvidenceBackedChanges(t *t
 	input.ChangedLimit = 0
 	input.MaxCandidates = 5000
 	selection := SelectDeltaSitemapCandidates(input)
-	if selection.EventSelected != 120 || selection.EventDeferred != 0 || selection.CanarySelected != 50 || !selection.SelectionComplete {
-		t.Fatalf("unlimited changed selection = %#v; want 120 events plus 50 canaries", selection)
+	if selection.EventSelected != 120 || selection.EventDeferred != 0 || selection.CanarySelected != 6 || !selection.SelectionComplete {
+		t.Fatalf("unlimited changed selection = %#v; want 120 events plus 10%% of 60 unchanged URLs", selection)
+	}
+}
+
+func TestDeltaSitemapSelectionRemainingGlobalCapacityLimitsCanaries(t *testing.T) {
+	input := selectionFixture(75, 100)
+	input.ChangedLimit = 0
+	input.MaxCandidates = 80
+	selection := SelectDeltaSitemapCandidates(input)
+	if selection.EventSelected != 75 || selection.CanarySelected != 5 || len(selection.Selected) != 80 {
+		t.Fatalf("global capacity selection = %#v; want 75 events plus 5 canaries", selection)
 	}
 }
 

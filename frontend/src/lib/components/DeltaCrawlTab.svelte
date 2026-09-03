@@ -485,9 +485,7 @@
       <div class="delta-section">
         <div class="section-heading">
           <h4>Run Limits</h4>
-          <span
-            >Keep the daily job bounded while still following internal links from launched pages.</span
-          >
+          <span>Keep the daily job bounded to its selected URL plan.</span>
         </div>
         <div class="settings-grid">
           <label
@@ -507,7 +505,7 @@
             /></label
           >
           <label
-            ><span>Rotating sitemap canaries</span><input
+            ><span>Max rotating sitemap canaries (10% sample)</span><input
               type="number"
               min="0"
               bind:value={settings.sitemap_canary_count}

@@ -88,12 +88,13 @@ func TestDeltaSitemapStabilityRejectsAmbiguousSitemapIdentityAndPrecisionDrift(t
 }
 
 func TestDeltaSitemapStabilityRejectsUnknownSelectorRevision(t *testing.T) {
-	if deltaSitemapSelectorSupportsStability(&config.DeltaSitemapSelection{SelectorRevision: "v3"}) {
+	if deltaSitemapSelectorSupportsStability(&config.DeltaSitemapSelection{SelectorRevision: "v4"}) {
 		t.Fatal("unknown selector revision accepted for stability")
 	}
 	if !deltaSitemapSelectorSupportsStability(nil) ||
 		!deltaSitemapSelectorSupportsStability(&config.DeltaSitemapSelection{SelectorRevision: "v1"}) ||
-		!deltaSitemapSelectorSupportsStability(&config.DeltaSitemapSelection{SelectorRevision: "v2"}) {
+		!deltaSitemapSelectorSupportsStability(&config.DeltaSitemapSelection{SelectorRevision: "v2"}) ||
+		!deltaSitemapSelectorSupportsStability(&config.DeltaSitemapSelection{SelectorRevision: "v3"}) {
 		t.Fatal("supported legacy/current selector revision rejected")
 	}
 }
@@ -117,7 +118,7 @@ func TestDeltaSitemapFreshObservationMetadataFailsClosed(t *testing.T) {
 		{SitemapRefresh: &config.DeltaSitemapRefresh{Mode: "fresh", FreshURLCount: 1}},
 		{SitemapRefresh: &config.DeltaSitemapRefresh{Mode: "snapshot_fallback", FetchedAt: time.Now().UTC(), FreshURLCount: 1}},
 		{SitemapRefresh: &config.DeltaSitemapRefresh{Mode: "fresh", FetchedAt: time.Now().UTC(), FreshURLCount: -1}},
-		{SitemapRefresh: &config.DeltaSitemapRefresh{Mode: "fresh", FetchedAt: time.Now().UTC(), FreshURLCount: 1}, SitemapSelection: &config.DeltaSitemapSelection{SelectorRevision: "v3"}},
+		{SitemapRefresh: &config.DeltaSitemapRefresh{Mode: "fresh", FetchedAt: time.Now().UTC(), FreshURLCount: 1}, SitemapSelection: &config.DeltaSitemapSelection{SelectorRevision: "v4"}},
 	}
 	for i, plan := range cases {
 		if deltaSitemapFreshObservationMetadataValid(plan) {

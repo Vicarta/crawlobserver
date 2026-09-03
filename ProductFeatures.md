@@ -471,17 +471,20 @@ shared rendered metadata shell diagnostics без site-specific правил.
   Current Snapshot safety term: only added URLs and strictly forward valid W3C
   `lastmod` values become events; raw unpublished observations only label retry
   provenance and cannot consume a pending event.
-- Sitemap selection prioritizes evidence-backed changed events, then up to 50
-  deterministic rotating canaries; the existing changed/new limits and
-  `max_candidates_per_run` remain configurable safety ceilings rather than
-  daily targets. Event/canary/deferred
+- Sitemap selection prioritizes all evidence-backed changed events, then samples
+  at most 10% of the remaining unchanged sitemap URLs as deterministic rotating
+  canaries, bounded by the configured canary maximum; the existing changed/new
+  limits and `max_candidates_per_run` remain configurable safety ceilings rather
+  than daily targets. Event/canary/deferred
   counts, rotation epoch, selector revision, published/raw observation lineage,
   selection completeness, and per-URL source remain durable Delta plan audit
   evidence; legacy plans explicitly retain absent selection provenance. Existing
   project maximums remain unchanged. Canaries fill remaining capacity
   after changed, manual, and problem candidates instead of displacing them;
-  changed-event, canary, and global candidate limits are editable in Daily Delta.
-- Selector v2 can suppress only an exact redundant refetch after two distinct
+  changed-event, maximum canary, and global candidate limits are editable in
+  Daily Delta.
+- Selector v3 retains the v2 rule that can suppress only an exact redundant
+  refetch after two distinct
   completed fresh raw observations for the same project prove the same normalized
   URL, valid `lastmod`, terminal page evidence, and equal nonzero content hash.
   This is read-only execution evidence: it records proof-pair lineage/digest,
