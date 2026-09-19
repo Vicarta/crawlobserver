@@ -21,6 +21,7 @@
   let newKeyName = $state('');
   let newKeyType = $state('general');
   let newKeyProjectId = $state('');
+  let newKeyCapability = $state('');
   let createdKeyFull = $state(null);
 
   async function loadAPIData() {
@@ -37,11 +38,13 @@
     if (!newKeyName.trim() || !newKeyType) return;
     try {
       const pid = newKeyType === 'project' && newKeyProjectId ? newKeyProjectId : null;
-      const result = await createAPIKey(newKeyName.trim(), newKeyType, pid);
+      const capability = newKeyType === 'project' ? newKeyCapability : '';
+      const result = await createAPIKey(newKeyName.trim(), newKeyType, pid, capability);
       createdKeyFull = result.key;
       newKeyName = '';
       newKeyType = 'general';
       newKeyProjectId = '';
+      newKeyCapability = '';
       await loadAPIData();
     } catch (e) {
       onerror?.(e.message);
@@ -499,6 +502,17 @@
             : undefined}
         />
       </div>
+      <div class="form-group">
+        <label for="key-capability">{t('api.keyCapability')}</label>
+        <SearchSelect
+          id="key-capability"
+          bind:value={newKeyCapability}
+          options={[
+            { value: '', label: t('api.projectReadOnly') },
+            { value: 'targeted_rescan', label: t('api.targetedRescan') },
+          ]}
+        />
+      </div>
     {/if}
   </div>
   <div class="mt-md">
@@ -529,6 +543,9 @@
               <span class="badge badge-accent"
                 >{projects.find((p) => p.id === k.project_id)?.name || k.project_id}</span
               >
+            {/if}
+            {#if k.capability === 'targeted_rescan'}
+              <span class="badge badge-success">{t('api.targetedRescan')}</span>
             {/if}
             <code class="key-prefix-code">{k.key_prefix}</code>
             <span>{new Date(k.created_at).toLocaleDateString()}</span>

@@ -42,7 +42,9 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
 - Project-bound targeted rescan API використовує окремий Project API key із
   privileged capability `targeted_rescan`; evidence-only Project API keys не
   отримують write access.
-- Створення, перегляд і відкликання API keys через UI та API.
+- Створення, перегляд і відкликання API keys через UI та API; для Project key
+  UI дозволяє явно обрати read-only access або вузьку capability
+  `targeted_rescan` і показує її у списку ключів.
 - Керування користувачами через адміністративний UI та API.
 - Rate limiting для загальних і authentication endpoints.
 - Public health, theme, setup status та login endpoints; інші API маршрути

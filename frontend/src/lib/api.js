@@ -936,13 +936,14 @@ export async function getAPIKeys() {
  * @param {string} name
  * @param {string} type
  * @param {string|null} projectId
+ * @param {string} capability
  * @returns {Promise<Object>}
  */
-export async function createAPIKey(name, type, projectId = null) {
+export async function createAPIKey(name, type, projectId = null, capability = '') {
   return fetchJSON('/api-keys', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, type, project_id: projectId }),
+    body: JSON.stringify({ name, type, project_id: projectId, capability }),
   });
 }
 

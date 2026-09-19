@@ -7,6 +7,7 @@ import {
   getExternalLinks,
   getCurrentUser,
   exportSession,
+  createAPIKey,
   getSessionQualityHistory,
   getSessionPageRankEvidence,
   reevaluateSessionQuality,
@@ -145,6 +146,34 @@ describe('getExternalLinks', () => {
       '/api/sessions/snapshot-1/links?limit=100&offset=0&source_url=!%2Fcdn-cgi%2F&target_url=!facebook.com',
       {},
     );
+  });
+});
+
+describe('createAPIKey', () => {
+  beforeEach(() => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify({ id: 'key-1' })),
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('sends the selected project-bound mutation capability', async () => {
+    await createAPIKey('Dashboard rescan', 'project', 'project-1', 'targeted_rescan');
+
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/api-keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Dashboard rescan',
+        type: 'project',
+        project_id: 'project-1',
+        capability: 'targeted_rescan',
+      }),
+    });
   });
 });
 

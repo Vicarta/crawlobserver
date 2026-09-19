@@ -326,6 +326,8 @@
   "api.keyType": "Type",
   "api.generalAccess": "General (full access)",
   "api.projectReadOnly": "Project (read-only)",
+  "api.keyCapability": "Access",
+  "api.targetedRescan": "Targeted rescan",
   "api.selectProject": "Select project...",
   "api.createKey": "Create Key",
   "api.noKeys": "No API keys yet.",
