@@ -5,7 +5,8 @@
 See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 **Core value:** A server operator can deploy, start, secure, verify, and recover CrawlObserver without guessing critical runtime steps.
-**Current focus:** Phase 25.4 complete; Phase 26 remains planned
+**Current focus:** Phase 25.5 passwordless email authentication in progress;
+Phase 26 remains planned and unchanged
 
 ## Current Status
 
@@ -36,12 +37,25 @@ See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 ## Next Action
 
-Phase 25.4 is complete and deployed. Preserve Phase 26 as planned and wait for
-explicit approval before starting it or any other scope.
+Plan and execute Phase 25.5 without mixing in Phase 26 sitemap work or future
+project-error email notifications.
 
 ## Accumulated Context
 
 ### Roadmap Evolution
+
+- Phase 25.5 inserted after Phase 25: passwordless email authentication with
+  Resend and migrated users (URGENT).
+  - Existing users keep IDs, roles, project assignments, and active sessions;
+    administrators migrate them by assigning an email and sending a seven-day
+    invitation.
+  - Login uses a single-use six-digit email code valid for 15 minutes and
+    creates a 14-day cookie session. The username/password login is removed
+    immediately rather than retained as a transition path.
+  - Resend is server-side only. Tests use a fake sender and never send a live
+    email. Production rollout requires a verified Resend sender, API key, and a
+    still-valid administrator session for the first migration invitation.
+  - Project-error notification emails remain a separate future phase.
 
 - Phase 25.4 inserted after Phase 25: fail-closed unknown API routing for
   integrations (URGENT).

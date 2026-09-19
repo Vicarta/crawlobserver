@@ -312,6 +312,58 @@ Plans:
 - [x] 25-01: Discovery evidence contract, URL Detail block, regression tests,
   and app-only rollout
 
+### Phase 25.5: Passwordless email authentication with Resend and migrated users (INSERTED)
+
+**Goal:** Replace local username/password login with invitation-based,
+passwordless email authentication delivered through Resend while preserving
+existing user authorization and active sessions during migration.
+
+**Requirements**:
+- **AUTH-255-01:** Store one normalized unique email per local user and retain
+  existing user IDs, roles, project assignments, active state, and valid cookie
+  sessions while administrators migrate existing accounts through invitations.
+- **INVITE-255-01:** Admins can invite new or existing users. Invitations are
+  random, hash-only, single-use, expire after seven days, and a resend revokes
+  the previous outstanding invitation.
+- **LOGIN-255-01:** Public login-code requests return a non-enumerating response;
+  active verified users receive a single-use six-digit code valid for 15
+  minutes. A newer code invalidates the previous code and five failed attempts
+  invalidate the challenge.
+- **SESSION-255-01:** Successful invitation acceptance or code verification
+  creates the existing HttpOnly cookie session with a 14-day lifetime; logout
+  still revokes the server-side session, and HTTPS deployments mark the cookie
+  Secure.
+- **RESEND-255-01:** Resend credentials and verified sender are server-only
+  configuration. Sends use the official HTTPS API, a bounded timeout,
+  idempotency keys, and redacted operational errors; no secret or login code is
+  written to logs.
+- **UI-255-01:** Login becomes an email/code two-step flow; invitation links
+  have explicit valid, expired, used, and error states; User Management creates
+  invited users and migrates existing users without password fields.
+- **COMPAT-255-01:** Remove the local password login endpoint and UI immediately
+  while preserving API-key authentication, project authorization, logout,
+  existing cookie sessions, and non-auth product behavior.
+- **TEST-255-01:** Fake-sender storage/server/UI tests cover invite migration,
+  expiry, replacement, provider failure, non-enumeration, code expiry,
+  attempts, replay, session TTL/cookie flags, authorization, and password-login
+  removal without sending live email.
+- **DOC-255-01:** Update ProductFeatures and deployment configuration in the
+  same change. Error-notification emails are explicitly out of scope.
+- **DEPLOY-255-01:** Commit and push before an app-only production rollout;
+  require configured Resend credentials, a verified sender, a valid current
+  admin session, two no-force active-crawl gates, rollback evidence, app and
+  ClickHouse health checks, and no live crawl/rescan.
+
+**Covers:** AUTH-255-01, INVITE-255-01, LOGIN-255-01, SESSION-255-01,
+RESEND-255-01, UI-255-01, COMPAT-255-01, TEST-255-01, DOC-255-01,
+DEPLOY-255-01
+**Depends on:** Phase 25.4
+**Plans:** 1 plan
+
+Plans:
+- [ ] 25.5-01: Passwordless identity, Resend delivery, migration UI, regression
+  closure, and guarded rollout
+
 ### Phase 25.4: Fail-closed unknown API routing for integrations (INSERTED)
 
 **Goal:** Ensure integrations cannot mistake the embedded SPA document for an

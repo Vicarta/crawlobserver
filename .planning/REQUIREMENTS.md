@@ -132,6 +132,36 @@
 - **EXTAPI-28-02**: External projections expose sanitized evidence without leaking internal credentials or unrelated project data.
 - **TEST-28-01**: Schema compatibility and sanitized projection tests protect external consumers.
 
+### Passwordless Email Authentication
+
+- **AUTH-255-01**: Local users have one normalized unique email; existing user
+  IDs, roles, project assignments, active state, and valid cookie sessions are
+  preserved while administrators migrate accounts through invitations.
+- **INVITE-255-01**: Admin invitations for new and existing users are random,
+  stored only as hashes, single-use, valid for seven days, and replace any
+  earlier outstanding invitation for that user.
+- **LOGIN-255-01**: Login-code requests are non-enumerating; active verified
+  users receive a single-use six-digit code valid for 15 minutes, with one
+  active challenge and at most five failed attempts.
+- **SESSION-255-01**: Successful invitation acceptance or code verification
+  creates a 14-day HttpOnly session cookie; logout revokes the stored session
+  and HTTPS deployments mark cookies Secure.
+- **RESEND-255-01**: The Resend API key and verified sender remain server-side;
+  delivery uses HTTPS, bounded timeouts, idempotency keys, redacted errors, and
+  never logs codes or secrets.
+- **UI-255-01**: Login is an email/code flow, invitation states are explicit,
+  and administrators create or migrate users without password fields.
+- **COMPAT-255-01**: Username/password login is removed immediately while API
+  keys, project authorization, existing sessions, logout, and unrelated product
+  behavior remain compatible.
+- **TEST-255-01**: Automated fake-sender coverage proves invitation, code,
+  session, authorization, provider-failure, replay, and removed-password paths
+  without a live email.
+- **DOC-255-01**: ProductFeatures and deployment configuration document the
+  exact auth contract and keep future crawl-error notifications out of scope.
+- **DEPLOY-255-01**: Production rollout is app-only after Resend/admin-migration
+  preflight and two no-force active-crawl gates, with rollback and health proof.
+
 ## Out of Scope
 
 | Feature | Reason |
@@ -225,6 +255,16 @@
 | EXTAPI-28-01 | Phase 28 | Deferred |
 | EXTAPI-28-02 | Phase 28 | Deferred |
 | TEST-28-01 | Phase 28 | Deferred |
+| AUTH-255-01 | Phase 25.5 | Planned |
+| INVITE-255-01 | Phase 25.5 | Planned |
+| LOGIN-255-01 | Phase 25.5 | Planned |
+| SESSION-255-01 | Phase 25.5 | Planned |
+| RESEND-255-01 | Phase 25.5 | Planned |
+| UI-255-01 | Phase 25.5 | Planned |
+| COMPAT-255-01 | Phase 25.5 | Planned |
+| TEST-255-01 | Phase 25.5 | Planned |
+| DOC-255-01 | Phase 25.5 | Planned |
+| DEPLOY-255-01 | Phase 25.5 | Planned |
 
 **Coverage:**
 - v1 requirements: 22 total
