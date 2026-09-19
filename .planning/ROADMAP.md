@@ -361,8 +361,9 @@ DEPLOY-255-01
 **Plans:** 1 plan
 
 Plans:
-- [ ] 25.5-01: Passwordless identity, Resend delivery, migration UI, regression
-  closure, and guarded rollout
+- [ ] 25.5-01: Implementation, review, validation, commit, and push complete;
+  guarded production rollout blocked on missing `RESEND_API_KEY` and verified
+  `RESEND_FROM`
 
 ### Phase 25.4: Fail-closed unknown API routing for integrations (INSERTED)
 

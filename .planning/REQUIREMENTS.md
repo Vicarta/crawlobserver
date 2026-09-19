@@ -255,16 +255,16 @@
 | EXTAPI-28-01 | Phase 28 | Deferred |
 | EXTAPI-28-02 | Phase 28 | Deferred |
 | TEST-28-01 | Phase 28 | Deferred |
-| AUTH-255-01 | Phase 25.5 | Planned |
-| INVITE-255-01 | Phase 25.5 | Planned |
-| LOGIN-255-01 | Phase 25.5 | Planned |
-| SESSION-255-01 | Phase 25.5 | Planned |
-| RESEND-255-01 | Phase 25.5 | Planned |
-| UI-255-01 | Phase 25.5 | Planned |
-| COMPAT-255-01 | Phase 25.5 | Planned |
-| TEST-255-01 | Phase 25.5 | Planned |
-| DOC-255-01 | Phase 25.5 | Planned |
-| DEPLOY-255-01 | Phase 25.5 | Planned |
+| AUTH-255-01 | Phase 25.5 | Done |
+| INVITE-255-01 | Phase 25.5 | Done |
+| LOGIN-255-01 | Phase 25.5 | Done |
+| SESSION-255-01 | Phase 25.5 | Done |
+| RESEND-255-01 | Phase 25.5 | Done |
+| UI-255-01 | Phase 25.5 | Done |
+| COMPAT-255-01 | Phase 25.5 | Done |
+| TEST-255-01 | Phase 25.5 | Done |
+| DOC-255-01 | Phase 25.5 | Done |
+| DEPLOY-255-01 | Phase 25.5 | Blocked: Resend production prerequisites |
 
 **Coverage:**
 - v1 requirements: 22 total
@@ -273,4 +273,4 @@
 
 ---
 *Requirements defined: 2026-05-29*
-*Last updated: 2026-08-28 during Phase 25.2 execution*
+*Last updated: 2026-09-19 during Phase 25.5 execution*

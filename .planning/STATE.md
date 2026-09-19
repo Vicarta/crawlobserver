@@ -5,8 +5,9 @@
 See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 **Core value:** A server operator can deploy, start, secure, verify, and recover CrawlObserver without guessing critical runtime steps.
-**Current focus:** Phase 25.5 passwordless email authentication in progress;
-Phase 26 remains planned and unchanged
+**Current focus:** Phase 25.5 passwordless email authentication implementation
+is complete and pushed; production rollout is blocked on missing Resend
+configuration. Phase 26 remains planned and unchanged.
 
 ## Current Status
 
@@ -37,8 +38,10 @@ Phase 26 remains planned and unchanged
 
 ## Next Action
 
-Plan and execute Phase 25.5 without mixing in Phase 26 sitemap work or future
-project-error email notifications.
+Configure `RESEND_API_KEY` and verified `RESEND_FROM` server-side, confirm a
+valid current administrator session, then repeat the Phase 25.5 guarded
+app-only rollout and production acceptance. Do not restore password login or
+mix in Phase 26 sitemap work or project-error email notifications.
 
 ## Accumulated Context
 
@@ -56,6 +59,13 @@ project-error email notifications.
     email. Production rollout requires a verified Resend sender, API key, and a
     still-valid administrator session for the first migration invitation.
   - Project-error notification emails remain a separate future phase.
+  - Implementation, `ProductFeatures.md`, automated gates, and independent
+    review passed and are pushed in commit `e0ebd94` on
+    `codex/cleanup-deployed-worktree`.
+  - A read-only production preflight on 2026-09-19 found HTTPS configured and
+    no active crawl, but both `RESEND_API_KEY` and `RESEND_FROM` are missing.
+    Deployment stopped before build or restart; no live email, crawl, rescan,
+    publication, or data rewrite occurred.
 
 - Phase 25.4 inserted after Phase 25: fail-closed unknown API routing for
   integrations (URGENT).
