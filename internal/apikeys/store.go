@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SEObserver/crawlobserver/internal/applog"
@@ -180,7 +181,8 @@ type KeyLookupResult struct {
 const CapabilityTargetedRescan = "targeted_rescan"
 
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	authMu sync.Mutex
 }
 
 func NewStore(dbPath string) (*Store, error) {
@@ -266,11 +268,29 @@ func NewStore(dbPath string) (*Store, error) {
 			role TEXT NOT NULL CHECK(role IN ('admin', 'viewer')),
 			active INTEGER DEFAULT 1,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			last_login_at DATETIME
+			last_login_at DATETIME,
+			email TEXT,
+			email_verified_at DATETIME
 		)
 	`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("creating users table: %w", err)
+	}
+	// Keep the legacy username/password_hash columns intact so existing user
+	// rows and sessions survive the passwordless migration. Email is nullable
+	// until an administrator invites a migrated account.
+	for _, statement := range []string{
+		"ALTER TABLE users ADD COLUMN email TEXT",
+		"ALTER TABLE users ADD COLUMN email_verified_at DATETIME",
+	} {
+		if _, err := db.Exec(statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			db.Close()
+			return nil, fmt.Errorf("migrating users email identity: %w", err)
+		}
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(email) WHERE email IS NOT NULL`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating users email index: %w", err)
 	}
 
 	if _, err := db.Exec(`
@@ -295,6 +315,45 @@ func NewStore(dbPath string) (*Store, error) {
 	`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("creating user_sessions table: %w", err)
+	}
+
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS user_invitations (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at DATETIME NOT NULL,
+			expires_at DATETIME NOT NULL,
+			accepted_at DATETIME,
+			revoked_at DATETIME
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating user invitations table: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_user_invitations_pending ON user_invitations(user_id, created_at DESC) WHERE accepted_at IS NULL AND revoked_at IS NULL`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating user invitations index: %w", err)
+	}
+
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS user_login_challenges (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			code_hash TEXT NOT NULL,
+			created_at DATETIME NOT NULL,
+			expires_at DATETIME NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0 AND attempts <= 5),
+			consumed_at DATETIME,
+			invalidated_at DATETIME
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating user login challenges table: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_user_login_challenges_pending ON user_login_challenges(user_id, created_at DESC) WHERE consumed_at IS NULL AND invalidated_at IS NULL`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating user login challenges index: %w", err)
 	}
 
 	if _, err := db.Exec(`

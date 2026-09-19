@@ -193,11 +193,35 @@ async function fetchJSON(path, options = {}) {
   return JSON.parse(text);
 }
 
-export async function login(username, password) {
-  const user = await fetchJSON('/auth/login', {
+export async function requestLoginCode(email) {
+  return fetchJSON('/auth/code/request', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ email }),
+    suppressAuthEvent: true,
+  });
+}
+
+export async function verifyLoginCode(email, code) {
+  const user = await fetchJSON('/auth/code/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code }),
+    suppressAuthEvent: true,
+  });
+  resetAuthExpiredSignal();
+  return user;
+}
+
+export async function getInvitation(token) {
+  return fetchJSON(`/auth/invitations/${encodeURIComponent(token)}`, {
+    suppressAuthEvent: true,
+  });
+}
+
+export async function acceptInvitation(token) {
+  const user = await fetchJSON(`/auth/invitations/${encodeURIComponent(token)}/accept`, {
+    method: 'POST',
     suppressAuthEvent: true,
   });
   resetAuthExpiredSignal();
@@ -234,6 +258,10 @@ export async function updateUser(id, user) {
 
 export async function deleteUser(id) {
   return fetchJSON(`/users/${id}`, { method: 'DELETE' });
+}
+
+export async function sendUserInvitation(id) {
+  return fetchJSON(`/users/${encodeURIComponent(id)}/invite`, { method: 'POST' });
 }
 
 /** @returns {Promise<Session[]>} */

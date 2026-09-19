@@ -57,6 +57,12 @@ gsc:
   client_secret: ""
   redirect_uri: "https://crawlobserver.example.com/api/gsc/callback"
 
+# Supply these server-side values through RESEND_API_KEY and RESEND_FROM.
+# The sender domain or subdomain must be verified in Resend before rollout.
+resend:
+  api_key: ""
+  from: ""
+
 backup:
   enabled: true
   interval: 24h

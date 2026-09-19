@@ -89,6 +89,7 @@ type Server struct {
 	store           StorageService
 	keyStore        *apikeys.Store
 	manager         CrawlService
+	emailSender     EmailSender
 	server          *http.Server
 	IsDesktop       bool // true when running as .app desktop bundle
 	UpdateStatus    *updater.UpdateStatus
@@ -140,10 +141,11 @@ type Server struct {
 // New creates a new Server.
 func New(cfg *config.Config, store *storage.Store, keyStore *apikeys.Store) *Server {
 	return &Server{
-		cfg:      cfg,
-		store:    store,
-		keyStore: keyStore,
-		manager:  crawler.NewManager(cfg, store, keyStore),
+		cfg:         cfg,
+		store:       store,
+		keyStore:    keyStore,
+		manager:     crawler.NewManager(cfg, store, keyStore),
+		emailSender: NewResendEmailSender(cfg.Resend),
 	}
 }
 
@@ -151,9 +153,10 @@ func New(cfg *config.Config, store *storage.Store, keyStore *apikeys.Store) *Ser
 // The server can serve the frontend and setup endpoints while ClickHouse downloads.
 func NewSetupServer(cfg *config.Config) *Server {
 	s := &Server{
-		cfg:       cfg,
-		SetupMode: true,
-		readyCh:   make(chan struct{}),
+		cfg:         cfg,
+		SetupMode:   true,
+		readyCh:     make(chan struct{}),
+		emailSender: NewResendEmailSender(cfg.Resend),
 	}
 	s.downloadProgress.Store(&SetupProgress{})
 	return s
@@ -177,10 +180,11 @@ func (s *Server) SetDownloadProgress(p SetupProgress) {
 // NewWithDeps creates a new Server with explicit dependencies (for testing).
 func NewWithDeps(cfg *config.Config, store StorageService, keyStore *apikeys.Store, manager CrawlService) *Server {
 	return &Server{
-		cfg:      cfg,
-		store:    store,
-		keyStore: keyStore,
-		manager:  manager,
+		cfg:         cfg,
+		store:       store,
+		keyStore:    keyStore,
+		manager:     manager,
+		emailSender: NewResendEmailSender(cfg.Resend),
 	}
 }
 
@@ -247,7 +251,10 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("GET /api/auth/me", s.handleAuthMe)
 
 	// API routes - write
-	mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
+	mux.HandleFunc("POST /api/auth/code/request", s.handleAuthCodeRequest)
+	mux.HandleFunc("POST /api/auth/code/verify", s.handleAuthCodeVerify)
+	mux.HandleFunc("GET /api/auth/invitations/{token}", s.handleInspectInvitation)
+	mux.HandleFunc("POST /api/auth/invitations/{token}/accept", s.handleAcceptInvitation)
 	mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
 	mux.HandleFunc("PUT /api/theme", s.handleUpdateTheme)
 	mux.HandleFunc("POST /api/check-ip", s.handleCheckIP)
@@ -322,6 +329,7 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("GET /api/users", s.handleListUsers)
 	mux.HandleFunc("POST /api/users", s.handleCreateUser)
 	mux.HandleFunc("PUT /api/users/{id}", s.handleUpdateUser)
+	mux.HandleFunc("POST /api/users/{id}/invite", s.handleInviteUser)
 	mux.HandleFunc("DELETE /api/users/{id}", s.handleDeleteUser)
 
 	// GSC (Google Search Console) routes
@@ -437,9 +445,13 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	// Wrap with auth middleware
 	var handler http.Handler = mux
 	switch {
-	case s.keyStore != nil && s.cfg.Server.Username != "" && s.cfg.Server.Password != "":
+	case s.keyStore != nil:
 		handler = allowPublicPaths(apikeys.Authenticate(s.keyStore, s.cfg.Server.Username, s.cfg.Server.Password)(mux), mux)
-		applog.Infof("server", "Authentication enabled (API keys + basic auth) — user: %s, password in config.yaml", s.cfg.Server.Username)
+		if s.cfg.Server.Username != "" && s.cfg.Server.Password != "" {
+			applog.Infof("server", "Authentication enabled (sessions + API keys + configured basic API auth) — user: %s", s.cfg.Server.Username)
+		} else {
+			applog.Info("server", "Authentication enabled (sessions + API keys)")
+		}
 	case s.cfg.Server.Username != "" && s.cfg.Server.Password != "":
 		handler = allowPublicPaths(basicAuth(mux, s.cfg.Server.Username, s.cfg.Server.Password), mux)
 		applog.Infof("server", "Basic authentication enabled — user: %s, password in config.yaml", s.cfg.Server.Username)
@@ -481,7 +493,12 @@ func isPublicPath(r *http.Request) bool {
 	if r.Method == http.MethodGet && r.URL.Path == "/api/setup/status" {
 		return true
 	}
-	if r.URL.Path == "/api/auth/login" && r.Method == http.MethodPost {
+	if r.Method == http.MethodPost &&
+		(r.URL.Path == "/api/auth/code/request" || r.URL.Path == "/api/auth/code/verify") {
+		return true
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/auth/invitations/") &&
+		(r.Method == http.MethodGet || r.Method == http.MethodPost) {
 		return true
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -712,7 +729,7 @@ func (s *Server) serverInfoPayload(r *http.Request) map[string]interface{} {
 		"api_url":  addr + "/api",
 		"host":     s.cfg.Server.Host,
 		"port":     s.cfg.Server.Port,
-		"has_auth": s.cfg.Server.Username != "" && s.cfg.Server.Password != "",
+		"has_auth": s.keyStore != nil || (s.cfg.Server.Username != "" && s.cfg.Server.Password != ""),
 	}
 	return info
 }

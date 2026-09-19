@@ -119,5 +119,8 @@ func isAuthEndpoint(method, path string) bool {
 	if method != "POST" && method != "PUT" && method != "DELETE" {
 		return false
 	}
-	return strings.HasPrefix(path, "/api/api-keys") || strings.HasPrefix(path, "/api/projects")
+	return strings.HasPrefix(path, "/api/auth/") ||
+		strings.HasPrefix(path, "/api/users") ||
+		strings.HasPrefix(path, "/api/api-keys") ||
+		strings.HasPrefix(path, "/api/projects")
 }

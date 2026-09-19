@@ -188,6 +188,11 @@ func TestIsAuthEndpoint(t *testing.T) {
 		{"PUT", "/api/projects/abc", true},
 		{"DELETE", "/api/projects/abc", true},
 		{"GET", "/api/projects", false},
+		{"POST", "/api/auth/code/request", true},
+		{"POST", "/api/auth/code/verify", true},
+		{"POST", "/api/auth/invitations/token/accept", true},
+		{"GET", "/api/auth/invitations/token", false},
+		{"POST", "/api/users/abc/invite", true},
 		{"POST", "/api/crawl", false},
 		{"GET", "/api/sessions", false},
 	}

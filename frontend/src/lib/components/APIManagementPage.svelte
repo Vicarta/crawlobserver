@@ -78,7 +78,14 @@
     {
       section: 'Auth',
       endpoints: [
-        { method: 'POST', path: '/auth/login', desc: 'Log in with a local username/password' },
+        { method: 'POST', path: '/auth/code/request', desc: 'Request a one-time email code' },
+        { method: 'POST', path: '/auth/code/verify', desc: 'Verify a one-time email code' },
+        { method: 'GET', path: '/auth/invitations/{token}', desc: 'Inspect an invitation link' },
+        {
+          method: 'POST',
+          path: '/auth/invitations/{token}/accept',
+          desc: 'Accept an invitation and create a session',
+        },
         { method: 'POST', path: '/auth/logout', desc: 'Clear the browser session cookie' },
         {
           method: 'GET',
@@ -259,13 +266,14 @@
     {
       section: 'Users',
       endpoints: [
-        { method: 'GET', path: '/users', desc: 'List local users (admin only)' },
-        { method: 'POST', path: '/users', desc: 'Create a local admin or project-scoped viewer' },
+        { method: 'GET', path: '/users', desc: 'List email users (admin only)' },
+        { method: 'POST', path: '/users', desc: 'Create an email user with a role and project access' },
         {
           method: 'PUT',
           path: '/users/{id}',
-          desc: 'Update role, active state, password, or projects',
+          desc: 'Update email, role, active state, or projects',
         },
+        { method: 'POST', path: '/users/{id}/invite', desc: 'Send or resend a user invitation' },
         { method: 'DELETE', path: '/users/{id}', desc: 'Delete a local user' },
       ],
     },

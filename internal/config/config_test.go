@@ -246,6 +246,24 @@ func TestLoad_GSCShortEnvVars(t *testing.T) {
 	}
 }
 
+func TestLoad_ResendShortEnvVars(t *testing.T) {
+	viper.Reset()
+	t.Setenv("RESEND_API_KEY", "re_test_key")
+	t.Setenv("RESEND_FROM", "CrawlObserver <auth@example.com>")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Resend.APIKey != "re_test_key" {
+		t.Errorf("APIKey = %q", cfg.Resend.APIKey)
+	}
+	if cfg.Resend.From != "CrawlObserver <auth@example.com>" {
+		t.Errorf("From = %q", cfg.Resend.From)
+	}
+}
+
 func TestLoad_GeneratesPasswordWhenEmpty(t *testing.T) {
 	viper.Reset()
 	// By default, server.password is empty and server.username is "admin"

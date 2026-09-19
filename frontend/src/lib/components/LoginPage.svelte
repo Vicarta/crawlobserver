@@ -1,24 +1,118 @@
 <script>
-  import { login } from '../api.js';
+  import {
+    acceptInvitation,
+    getInvitation,
+    requestLoginCode,
+    verifyLoginCode,
+  } from '../api.js';
 
-  let { appName = 'CrawlObserver', notice = '', onlogin } = $props();
+  let { appName = 'CrawlObserver', notice = '', onlogin, oninvitationcomplete } = $props();
 
-  let username = $state('');
-  let password = $state('');
+  let email = $state('');
+  let code = $state('');
+  let step = $state('email');
   let error = $state('');
   let loading = $state(false);
+  let inviteToken = $state('');
+  let invite = $state(null);
+  let inviteState = $state('none');
 
-  async function submit() {
-    if (!username.trim() || !password || loading) return;
+  function requestErrorMessage(err) {
+    if (err.status === 429) return 'Too many attempts. Please wait and try again.';
+    return 'We could not send a code. Please try again shortly.';
+  }
+
+  function verifyErrorMessage(err) {
+    if (err.status === 429) return 'Too many attempts. Please wait and request a new code.';
+    return 'That code is invalid or expired. Request a new code and try again.';
+  }
+
+  function invitationStateForError(err) {
+    if (err.status === 410 || /expired/i.test(err.message)) return 'expired';
+    if (err.status === 409 || /used|already accepted/i.test(err.message)) return 'used';
+    return 'invalid';
+  }
+
+  async function loadInvitation(token) {
+    inviteState = 'loading';
+    error = '';
+    try {
+      invite = await getInvitation(token);
+      inviteState = 'valid';
+    } catch (err) {
+      inviteState = invitationStateForError(err);
+    }
+  }
+
+  async function requestCode() {
+    if (!email.trim() || loading) return;
     loading = true;
     error = '';
     try {
-      const user = await login(username.trim(), password);
-      onlogin?.(user);
-    } catch (e) {
-      error = e.message;
+      await requestLoginCode(email.trim());
+      step = 'code';
+      code = '';
+    } catch (err) {
+      error = requestErrorMessage(err);
     } finally {
       loading = false;
+    }
+  }
+
+  async function verifyCode() {
+    if (!/^\d{6}$/.test(code) || loading) return;
+    loading = true;
+    error = '';
+    try {
+      const user = await verifyLoginCode(email.trim(), code);
+      onlogin?.(user);
+    } catch (err) {
+      error = verifyErrorMessage(err);
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function acceptInvite() {
+    if (!inviteToken || loading) return;
+    loading = true;
+    error = '';
+    try {
+      const user = await acceptInvitation(inviteToken);
+      inviteState = 'accepted';
+      oninvitationcomplete?.();
+      onlogin?.(user);
+    } catch (err) {
+      inviteState = invitationStateForError(err);
+      if (inviteState === 'invalid') error = 'We could not accept this invitation. Please try again.';
+    } finally {
+      loading = false;
+    }
+  }
+
+  function returnToEmail() {
+    step = 'email';
+    code = '';
+    error = '';
+  }
+
+  function openCodeLogin() {
+    inviteState = 'none';
+    invite = null;
+    inviteToken = '';
+    error = '';
+    if (oninvitationcomplete) {
+      oninvitationcomplete();
+    } else if (typeof window !== 'undefined') {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    const token = new URLSearchParams(window.location.search).get('invite');
+    if (token) {
+      inviteToken = token;
+      loadInvitation(token);
     }
   }
 </script>
@@ -66,52 +160,112 @@
   </section>
 
   <section class="login-card" aria-labelledby="login-title">
-    <div class="login-card-header">
-      <p>Account access</p>
-      <h2 id="login-title">Sign in to continue</h2>
-    </div>
-
-    <form
-      class="login-form"
-      onsubmit={(e) => {
-        e.preventDefault();
-        submit();
-      }}
-    >
-      {#if notice}
-        <div class="login-notice" role="status">{notice}</div>
-      {/if}
-
-      <div class="field">
-        <label for="login-username">Username</label>
-        <input
-          id="login-username"
-          autocomplete="username"
-          bind:value={username}
-          aria-invalid={error ? 'true' : 'false'}
-        />
+    {#if inviteState === 'none'}
+      <div class="login-card-header">
+        <p>Account access</p>
+        <h2 id="login-title">Sign in to continue</h2>
       </div>
 
-      <div class="field">
-        <label for="login-password">Password</label>
-        <input
-          id="login-password"
-          type="password"
-          autocomplete="current-password"
-          bind:value={password}
-          aria-invalid={error ? 'true' : 'false'}
-        />
+      <form
+        class="login-form"
+        onsubmit={(e) => {
+          e.preventDefault();
+          step === 'email' ? requestCode() : verifyCode();
+        }}
+      >
+        {#if notice}
+          <div class="login-notice" role="status">{notice}</div>
+        {/if}
+
+        {#if step === 'email'}
+          <div class="field">
+            <label for="login-email">Email address</label>
+            <input
+              id="login-email"
+              type="email"
+              autocomplete="email"
+              bind:value={email}
+              aria-invalid={error ? 'true' : 'false'}
+              required
+            />
+          </div>
+          <p class="login-help">
+            Enter the email address your administrator used for your account.
+          </p>
+        {:else}
+          <div class="field">
+            <label for="login-code">Six-digit code</label>
+            <input
+              id="login-code"
+              type="text"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              maxlength="6"
+              pattern="[0-9]{6}"
+              bind:value={code}
+              aria-invalid={error ? 'true' : 'false'}
+              required
+            />
+          </div>
+          <p class="login-help">We sent a code to {email.trim()} if it is eligible to sign in.</p>
+        {/if}
+
+        {#if error}
+          <div class="login-error" role="alert">{error}</div>
+        {/if}
+
+        <button
+          class="btn btn-primary login-submit"
+          disabled={loading || (step === 'email' ? !email.trim() : !/^\d{6}$/.test(code))}
+        >
+          <span>{loading ? 'Please wait...' : step === 'email' ? 'Email me a code' : 'Verify code'}</span>
+          <span class="submit-arrow" aria-hidden="true">-&gt;</span>
+        </button>
+
+        {#if step === 'code'}
+          <div class="login-secondary-actions">
+            <button class="btn btn-sm" type="button" onclick={returnToEmail} disabled={loading}>Change email</button>
+            <button class="btn btn-sm" type="button" onclick={requestCode} disabled={loading}>
+              Resend code
+            </button>
+          </div>
+        {/if}
+      </form>
+    {:else}
+      <div class="login-card-header">
+        <p>Invitation</p>
+        <h2 id="login-title">
+          {inviteState === 'valid'
+            ? 'Accept your invitation'
+            : inviteState === 'loading'
+              ? 'Checking invitation'
+              : 'Invitation unavailable'}
+        </h2>
       </div>
 
-      {#if error}
-        <div class="login-error" role="alert">{error}</div>
-      {/if}
-
-      <button class="btn btn-primary login-submit" disabled={loading || !username.trim() || !password}>
-        <span>{loading ? 'Signing in...' : 'Sign in'}</span>
-        <span class="submit-arrow" aria-hidden="true">-&gt;</span>
-      </button>
-    </form>
+      <div class="login-form">
+        {#if inviteState === 'loading'}
+          <div class="login-notice" role="status">Checking your invitation link...</div>
+        {:else if inviteState === 'valid'}
+          <div class="login-notice" role="status">
+            You have been invited to access {appName}{invite?.email ? ` as ${invite.email}` : ''}.
+          </div>
+          <button class="btn btn-primary login-submit" onclick={acceptInvite} disabled={loading}>
+            <span>{loading ? 'Accepting invitation...' : 'Accept invitation'}</span>
+            <span class="submit-arrow" aria-hidden="true">-&gt;</span>
+          </button>
+        {:else if inviteState === 'expired'}
+          <div class="login-error" role="alert">This invitation has expired. Ask your administrator to send a new one.</div>
+        {:else if inviteState === 'used'}
+          <div class="login-error" role="alert">This invitation has already been used. Sign in with an email code.</div>
+          <button class="btn btn-sm" type="button" onclick={openCodeLogin}>Sign in with email code</button>
+        {:else}
+          <div class="login-error" role="alert">
+            {error || 'This invitation link is invalid. Ask your administrator for a new one.'}
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     <div class="login-note">
       Access is managed by your CrawlObserver administrator. Project-scoped accounts only see
@@ -335,6 +489,19 @@
   .login-form {
     display: grid;
     gap: 16px;
+  }
+
+  .login-help {
+    margin: -6px 0 0;
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .login-secondary-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 
   .field {

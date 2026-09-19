@@ -20,6 +20,8 @@ services:
       GSC_CLIENT_ID: ${GSC_CLIENT_ID:-}
       GSC_CLIENT_SECRET: ${GSC_CLIENT_SECRET:-}
       GSC_REDIRECT_URI: ${GSC_REDIRECT_URI:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM: ${RESEND_FROM:-}
     ports:
       - "127.0.0.1:${CRAWLOBSERVER_HOST_PORT:-8899}:8899"
     volumes:

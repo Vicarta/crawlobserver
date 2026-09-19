@@ -1,6 +1,6 @@
 # CrawlObserver: каталог функціональності
 
-Актуальність: 2026-08-28.
+Актуальність: 2026-09-19.
 
 Цей файл є канонічним каталогом фактично реалізованої функціональності
 CrawlObserver. Він описує можливості продукту на рівні користувацьких сценаріїв,
@@ -33,7 +33,16 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
 ## 2. Ролі, автентифікація та доступ
 
 - Basic Auth для сумісного адміністративного доступу.
-- Локальні користувачі з cookie-сесіями та login/logout workflow.
+- Passwordless login для локальних користувачів: одноразовий шестизначний код,
+  надісланий на підтверджену email-адресу через Resend, чинний 15 хвилин.
+- Успішний login або прийняття запрошення створює HttpOnly cookie-сесію на 14
+  днів; старий інтерактивний username/password endpoint і UI видалені одразу,
+  без перехідного password fallback.
+- Наявних користувачів мігрує адміністратор: призначає email і надсилає
+  одноразове запрошення, чинне сім днів. User ID, роль, призначення проєктів,
+  активні cookie-сесії та API keys зберігаються без змін.
+- Resend API key і verified sender використовуються лише server-side та не
+  передаються frontend.
 - Ролі `admin` і `viewer`.
 - Призначення користувачів на конкретні проєкти.
 - Проєктна ізоляція списків проєктів, crawl sessions і session data.
@@ -45,7 +54,8 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
 - Створення, перегляд і відкликання API keys через UI та API; для Project key
   UI дозволяє явно обрати read-only access або вузьку capability
   `targeted_rescan` і показує її у списку ключів.
-- Керування користувачами через адміністративний UI та API.
+- Керування email-адресами, ролями, призначеннями проєктів і запрошеннями
+  користувачів через адміністративний UI та API.
 - Rate limiting для загальних і authentication endpoints.
 - Public health, theme, setup status та login endpoints; інші API маршрути
   проходять authentication/authorization middleware.
@@ -723,6 +733,10 @@ flags. Web UI компілюється в Go binary, тому production не п
   перезапускати app за замовчуванням.
 - Read-only `CHECK_ONLY=1` preflight.
 - Production правило: не перезапускати ClickHouse під час звичайного app rollout.
+- Passwordless production rollout вимагає `RESEND_API_KEY`, verified sender у
+  `RESEND_FROM`, правильний публічний HTTPS `server.public_url` і чинну
+  адміністраторську cookie-сесію до початку deployment. Без будь-якої з цих
+  передумов rollout зупиняється; password login не повертається як workaround.
 - Automatic migrations, startup logging і recent-log inspection.
 - Runtime resource limits для application memory та GOMAXPROCS. Docker
   deployment не встановлює ClickHouse cgroup memory cap; per-query і
@@ -743,3 +757,6 @@ flags. Web UI компілюється в Go binary, тому production не п
   збережений або відповідні дані вже були persisted.
 - Current Snapshot публікує лише trusted data; raw failed/untrusted sessions
   залишаються видимими окремо для audit.
+- Email-сповіщення про crawl, Quality, backup або operational errors не входять
+  до passwordless authentication; Resend у цій функції надсилає лише
+  запрошення та login codes.

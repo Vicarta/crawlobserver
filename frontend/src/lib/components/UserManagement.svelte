@@ -1,5 +1,12 @@
 <script>
-  import { getProjects, getUsers, createUser, updateUser, deleteUser } from '../api.js';
+  import {
+    getProjects,
+    getUsers,
+    createUser,
+    updateUser,
+    deleteUser,
+    sendUserInvitation,
+  } from '../api.js';
   import { t } from '../i18n/index.svelte.js';
   import ConfirmModal from './ConfirmModal.svelte';
   import SearchSelect from './SearchSelect.svelte';
@@ -9,9 +16,9 @@
   let confirmState = $state(null);
   let projects = $state([]);
   let users = $state([]);
+  let emailDrafts = $state({});
   let newUser = $state({
-    username: '',
-    password: '',
+    email: '',
     role: 'viewer',
     project_ids: [],
   });
@@ -30,10 +37,22 @@
     try {
       projects = await getProjects();
       users = await getUsers();
+      emailDrafts = Object.fromEntries(users.map((user) => [user.id, user.email || '']));
       onprojectschanged?.(projects);
     } catch (e) {
       onerror?.(e.message);
     }
+  }
+
+  function setEmailDraft(userId, email) {
+    emailDrafts = { ...emailDrafts, [userId]: email };
+  }
+
+  function invitationStatus(user) {
+    if (user.email_verified) return 'Verified';
+    if (user.invitation_status) return user.invitation_status;
+    if (user.invite_status) return user.invite_status;
+    return user.email ? 'Invite pending' : 'Email required';
   }
 
   function toggleNewUserProject(projectId) {
@@ -44,15 +63,21 @@
   }
 
   async function handleCreateUser() {
-    if (!newUser.username.trim() || !newUser.password) return;
+    if (!newUser.email.trim()) return;
     try {
-      await createUser({
-        username: newUser.username.trim(),
-        password: newUser.password,
+      const created = await createUser({
+        email: newUser.email.trim(),
         role: newUser.role,
         project_ids: newUser.role === 'viewer' ? newUser.project_ids : [],
       });
-      newUser = { username: '', password: '', role: 'viewer', project_ids: [] };
+      newUser = { email: '', role: 'viewer', project_ids: [] };
+      try {
+        await sendUserInvitation(created.id);
+      } catch (e) {
+        await loadData();
+        onerror?.(e.message);
+        return;
+      }
       await loadData();
     } catch (e) {
       onerror?.(e.message);
@@ -60,14 +85,28 @@
   }
 
   async function handleUpdateUser(user, patch) {
-    if (isLastAdmin(user) && patch.role && patch.role !== 'admin') return;
+    if (isLastAdmin(user) && patch.role && patch.role !== 'admin') return false;
     try {
       await updateUser(user.id, {
-        username: user.username,
+        email: patch.email ?? user.email ?? '',
         role: patch.role ?? user.role,
         active: patch.active ?? user.active,
         project_ids: patch.project_ids ?? user.project_ids ?? [],
       });
+      await loadData();
+      return true;
+    } catch (e) {
+      onerror?.(e.message);
+      return false;
+    }
+  }
+
+  async function handleSaveAndInvite(user) {
+    const email = (emailDrafts[user.id] ?? '').trim();
+    if (!email) return;
+    if (!(await handleUpdateUser(user, { email }))) return;
+    try {
+      await sendUserInvitation(user.id);
       await loadData();
     } catch (e) {
       onerror?.(e.message);
@@ -77,7 +116,7 @@
   function handleDeleteUser(user) {
     if (isLastAdmin(user)) return;
     showConfirm(
-      `Delete user "${user.username}"?`,
+      `Delete user "${user.email || user.id}"?`,
       async () => {
         try {
           await deleteUser(user.id);
@@ -97,18 +136,20 @@
   <h1>Users</h1>
 </div>
 <p class="text-sm text-muted mb-md user-subtitle">
-  Create browser users and scope viewer access to specific projects.
+  Invite email users and scope viewer access to specific projects.
 </p>
 
 <div class="card mb-md">
   <div class="form-grid">
     <div class="form-group">
-      <label for="user-name">Username</label>
-      <input id="user-name" type="text" bind:value={newUser.username} placeholder="client" />
-    </div>
-    <div class="form-group">
-      <label for="user-password">Password</label>
-      <input id="user-password" type="password" bind:value={newUser.password} />
+      <label for="user-email">Email address</label>
+      <input
+        id="user-email"
+        type="email"
+        autocomplete="email"
+        bind:value={newUser.email}
+        placeholder="client@example.com"
+      />
     </div>
     <div class="form-group">
       <label for="user-role">Role</label>
@@ -143,23 +184,41 @@
     <button
       class="btn btn-primary"
       onclick={handleCreateUser}
-      disabled={!newUser.username.trim() || !newUser.password}>Create user</button
+      disabled={!newUser.email.trim()}>Create and send invitation</button
     >
   </div>
 </div>
 
 {#if users.length === 0}
-  <div class="card text-center text-muted empty-state">No local users yet.</div>
+  <div class="card text-center text-muted empty-state">No invited users yet.</div>
 {:else}
   <div class="card card-flush mb-lg">
     {#each users as u}
       {@const lastAdmin = isLastAdmin(u)}
       <div class="user-row">
         <div class="user-info">
-          <div class="user-name">{u.username}</div>
+          {#if !u.email}
+            <div class="legacy-identifier">
+              <span>Legacy identifier</span>
+              <code>{u.username || u.id}</code>
+            </div>
+          {/if}
+          <div class="user-email">
+            <label class="sr-only" for={`user-email-${u.id}`}>Email address</label>
+            <input
+              id={`user-email-${u.id}`}
+              class="user-email-input"
+              type="email"
+              autocomplete="email"
+              value={emailDrafts[u.id] ?? ''}
+              placeholder="user@example.com"
+              oninput={(event) => setEmailDraft(u.id, event.currentTarget.value)}
+            />
+          </div>
           <div class="user-meta">
             <span class="badge" class:badge-info={u.role === 'admin'}>{u.role}</span>
             <span class:status-disabled={!u.active}>{u.active ? 'Active' : 'Disabled'}</span>
+            <span>{invitationStatus(u)}</span>
             {#if lastAdmin}
               <span>Last administrator</span>
             {/if}
@@ -206,6 +265,13 @@
           </button>
           <button class="btn btn-sm" onclick={() => handleUpdateUser(u, { active: !u.active })}>
             {u.active ? 'Disable' : 'Enable'}
+          </button>
+          <button
+            class="btn btn-sm"
+            onclick={() => handleSaveAndInvite(u)}
+            disabled={!(emailDrafts[u.id] ?? '').trim()}
+          >
+            {u.email_verified ? 'Resend invitation' : 'Save and send invitation'}
           </button>
           <button
             class="btn btn-sm btn-danger"
@@ -300,10 +366,47 @@
     flex: 1;
   }
 
-  .user-name {
+  .user-email {
     font-weight: 600;
     color: var(--text);
     margin-bottom: 6px;
+  }
+
+  .legacy-identifier {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .legacy-identifier code {
+    color: var(--text-secondary);
+    font: inherit;
+    overflow-wrap: anywhere;
+  }
+
+  .user-email-input {
+    width: min(360px, 100%);
+    padding: 7px 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
+    color: var(--text);
+    font: inherit;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 
   .user-meta {

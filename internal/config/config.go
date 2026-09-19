@@ -21,6 +21,7 @@ type Config struct {
 	Server        ServerConfig        `mapstructure:"server"`
 	Theme         ThemeConfig         `mapstructure:"theme"`
 	GSC           GSCConfig           `mapstructure:"gsc"`
+	Resend        ResendConfig        `mapstructure:"resend"`
 	Interlinking  InterlinkingConfig  `mapstructure:"interlinking"`
 	Backup        BackupConfig        `mapstructure:"backup"`
 	Retention     RetentionConfig     `mapstructure:"retention"`
@@ -270,6 +271,13 @@ type GSCConfig struct {
 	RedirectURI  string `mapstructure:"redirect_uri"`
 }
 
+// ResendConfig contains server-only credentials and sender identity for
+// passwordless authentication email delivery.
+type ResendConfig struct {
+	APIKey string `mapstructure:"api_key"`
+	From   string `mapstructure:"from"`
+}
+
 type BackupConfig struct {
 	Enabled  bool   `mapstructure:"enabled"`
 	Interval string `mapstructure:"interval"` // duration string: "12h", "24h"
@@ -357,6 +365,8 @@ func SetDefaults() {
 	viper.SetDefault("gsc.client_id", "")
 	viper.SetDefault("gsc.client_secret", "")
 	viper.SetDefault("gsc.redirect_uri", "http://127.0.0.1:8899/api/gsc/callback")
+	viper.SetDefault("resend.api_key", "")
+	viper.SetDefault("resend.from", "")
 
 	viper.SetDefault("backup.enabled", true)
 	viper.SetDefault("backup.interval", "24h")
@@ -390,6 +400,8 @@ func bindEnvironment() {
 	_ = viper.BindEnv("gsc.client_id", "GSC_CLIENT_ID", "CRAWLOBSERVER_GSC_CLIENT_ID")
 	_ = viper.BindEnv("gsc.client_secret", "GSC_CLIENT_SECRET", "CRAWLOBSERVER_GSC_CLIENT_SECRET")
 	_ = viper.BindEnv("gsc.redirect_uri", "GSC_REDIRECT_URI", "CRAWLOBSERVER_GSC_REDIRECT_URI")
+	_ = viper.BindEnv("resend.api_key", "RESEND_API_KEY", "CRAWLOBSERVER_RESEND_API_KEY")
+	_ = viper.BindEnv("resend.from", "RESEND_FROM", "CRAWLOBSERVER_RESEND_FROM")
 }
 
 func Load() (*Config, error) {

@@ -6,6 +6,11 @@ import {
   getCoreWebVitals,
   getExternalLinks,
   getCurrentUser,
+  requestLoginCode,
+  verifyLoginCode,
+  getInvitation,
+  acceptInvitation,
+  sendUserInvitation,
   exportSession,
   createAPIKey,
   getSessionQualityHistory,
@@ -121,6 +126,60 @@ describe('fetchJSON', () => {
   it('throws on network failure', async () => {
     globalThis.fetch.mockRejectedValue(new TypeError('Failed to fetch'));
     await expect(getSessions()).rejects.toThrow('Failed to fetch');
+  });
+});
+
+describe('passwordless authentication API', () => {
+  beforeEach(() => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify({ id: 'user-1' })),
+    });
+    resetAuthExpiredSignal();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('requests and verifies a six-digit email code without password credentials', async () => {
+    await requestLoginCode('person@example.test');
+    await verifyLoginCode('person@example.test', '123456');
+
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(1, '/api/auth/code/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'person@example.test' }),
+    });
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(2, '/api/auth/code/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'person@example.test', code: '123456' }),
+    });
+  });
+
+  it('loads and accepts an encoded invitation token', async () => {
+    await getInvitation('token/with space');
+    await acceptInvitation('token/with space');
+
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(
+      1,
+      '/api/auth/invitations/token%2Fwith%20space',
+      {},
+    );
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(
+      2,
+      '/api/auth/invitations/token%2Fwith%20space/accept',
+      { method: 'POST' },
+    );
+  });
+
+  it('sends an administrator invitation without exposing a token to the browser', async () => {
+    await sendUserInvitation('user / 1');
+
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/users/user%20%2F%201/invite', {
+      method: 'POST',
+    });
   });
 });
 

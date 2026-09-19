@@ -75,6 +75,9 @@
   let setupChecked = $state(false);
   let authChecked = $state(false);
   let currentUser = $state(null);
+  let invitationMode = $state(
+    typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('invite'),
+  );
   let isAdmin = $derived(currentUser?.role === 'admin');
 
   // --- Crawl state ---
@@ -548,6 +551,14 @@
     await bootApp();
   }
 
+  function completeInvitation() {
+    invitationMode = false;
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete('invite');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+
   async function handleLogout() {
     try {
       await logout();
@@ -740,7 +751,7 @@
     }
     setupChecked = true;
     await checkAuth();
-    if (!currentUser) {
+    if (!currentUser || invitationMode) {
       loading = false;
       return;
     }
@@ -802,8 +813,13 @@
     <div class="app-loading-mark" aria-hidden="true"></div>
     <span>Loading {theme.app_name || 'CrawlObserver'}...</span>
   </main>
-{:else if !currentUser}
-  <LoginPage appName={theme.app_name} notice={loginNotice} onlogin={handleLogin} />
+{:else if invitationMode || !currentUser}
+  <LoginPage
+    appName={theme.app_name}
+    notice={loginNotice}
+    onlogin={handleLogin}
+    oninvitationcomplete={completeInvitation}
+  />
 {:else}
   <a class="skip-link" href="#main-content">{t('app.skipToContent')}</a>
   <div class="layout">

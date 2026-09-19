@@ -2070,13 +2070,13 @@ func TestUsers_ViewerSessionIsProjectScoped(t *testing.T) {
 func TestUsers_LastAdminCannotChangeRoleOrDelete(t *testing.T) {
 	_, handler, ks := newTestServer(t)
 
-	owner, err := ks.CreateUser("owner", "password123", apikeys.RoleAdmin, nil)
+	owner, err := ks.CreatePasswordlessUser("owner@example.com", apikeys.RoleAdmin, nil)
 	if err != nil {
 		t.Fatalf("create owner: %v", err)
 	}
 
 	body := jsonBody(t, map[string]interface{}{
-		"username":    owner.Username,
+		"email":       owner.Email,
 		"role":        apikeys.RoleViewer,
 		"active":      true,
 		"project_ids": []string{},
@@ -2096,12 +2096,12 @@ func TestUsers_LastAdminCannotChangeRoleOrDelete(t *testing.T) {
 		t.Fatalf("delete last admin: expected 400, got %d; body: %s", rec.Code, rec.Body.String())
 	}
 
-	if _, err := ks.CreateUser("backup-admin", "password123", apikeys.RoleAdmin, nil); err != nil {
+	if _, err := ks.CreatePasswordlessUser("backup-admin@example.com", apikeys.RoleAdmin, nil); err != nil {
 		t.Fatalf("create backup admin: %v", err)
 	}
 
 	body = jsonBody(t, map[string]interface{}{
-		"username":    owner.Username,
+		"email":       owner.Email,
 		"role":        apikeys.RoleViewer,
 		"active":      true,
 		"project_ids": []string{},
