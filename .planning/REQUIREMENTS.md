@@ -264,7 +264,7 @@
 | COMPAT-255-01 | Phase 25.5 | Done |
 | TEST-255-01 | Phase 25.5 | Done |
 | DOC-255-01 | Phase 25.5 | Done |
-| DEPLOY-255-01 | Phase 25.5 | Blocked: Resend production prerequisites |
+| DEPLOY-255-01 | Phase 25.5 | Done: runtime deployed; human acceptance pending |
 
 **Coverage:**
 - v1 requirements: 22 total
@@ -273,4 +273,4 @@
 
 ---
 *Requirements defined: 2026-05-29*
-*Last updated: 2026-09-19 during Phase 25.5 execution*
+*Last updated: 2026-09-20 during Phase 25.5 production closeout*

@@ -5,9 +5,9 @@
 See: `.planning/PROJECT.md` (updated 2026-05-29)
 
 **Core value:** A server operator can deploy, start, secure, verify, and recover CrawlObserver without guessing critical runtime steps.
-**Current focus:** Phase 25.5 passwordless email authentication implementation
-is complete and pushed; production rollout is blocked on missing Resend
-configuration. Phase 26 remains planned and unchanged.
+**Current focus:** Phase 25.5 passwordless email authentication is implemented,
+pushed, and deployed. The administrator migration invitation is pending human
+acceptance; Phase 26 remains planned and unchanged.
 
 ## Current Status
 
@@ -38,10 +38,10 @@ configuration. Phase 26 remains planned and unchanged.
 
 ## Next Action
 
-Configure `RESEND_API_KEY` and verified `RESEND_FROM` server-side, confirm a
-valid current administrator session, then repeat the Phase 25.5 guarded
-app-only rollout and production acceptance. Do not restore password login or
-mix in Phase 26 sitemap work or project-error email notifications.
+Complete the pending administrator invitation, then exercise logout and
+email-code login to finish Phase 25.5 human production UAT. Do not restore
+password login or mix in Phase 26 sitemap work or project-error email
+notifications.
 
 ## Accumulated Context
 
@@ -62,10 +62,16 @@ mix in Phase 26 sitemap work or project-error email notifications.
   - Implementation, `ProductFeatures.md`, automated gates, and independent
     review passed and are pushed in commit `e0ebd94` on
     `codex/cleanup-deployed-worktree`.
-  - A read-only production preflight on 2026-09-19 found HTTPS configured and
-    no active crawl, but both `RESEND_API_KEY` and `RESEND_FROM` are missing.
-    Deployment stopped before build or restart; no live email, crawl, rescan,
-    publication, or data rewrite occurred.
+  - The earlier Resend prerequisite blocker was cleared. Commit `e0ebd94` was
+    deployed on 2026-09-20 as app image
+    `sha256:771940946484683c7cdc5d87201b651609077a3f6aa24a7485b4ee263a425a2f`.
+    Application health is OK; ClickHouse stayed on its unchanged healthy
+    container and `SELECT 1` returned `1`.
+  - The current administrator cookie session survived the rollout. Resend has
+    a verified sender domain and authorized send capability. The migration
+    invitation was sent and the UI visibly reports `Invite pending`.
+  - Runtime deployment is complete. Invitation acceptance, logout, and
+    email-code login remain pending human production UAT.
 
 - Phase 25.4 inserted after Phase 25: fail-closed unknown API routing for
   integrations (URGENT).
