@@ -1,36 +1,53 @@
 # Quick Task 9 Summary
 
-## Completed Locally
+## Delivered
 
-- Daily Delta sessions now expose a response-proven primary origin and a
-  deterministic list of proven related origins; ambiguous or incomplete proof
-  remains unavailable/ambiguous.
-- A bounded terminal-session worker stores durable SQLite receipts, sends
-  failure and new-page-error notifications to active verified admins, and
-  exposes delivery history and worker/configuration state to admins in Logs.
-- New page errors compare against the latest earlier durable observation per
-  exact URL across the project, rather than only the preceding Delta run.
-- Origin conflicts remain ambiguous even if some launched pages lack response
-  evidence; incomplete but otherwise non-conflicting proofs remain unavailable.
-- The email worker re-reads a bounded, activation-clamped five-minute overlap
-  window for late-visible terminal sessions and excludes durable scan-ledger
-  IDs; sessions first visible outside that window are not guaranteed to be
-  reconciled. The main keyset advances only from the main query. Page-error
-  emails require project lineage, while execution
-  failures remain reportable for unassigned sessions.
-- Email page details reveal only a sanitized origin and the authenticated
-  session link. Admin Logs clears stale history and shows a local unavailable
-  state when refresh fails.
-- `ProductFeatures.md` describes the resulting user-visible behavior.
+- Daily Delta shows a response-proven primary origin and expandable related
+  origins. Conflicting or insufficient evidence remains ambiguous/unavailable.
+- Durable operational email receipts cover terminal crawl failures and newly
+  observed page errors. New errors compare each URL with its latest prior
+  durable observation; absent URLs are not treated as resolved. A first error
+  with no prior observation is reported. Page-error alerts require project
+  lineage; execution failures can still be reported for unassigned sessions.
+- Active admins with verified email are the only email recipients. Reading
+  history requires admin authorization through existing auth mechanisms; email
+  verification is not required for history access. Admin access is global
+  across projects in the current RBAC model. Page details use
+  sanitized origins and authenticated session links; raw fetch-error bodies
+  are excluded. Receipt state `accepted` means Resend accepted the request,
+  not that the email reached an inbox.
+- The worker skips historical sessions at its activation watermark, retries
+  within a bounded horizon, drains pending receipts independently of scan
+  failures, and rechecks a bounded five-minute overlap window using durable
+  scan IDs. Sessions first visible outside that window are not guaranteed to
+  be reconciled. Logs shows loading, empty, unavailable, and receipt states;
+  loading/empty text stays outside the horizontally scrolling table.
 
 ## Verification
 
-- `GOCACHE=/private/tmp/crawlobserver-go-cache GOTMPDIR=/private/tmp go test ./internal/crawler ./internal/apikeys ./internal/storage ./internal/server -run 'Test(SessionToStorageRowIncludesTerminalFailureTime|OperationalEmail|SafeEmailPageURL|ResolveDeltaEffectiveOriginPreservesUnprovenAndAmbiguousStates|NewPageErrorsComparedWithLatestPriorURLObservation)' -count=1 -timeout=120s` (passed)
-- `npm test -- src/lib/components/LogsPage.test.js src/lib/api.test.js src/lib/components/ProjectPage.test.js` (31 tests passed)
-- `npm run lint`
-- `npm run build` (passed with existing Svelte and bundle-size warnings)
-- `git diff --check`
+- Full Go tests and race tests passed; affected-package `go vet` passed.
+- Frontend tests (144), lint, and production build passed.
+- Isolated ClickHouse 25.5, network-disabled integration fixture passed in
+  0.47s, covering repeated-error suppression, healthy-to-error recurrence,
+  exact query URL comparison, and project isolation. The disposable test
+  container was removed.
+- Independent code and UX reviews passed. Production safety gates before and
+  after build found no active crawls. Post-deploy checks confirmed healthy
+  application and ClickHouse (`SELECT 1 = 1`), 50 startup log lines with zero
+  errors, and the proven DiskInternals origin with `de`, `es`, and `fr`
+  related origins.
+- Admin notification status reported worker running, Resend configured, one
+  eligible admin, and an activation timestamp. History was empty; unauthenticated
+  history access returned 401. No live crawl or test email was triggered.
+- Known unrelated checks: repository-wide `go vet ./...` reports the existing
+  mutex copy in `internal/updater/updater_test.go:191`; `npm ci` audit reports
+  29 dependency findings, including 2 critical. Neither was changed here.
 
 ## Deployment
 
-- Local implementation only. Not committed, pushed, or deployed.
+- Commit `f33473d7c0d6d4cfa1aa93f2ec99a3d9110ff993` was pushed to
+  `origin/codex/cleanup-deployed-worktree` and deployed at
+  `2026-09-29T21:04:46.989450423Z` UTC (2026-09-30 00:04:46 Kyiv).
+- Deployed image digest:
+  `sha256:5ca553a79c49dcb1b32c4a5852afeca53044d21be2d1d1eeb79d598843cfa059`.
+- Rollback image backup: `/opt/crawlobserver/app/.deploy-backups/origin-alerts-f33473d7c0d6d4cfa1aa93f2ec99a3d9110ff993`.
