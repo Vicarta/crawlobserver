@@ -174,6 +174,11 @@ func (s *Server) sessionListPayload(ctx context.Context, sessions []storage.Craw
 			origin.State = storage.EffectiveOriginUnavailable
 		}
 		item["effective_origin"] = origin.Origin
+		otherOrigins := origin.OtherOrigins
+		if otherOrigins == nil {
+			otherOrigins = []string{}
+		}
+		item["effective_origin_others"] = otherOrigins
 		item["effective_origin_state"] = origin.State
 		enrichSessionStopMetadata(item, sess.Config)
 		if quality, ok := qualityBySession[sess.ID]; ok {

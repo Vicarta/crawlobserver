@@ -54,8 +54,23 @@ vi.mock('../api.js', () => ({
         effective_origin: 'https://very-long-operational-origin-name-that-must-wrap.example.test',
         effective_origin_state: 'proven',
       },
+      {
+        ID: 'session-delta',
+        SeedURLs: ['https://www.example.test/'],
+        Status: 'completed',
+        ProjectID: 'project-1',
+        PagesCrawled: 56,
+        StartedAt: '2026-08-24T10:00:00Z',
+        effective_origin: 'https://www.example.test',
+        effective_origin_others: [
+          'https://de.example.test',
+          'https://es.example.test',
+          'https://fr.example.test',
+        ],
+        effective_origin_state: 'proven',
+      },
     ],
-    total: 5,
+    total: 6,
   })),
   getProjectCurrentSnapshot: vi.fn(async () => null),
   getProviderConnections: vi.fn(async () => []),
@@ -102,6 +117,9 @@ describe('ProjectPage operational origin', () => {
     expect(text).toContain('Raw seed: https://mixed.example.test');
     expect(text).toContain('https://very-long-operational-origin-name-that-must-wrap.example.test');
     expect(text).toContain('Raw seed: http://very-long-audit-seed-name-that-must-wrap.example.test/path');
+    expect(text).toContain('3 other proven origins');
+    expect(text).toContain('https://de.example.test');
+    expect(document.querySelector('.session-other-origins summary')).not.toBeNull();
     expect(document.querySelector('.session-origin-cell')).not.toBeNull();
   });
 });

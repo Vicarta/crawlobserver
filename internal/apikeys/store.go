@@ -632,6 +632,74 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("creating extractors table: %w", err)
 	}
 
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS operational_email_state (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			watermark_finished_at DATETIME NOT NULL,
+			watermark_session_id TEXT NOT NULL,
+			activated_at DATETIME NOT NULL
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating operational email state table: %w", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS operational_email_scans (
+			session_id TEXT PRIMARY KEY,
+			finished_at DATETIME NOT NULL,
+			scanned_at DATETIME NOT NULL
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating operational email scans table: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_operational_email_scans_finished_at ON operational_email_scans(finished_at)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating operational email scans index: %w", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS operational_email_receipts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			project_id TEXT NOT NULL DEFAULT '',
+			project_name TEXT NOT NULL DEFAULT '',
+			session_status TEXT NOT NULL DEFAULT '',
+			finished_at DATETIME NOT NULL,
+			event_type TEXT NOT NULL CHECK (event_type IN ('crawl_failure', 'new_page_errors')),
+			user_id TEXT NOT NULL DEFAULT '',
+			recipient TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL CHECK (status IN ('pending', 'sending', 'accepted', 'failed', 'skipped', 'unknown')),
+			summary TEXT NOT NULL,
+			error_count INTEGER NOT NULL DEFAULT 0,
+			details_json TEXT NOT NULL DEFAULT '[]',
+			reason TEXT NOT NULL DEFAULT '',
+			idempotency_key TEXT NOT NULL UNIQUE,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			first_attempt_at DATETIME,
+			next_attempt_at DATETIME,
+			lease_until DATETIME,
+			UNIQUE(session_id, event_type, user_id)
+		)
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating operational email receipts table: %w", err)
+	}
+	for _, statement := range []string{
+		"ALTER TABLE operational_email_receipts ADD COLUMN project_name TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE operational_email_receipts ADD COLUMN session_status TEXT NOT NULL DEFAULT ''",
+	} {
+		if _, err := db.Exec(statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			db.Close()
+			return nil, fmt.Errorf("migrating operational email receipt: %w", err)
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_operational_email_pending ON operational_email_receipts(status, next_attempt_at, lease_until)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating operational email receipts index: %w", err)
+	}
+
 	// Restrict file permissions to owner-only (skip for in-memory DBs and Windows)
 	if dbPath != ":memory:" && runtime.GOOS != "windows" {
 		if err := os.Chmod(dbPath, 0600); err != nil {

@@ -417,6 +417,7 @@ func (e *Engine) initCrawl(seeds []string) error {
 		}
 		if err := e.persistInitialSitemapObservation(); err != nil {
 			e.session.Status = "failed"
+			e.session.FinishedAt = time.Now()
 			_ = e.store.InsertSession(e.ctx, e.session.ToStorageRow())
 			return err
 		}
@@ -1906,8 +1907,8 @@ func (e *Engine) finalizeSession(bufState storage.BufferErrorState) error {
 		e.session.Stop = e.stopMetadata()
 	}
 	e.session.Status = finalStatus
+	e.session.FinishedAt = time.Now()
 	row := e.session.ToStorageRow()
-	row.FinishedAt = time.Now()
 	statusCtx, statusCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer statusCancel()
 	if err := e.store.InsertSession(statusCtx, row); err != nil {

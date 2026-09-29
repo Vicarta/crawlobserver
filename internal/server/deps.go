@@ -17,6 +17,8 @@ import (
 type SessionStore interface {
 	ListSessions(ctx context.Context, projectID ...string) ([]storage.CrawlSession, error)
 	ListSessionsPaginated(ctx context.Context, limit, offset int, projectID, search string) ([]storage.CrawlSession, int, error)
+	TerminalSessionsAfter(ctx context.Context, finishedAt time.Time, sessionID string, limit int) ([]storage.CrawlSession, error)
+	TerminalSessionsAfterExcluding(ctx context.Context, finishedAt time.Time, sessionID string, excludedSessionIDs []string, limit int) ([]storage.CrawlSession, error)
 	EffectiveOriginsForSessions(ctx context.Context, sessions []storage.CrawlSession) (map[string]storage.EffectiveOrigin, error)
 	LatestProjectSession(ctx context.Context, projectID string) (*storage.CrawlSession, error)
 	GetSession(ctx context.Context, sessionID string) (*storage.CrawlSession, error)
@@ -31,6 +33,7 @@ type SessionStore interface {
 
 // PageStore handles reading and exploring crawled pages.
 type PageStore interface {
+	NewPageErrorsForSession(ctx context.Context, session storage.CrawlSession) ([]storage.PageErrorObservation, error)
 	ListPages(ctx context.Context, sessionID string, limit, offset int, filters []storage.ParsedFilter, sort *storage.SortParam) ([]storage.PageRow, error)
 	ListPageIssues(ctx context.Context, sessionID string, limit, offset int, severity, issueType, urlFilter string) ([]storage.PageIssue, error)
 	CoreWebVitalsReport(ctx context.Context, sessionID string, limit, offset int, rating, sort, order string) (*storage.CoreWebVitalsReport, error)

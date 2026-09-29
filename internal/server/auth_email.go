@@ -39,6 +39,10 @@ type EmailSender interface {
 	SendLoginCode(context.Context, LoginCodeEmail) error
 }
 
+type OperationalEmailSender interface {
+	SendOperationalAlert(context.Context, OperationalAlertEmail) error
+}
+
 // InvitationEmail is the complete invitation delivery request. IdempotencyKey
 // must be an opaque, stable invitation identifier rather than its secret token.
 type InvitationEmail struct {
@@ -52,6 +56,14 @@ type InvitationEmail struct {
 type LoginCodeEmail struct {
 	To             string
 	Code           string
+	IdempotencyKey string
+}
+
+type OperationalAlertEmail struct {
+	To             string
+	Subject        string
+	Text           string
+	HTML           string
 	IdempotencyKey string
 }
 
@@ -108,6 +120,10 @@ func (disabledEmailSender) SendLoginCode(context.Context, LoginCodeEmail) error 
 	return ErrEmailDeliveryUnavailable
 }
 
+func (disabledEmailSender) SendOperationalAlert(context.Context, OperationalAlertEmail) error {
+	return ErrEmailDeliveryUnavailable
+}
+
 func (s *resendEmailSender) SendInvitation(ctx context.Context, message InvitationEmail) error {
 	invitationURL := strings.TrimSpace(message.InvitationURL)
 	if invitationURL == "" {
@@ -138,6 +154,18 @@ func (s *resendEmailSender) SendLoginCode(ctx context.Context, message LoginCode
 			"This code expires in 15 minutes.",
 		HTML: "<p>Your CrawlObserver login code is:</p><p><strong>" + html.EscapeString(code) +
 			"</strong></p><p>This code expires in 15 minutes.</p>",
+	})
+}
+
+func (s *resendEmailSender) SendOperationalAlert(ctx context.Context, message OperationalAlertEmail) error {
+	if strings.TrimSpace(message.Subject) == "" || strings.TrimSpace(message.Text) == "" {
+		return emailDeliveryError("invalid operational alert")
+	}
+	return s.send(ctx, message.To, message.IdempotencyKey, resendEmailRequest{
+		From:    s.from,
+		Subject: message.Subject,
+		Text:    message.Text,
+		HTML:    message.HTML,
 	})
 }
 

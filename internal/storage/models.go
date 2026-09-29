@@ -21,8 +21,15 @@ type CrawlSession struct {
 // EffectiveOrigin is response-only operational origin evidence for a session.
 // An unavailable or ambiguous result always has an empty Origin.
 type EffectiveOrigin struct {
-	Origin string
-	State  string
+	Origin       string
+	OtherOrigins []string
+	State        string
+}
+
+type PageErrorObservation struct {
+	URL        string
+	StatusCode uint16
+	FetchError bool
 }
 
 const (

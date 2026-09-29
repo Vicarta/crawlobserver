@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SEObserver/crawlobserver/internal/config"
 )
@@ -62,5 +63,17 @@ func TestSessionToStorageRowRedactsSensitiveConfig(t *testing.T) {
 	}
 	if decoded.Crawler.Workers != 4 {
 		t.Fatalf("Crawler.Workers = %d, want 4", decoded.Crawler.Workers)
+	}
+}
+
+func TestSessionToStorageRowIncludesTerminalFailureTime(t *testing.T) {
+	finishedAt := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	session := NewSession([]string{"https://example.com"}, &config.Config{})
+	session.Status = "failed"
+	session.FinishedAt = finishedAt
+
+	row := session.ToStorageRow()
+	if row.Status != "failed" || !row.FinishedAt.Equal(finishedAt) {
+		t.Fatalf("terminal row = status %q, finished_at %v; want failed at %v", row.Status, row.FinishedAt, finishedAt)
 	}
 }

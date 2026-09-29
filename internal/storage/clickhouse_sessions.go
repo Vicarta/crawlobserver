@@ -7,12 +7,14 @@ import (
 	"math"
 	"net"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/SEObserver/crawlobserver/internal/applog"
 	"github.com/SEObserver/crawlobserver/internal/config"
 	"github.com/SEObserver/crawlobserver/internal/normalizer"
+	"golang.org/x/net/publicsuffix"
 )
 
 // InsertSession inserts or updates a crawl session.
@@ -51,6 +53,8 @@ func (s *Store) EffectiveOriginsForSessions(ctx context.Context, sessions []Craw
 		return result, nil
 	}
 	launchedBySession := make(map[string]map[string]struct{}, len(sessions))
+	deltaBySession := make(map[string]bool, len(sessions))
+	primarySeedOriginBySession := make(map[string]string, len(sessions))
 	allSessionIDs := make([]string, 0, len(sessions))
 	allURLs := make([]string, 0)
 	seenSessionIDs := make(map[string]struct{}, len(sessions))
@@ -64,6 +68,10 @@ func (s *Store) EffectiveOriginsForSessions(ctx context.Context, sessions []Craw
 		}
 
 		launchedURLs, isDelta := launchedURLsForOrigin(sess)
+		deltaBySession[sess.ID] = isDelta
+		if isDelta && len(sess.SeedURLs) > 0 {
+			primarySeedOriginBySession[sess.ID], _ = normalizeEffectiveOrigin(sess.SeedURLs[0])
+		}
 		if isDelta && launchedURLs == nil {
 			continue
 		}
@@ -99,6 +107,7 @@ func (s *Store) EffectiveOriginsForSessions(ctx context.Context, sessions []Craw
 	defer rows.Close()
 
 	provedOriginsBySession := make(map[string]map[string]map[string]struct{}, len(allSessionIDs))
+	redirectedOriginsBySession := make(map[string]map[string]map[string]bool, len(allSessionIDs))
 	for rows.Next() {
 		var sessionID, requestedURL, finalURL, fetchError string
 		var statusCode uint16
@@ -119,6 +128,10 @@ func (s *Store) EffectiveOriginsForSessions(ctx context.Context, sessions []Craw
 		if !ok {
 			continue
 		}
+		requestedOrigin, requestedOriginOK := normalizeEffectiveOrigin(requestedURL)
+		if !requestedOriginOK {
+			continue
+		}
 		if provedOriginsBySession[sessionID] == nil {
 			provedOriginsBySession[sessionID] = make(map[string]map[string]struct{})
 		}
@@ -126,12 +139,30 @@ func (s *Store) EffectiveOriginsForSessions(ctx context.Context, sessions []Craw
 			provedOriginsBySession[sessionID][requestedURL] = make(map[string]struct{})
 		}
 		provedOriginsBySession[sessionID][requestedURL][origin] = struct{}{}
+		if finalURL != "" && origin != requestedOrigin {
+			if redirectedOriginsBySession[sessionID] == nil {
+				redirectedOriginsBySession[sessionID] = make(map[string]map[string]bool)
+			}
+			if redirectedOriginsBySession[sessionID][requestedURL] == nil {
+				redirectedOriginsBySession[sessionID][requestedURL] = make(map[string]bool)
+			}
+			redirectedOriginsBySession[sessionID][requestedURL][origin] = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating session origin evidence: %w", err)
 	}
 
 	for sessionID, launched := range launchedBySession {
+		if deltaBySession[sessionID] {
+			result[sessionID] = resolveDeltaEffectiveOrigin(
+				launched,
+				provedOriginsBySession[sessionID],
+				redirectedOriginsBySession[sessionID],
+				primarySeedOriginBySession[sessionID],
+			)
+			continue
+		}
 		result[sessionID] = resolveEffectiveOrigin(launched, provedOriginsBySession[sessionID])
 	}
 	return result, nil
@@ -168,6 +199,91 @@ func resolveEffectiveOrigin(launched map[string]struct{}, proved map[string]map[
 		return EffectiveOrigin{Origin: origin, State: EffectiveOriginProven}
 	}
 	return EffectiveOrigin{State: EffectiveOriginUnavailable}
+}
+
+func resolveDeltaEffectiveOrigin(
+	launched map[string]struct{},
+	proved map[string]map[string]struct{},
+	redirected map[string]map[string]bool,
+	primarySeedOrigin string,
+) EffectiveOrigin {
+	if len(launched) == 0 || primarySeedOrigin == "" {
+		return EffectiveOrigin{State: EffectiveOriginUnavailable}
+	}
+	primarySeedOrigin, ok := normalizeEffectiveOrigin(primarySeedOrigin)
+	if !ok {
+		return EffectiveOrigin{State: EffectiveOriginUnavailable}
+	}
+
+	mainOrigins := make(map[string]struct{})
+	allOrigins := make(map[string]struct{})
+	for requestedURL, responseOrigins := range proved {
+		if _, ok := launched[requestedURL]; !ok || len(responseOrigins) == 0 {
+			continue
+		}
+		if len(responseOrigins) != 1 {
+			return EffectiveOrigin{State: EffectiveOriginAmbiguous}
+		}
+		requestedOrigin, ok := normalizeEffectiveOrigin(requestedURL)
+		if !ok {
+			return EffectiveOrigin{State: EffectiveOriginUnavailable}
+		}
+		for responseOrigin := range responseOrigins {
+			if !sameEffectiveRegistrableDomain(primarySeedOrigin, responseOrigin) {
+				return EffectiveOrigin{State: EffectiveOriginAmbiguous}
+			}
+			if effectiveOriginScheme(primarySeedOrigin) != effectiveOriginScheme(responseOrigin) && !redirected[requestedURL][responseOrigin] {
+				return EffectiveOrigin{State: EffectiveOriginAmbiguous}
+			}
+			allOrigins[responseOrigin] = struct{}{}
+			if requestedOrigin == primarySeedOrigin {
+				mainOrigins[responseOrigin] = struct{}{}
+			}
+		}
+	}
+	if len(mainOrigins) > 1 {
+		return EffectiveOrigin{State: EffectiveOriginAmbiguous}
+	}
+	if len(proved) != len(launched) {
+		return EffectiveOrigin{State: EffectiveOriginUnavailable}
+	}
+	if len(mainOrigins) == 0 {
+		return EffectiveOrigin{State: EffectiveOriginUnavailable}
+	}
+	var mainOrigin string
+	for origin := range mainOrigins {
+		mainOrigin = origin
+	}
+	otherOrigins := make([]string, 0, len(allOrigins)-1)
+	for origin := range allOrigins {
+		if origin != mainOrigin {
+			otherOrigins = append(otherOrigins, origin)
+		}
+	}
+	sort.Strings(otherOrigins)
+	return EffectiveOrigin{Origin: mainOrigin, OtherOrigins: otherOrigins, State: EffectiveOriginProven}
+}
+
+func effectiveOriginScheme(origin string) string {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Scheme)
+}
+
+func sameEffectiveRegistrableDomain(seedOrigin, candidateOrigin string) bool {
+	seedURL, seedErr := url.Parse(seedOrigin)
+	candidateURL, candidateErr := url.Parse(candidateOrigin)
+	if seedErr != nil || candidateErr != nil || seedURL.Hostname() == "" || candidateURL.Hostname() == "" {
+		return false
+	}
+	seedDomain, seedDomainErr := publicsuffix.EffectiveTLDPlusOne(seedURL.Hostname())
+	candidateDomain, candidateDomainErr := publicsuffix.EffectiveTLDPlusOne(candidateURL.Hostname())
+	if seedDomainErr != nil || candidateDomainErr != nil {
+		return strings.EqualFold(seedURL.Hostname(), candidateURL.Hostname())
+	}
+	return strings.EqualFold(seedDomain, candidateDomain)
 }
 
 func launchedURLsForOrigin(sess CrawlSession) ([]string, bool) {

@@ -10,15 +10,16 @@ import (
 
 // Session represents a single crawl session lifecycle.
 type Session struct {
-	ID        string
-	StartedAt time.Time
-	SeedURLs  []string
-	Config    *config.Config
-	Status    string
-	Pages     uint64
-	ProjectID *string
-	Label     string
-	Stop      config.SessionStopMetadata
+	ID         string
+	StartedAt  time.Time
+	FinishedAt time.Time
+	SeedURLs   []string
+	Config     *config.Config
+	Status     string
+	Pages      uint64
+	ProjectID  *string
+	Label      string
+	Stop       config.SessionStopMetadata
 }
 
 // NewSession creates a new crawl session.
@@ -41,6 +42,7 @@ func (s *Session) ToStorageRow() *storage.CrawlSession {
 	return &storage.CrawlSession{
 		ID:           s.ID,
 		StartedAt:    s.StartedAt,
+		FinishedAt:   s.FinishedAt,
 		Status:       s.Status,
 		SeedURLs:     s.SeedURLs,
 		Config:       configJSON,

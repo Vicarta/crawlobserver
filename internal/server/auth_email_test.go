@@ -114,6 +114,47 @@ func TestResendEmailSenderSendsLoginCode(t *testing.T) {
 	}
 }
 
+func TestResendEmailSenderSendsOperationalAlertIdempotently(t *testing.T) {
+	const (
+		apiKey      = "re_test_operational"
+		idempotency = "crawlobserver-alert-session-event-admin"
+	)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost || r.URL.Path != "/emails" {
+			t.Fatalf("request = %s %s, want POST /emails", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer "+apiKey || r.Header.Get("Idempotency-Key") != idempotency {
+			t.Fatalf("authorization/idempotency headers = %q / %q", r.Header.Get("Authorization"), r.Header.Get("Idempotency-Key"))
+		}
+		var payload resendEmailRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode operational alert: %v", err)
+		}
+		if payload.From != "alerts@example.test" || len(payload.To) != 1 || payload.To[0] != "admin@example.test" {
+			t.Fatalf("unexpected operational alert endpoints: %#v", payload)
+		}
+		if payload.Subject != "CrawlObserver: DiskInternals crawl failure" || !strings.Contains(payload.Text, "Terminal status: failed") {
+			t.Fatalf("operational alert content = %#v", payload)
+		}
+		return resendTestResponse(http.StatusOK, `{"id":"email-operational-1"}`), nil
+	})}
+	sender := newResendEmailSender(config.ResendConfig{APIKey: apiKey, From: "alerts@example.test"}, client, resendEmailsEndpoint)
+	operationalSender, ok := sender.(OperationalEmailSender)
+	if !ok {
+		t.Fatal("configured Resend sender does not implement OperationalEmailSender")
+	}
+	err := operationalSender.SendOperationalAlert(context.Background(), OperationalAlertEmail{
+		To:             "admin@example.test",
+		Subject:        "CrawlObserver: DiskInternals crawl failure",
+		Text:           "Crawl failed\nTerminal status: failed",
+		HTML:           "<p>Crawl failed</p>",
+		IdempotencyKey: idempotency,
+	})
+	if err != nil {
+		t.Fatalf("SendOperationalAlert() error = %v", err)
+	}
+}
+
 func TestResendEmailSenderRedactsProviderFailure(t *testing.T) {
 	const (
 		apiKey          = "re_test_secret"

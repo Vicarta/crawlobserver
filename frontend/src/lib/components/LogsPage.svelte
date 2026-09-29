@@ -1,10 +1,10 @@
 <script>
-  import { getLogs, exportLogs } from '../api.js';
+  import { getLogs, getOperationalEmailHistory, exportLogs } from '../api.js';
   import { onDestroy } from 'svelte';
   import { t, getLocale } from '../i18n/index.svelte.js';
   import SearchSelect from './SearchSelect.svelte';
 
-  let { onerror } = $props();
+  let { onerror, currentUser, onnavigate } = $props();
 
   let logs = $state([]);
   let total = $state(0);
@@ -17,6 +17,13 @@
   let component = $state('');
   let search = $state('');
   let searchInput = $state('');
+  let emailHistory = $state([]);
+  let emailHistoryTotal = $state(0);
+  let emailStatus = $state(null);
+  let emailLoading = $state(false);
+  let emailUnavailable = $state(false);
+
+  const isAdmin = $derived(currentUser?.role === 'admin');
 
   async function loadLogs() {
     loading = true;
@@ -28,6 +35,24 @@
       onerror?.(e.message);
     }
     loading = false;
+  }
+
+  async function loadOperationalEmailHistory() {
+    if (!isAdmin) return;
+    emailLoading = true;
+    emailUnavailable = false;
+    try {
+      const res = await getOperationalEmailHistory(100, 0);
+      emailHistory = res.receipts || [];
+      emailHistoryTotal = res.total || 0;
+      emailStatus = res.status || null;
+    } catch (e) {
+      emailHistory = [];
+      emailHistoryTotal = 0;
+      emailStatus = null;
+      emailUnavailable = true;
+    }
+    emailLoading = false;
   }
 
   function applySearch() {
@@ -78,10 +103,30 @@
   }
 
   // Auto-refresh every 5s
-  const interval = setInterval(loadLogs, 5000);
+  const interval = setInterval(() => {
+    loadLogs();
+    loadOperationalEmailHistory();
+  }, 5000);
   onDestroy(() => clearInterval(interval));
 
   loadLogs();
+  loadOperationalEmailHistory();
+
+  function receiptStatusLabel(status) {
+    const keys = {
+      accepted: 'logs.emailAccepted',
+      pending: 'logs.emailPending',
+      sending: 'logs.emailPending',
+      failed: 'logs.emailFailed',
+      skipped: 'logs.emailSkipped',
+      unknown: 'logs.emailUnknown',
+    };
+    return t(keys[status] || 'logs.emailUnknown');
+  }
+
+  function receiptEventLabel(type) {
+    return t(type === 'new_page_errors' ? 'logs.emailPageErrors' : 'logs.emailCrawlFailure');
+  }
 </script>
 
 <div class="page-header">
@@ -93,6 +138,93 @@
     <button class="btn btn-sm" onclick={exportLogs}>{t('logs.exportJsonl')}</button>
   </div>
 </div>
+
+{#if isAdmin}
+  <section class="operational-email" aria-labelledby="operational-email-title">
+    <div class="operational-email-heading">
+      <div>
+        <h2 id="operational-email-title">{t('logs.operationalEmail')}</h2>
+        <p class="operational-email-note">{t('logs.emailAcceptedNote')}</p>
+      </div>
+      <button
+        class="btn btn-sm"
+        onclick={loadOperationalEmailHistory}
+        disabled={emailLoading}
+        aria-label={t('common.refresh')}
+      >
+        {emailLoading ? t('common.loading') : t('common.refresh')}
+      </button>
+    </div>
+    {#if emailStatus}
+      <div class="operational-email-status" aria-live="polite">
+        <span>{t(emailStatus.worker_running ? 'logs.emailWorkerRunning' : 'logs.emailWorkerStopped')}</span>
+        <span>{t(emailStatus.resend_configured ? 'logs.emailResendReady' : 'logs.emailResendMissing')}</span>
+        <span>{t('logs.emailAdminCount', { count: emailStatus.eligible_admin_count ?? 0 })}</span>
+        {#if emailStatus.activated_at}
+          <span>{t('logs.emailSince', { date: fmtTime(emailStatus.activated_at) })}</span>
+        {/if}
+      </div>
+    {/if}
+    {#if emailUnavailable}
+      <p class="operational-email-unavailable" role="alert">{t('logs.emailHistoryUnavailable')}</p>
+    {/if}
+    {#if !emailUnavailable}
+      {#if emailHistory.length === 0}
+        <p class="logs-empty">{emailLoading ? t('common.loading') : t('logs.emailNoHistory')}</p>
+      {:else}
+      <div class="operational-email-table-wrap">
+        <table>
+        <thead>
+          <tr>
+            <th>{t('logs.timestamp')}</th>
+            <th>{t('logs.emailProject')}</th>
+            <th>{t('logs.emailEvent')}</th>
+            <th>{t('logs.emailRecipient')}</th>
+            <th>{t('logs.emailStatus')}</th>
+            <th>{t('logs.emailSession')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each emailHistory as receipt (receipt.id)}
+            <tr>
+              <td class="td-mono">{fmtTime(receipt.finished_at)}</td>
+              <td>{receipt.project_name || receipt.project_id || t('logs.emailUnknownProject')}</td>
+              <td>
+                <span>{receiptEventLabel(receipt.event_type)}</span>
+                <span class="email-summary">{receipt.summary}</span>
+              </td>
+              <td>{receipt.recipient || '—'}</td>
+              <td>
+                <span class="email-status email-status-{receipt.status}">
+                  {receiptStatusLabel(receipt.status)}
+                </span>
+                {#if receipt.reason}
+                  <span class="email-reason">{receipt.reason}</span>
+                {/if}
+              </td>
+              <td>
+                <a
+                  href="/sessions/{encodeURIComponent(receipt.session_id)}/pages"
+                  onclick={(event) => {
+                    event.preventDefault();
+                    onnavigate?.(`/sessions/${encodeURIComponent(receipt.session_id)}/pages`);
+                  }}>{receipt.session_status} · {receipt.session_id.slice(0, 8)}</a
+                >
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+        </table>
+      </div>
+      {#if emailHistoryTotal > emailHistory.length}
+        <p class="email-history-count">
+          {t('logs.emailRecentCount', { shown: emailHistory.length, total: emailHistoryTotal })}
+        </p>
+      {/if}
+      {/if}
+    {/if}
+  </section>
+{/if}
 
 <div class="logs-filters">
   <SearchSelect
@@ -184,6 +316,61 @@
 {/if}
 
 <style>
+  .operational-email {
+    margin: 0 0 18px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .operational-email-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .operational-email-heading h2 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .operational-email-note,
+  .email-history-count {
+    margin: 4px 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .operational-email-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin: 10px 0;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .operational-email-table-wrap {
+    overflow-x: auto;
+  }
+  .operational-email table {
+    min-width: 760px;
+  }
+  .email-summary,
+  .email-reason {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+  .email-status {
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .email-status-accepted { color: #166534; }
+  .email-status-failed,
+  .email-status-unknown { color: #b91c1c; }
+  .email-status-skipped { color: #92400e; }
+  :global([data-theme='dark']) .email-status-accepted { color: #86efac; }
+  :global([data-theme='dark']) .email-status-failed,
+  :global([data-theme='dark']) .email-status-unknown { color: #fca5a5; }
+  :global([data-theme='dark']) .email-status-skipped { color: #fcd34d; }
   .logs-filters {
     display: flex;
     gap: 8px;

@@ -509,12 +509,26 @@
         </thead>
         <tbody>
           {#each projSessions as s}
-            <tr class="clickable-row" onclick={() => onselectsession?.(s)}>
+            <tr
+              class="clickable-row"
+              onclick={(event) => {
+                if (event.target instanceof Element && event.target.closest('.session-other-origins')) return;
+                onselectsession?.(s);
+              }}
+            >
               <td class="session-origin-cell">
                 {#if s.effective_origin_state === 'proven' && s.effective_origin}
                   <span class="session-effective-origin" title={s.effective_origin}
                     >{s.effective_origin}</span
                   >
+                  {#if s.effective_origin_others?.length}
+                    <details class="session-other-origins">
+                      <summary>{s.effective_origin_others.length} other proven origins</summary>
+                      {#each s.effective_origin_others as origin}
+                        <span class="session-other-origin">{origin}</span>
+                      {/each}
+                    </details>
+                  {/if}
                 {:else if s.effective_origin_state === 'ambiguous'}
                   <span class="session-origin-state">Origin ambiguous</span>
                 {:else}
@@ -1159,6 +1173,21 @@
   }
   .session-raw-seed {
     margin-top: 3px;
+  }
+  .session-other-origins {
+    margin-top: 3px;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .session-other-origins summary {
+    width: fit-content;
+    cursor: pointer;
+  }
+  .session-other-origin {
+    display: block;
+    margin-top: 2px;
+    color: var(--text);
+    overflow-wrap: anywhere;
   }
   .btn-unlink:hover {
     color: #dc2626;

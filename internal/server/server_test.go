@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,9 @@ type mockStore struct {
 	listPagesCalls            []listPagesCall
 	deleteProviderCalls       []deleteProviderCall
 	listSessionsCalls         int
+	terminalSessions          []storage.CrawlSession
+	pageErrorsBySession       map[string][]storage.PageErrorObservation
+	pageErrorCalls            map[string]int
 }
 
 type listPagesCall struct {
@@ -144,6 +148,48 @@ func (m *mockStore) ListSessionsPaginated(_ context.Context, limit, offset int, 
 		end = len(sessions)
 	}
 	return sessions[offset:end], len(sessions), nil
+}
+
+func (m *mockStore) TerminalSessionsAfter(_ context.Context, finishedAt time.Time, sessionID string, limit int) ([]storage.CrawlSession, error) {
+	return m.terminalSessionsAfter(finishedAt, sessionID, nil, limit)
+}
+
+func (m *mockStore) TerminalSessionsAfterExcluding(_ context.Context, finishedAt time.Time, sessionID string, excludedSessionIDs []string, limit int) ([]storage.CrawlSession, error) {
+	return m.terminalSessionsAfter(finishedAt, sessionID, excludedSessionIDs, limit)
+}
+
+func (m *mockStore) terminalSessionsAfter(finishedAt time.Time, sessionID string, excludedSessionIDs []string, limit int) ([]storage.CrawlSession, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	sessions := m.terminalSessions
+	if sessions == nil {
+		sessions = m.sessions
+	}
+	filtered := make([]storage.CrawlSession, 0, len(sessions))
+	excluded := make(map[string]struct{}, len(excludedSessionIDs))
+	for _, id := range excludedSessionIDs {
+		excluded[id] = struct{}{}
+	}
+	for _, session := range sessions {
+		if _, skip := excluded[session.ID]; skip {
+			continue
+		}
+		if session.FinishedAt.After(finishedAt) || (session.FinishedAt.Equal(finishedAt) && session.ID > sessionID) {
+			filtered = append(filtered, session)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].FinishedAt.Equal(filtered[j].FinishedAt) {
+			return filtered[i].ID < filtered[j].ID
+		}
+		return filtered[i].FinishedAt.Before(filtered[j].FinishedAt)
+	})
+	sessions = filtered
+	if limit > 0 && len(sessions) > limit {
+		sessions = sessions[:limit]
+	}
+	return sessions, nil
 }
 
 func (m *mockStore) EffectiveOriginsForSessions(_ context.Context, sessions []storage.CrawlSession) (map[string]storage.EffectiveOrigin, error) {
@@ -247,6 +293,17 @@ func (m *mockStore) UpdateSessionProject(_ context.Context, sessionID string, pr
 func (m *mockStore) ListPages(_ context.Context, sessionID string, limit, offset int, filters []storage.ParsedFilter, _ *storage.SortParam) ([]storage.PageRow, error) {
 	m.listPagesCalls = append(m.listPagesCalls, listPagesCall{sessionID, limit, offset, filters})
 	return m.pages, m.err
+}
+
+func (m *mockStore) NewPageErrorsForSession(_ context.Context, session storage.CrawlSession) ([]storage.PageErrorObservation, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.pageErrorCalls == nil {
+		m.pageErrorCalls = make(map[string]int)
+	}
+	m.pageErrorCalls[session.ID]++
+	return append([]storage.PageErrorObservation(nil), m.pageErrorsBySession[session.ID]...), nil
 }
 
 func (m *mockStore) ListPageIssues(_ context.Context, _ string, _, _ int, _, _, _ string) ([]storage.PageIssue, error) {
@@ -3556,7 +3613,7 @@ func TestSessionPayloadIncludesResponseOnlyEffectiveOrigin(t *testing.T) {
 		{ID: "ambiguous", Status: "completed", SeedURLs: []string{"https://seed.example/"}},
 	}
 	ms.effectiveOrigins = map[string]storage.EffectiveOrigin{
-		"proven":    {Origin: "https://www.example.test", State: storage.EffectiveOriginProven},
+		"proven":    {Origin: "https://www.example.test", OtherOrigins: []string{"https://de.example.test"}, State: storage.EffectiveOriginProven},
 		"ambiguous": {State: storage.EffectiveOriginAmbiguous},
 	}
 
@@ -3591,6 +3648,9 @@ func TestSessionPayloadIncludesResponseOnlyEffectiveOrigin(t *testing.T) {
 		}
 		if byID["proven"]["effective_origin"] != "https://www.example.test" || byID["proven"]["effective_origin_state"] != "proven" {
 			t.Fatalf("proven origin payload = %#v", byID["proven"])
+		}
+		if got := byID["proven"]["effective_origin_others"].([]interface{}); len(got) != 1 || got[0] != "https://de.example.test" {
+			t.Fatalf("other origin payload = %#v", byID["proven"]["effective_origin_others"])
 		}
 		if byID["unavailable"]["effective_origin"] != "" || byID["unavailable"]["effective_origin_state"] != "unavailable" {
 			t.Fatalf("unavailable origin payload = %#v", byID["unavailable"])

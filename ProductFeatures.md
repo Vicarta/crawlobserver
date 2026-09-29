@@ -1,6 +1,6 @@
 # CrawlObserver: каталог функціональності
 
-Актуальність: 2026-09-19.
+Актуальність: 2026-09-29.
 
 Цей файл є канонічним каталогом фактично реалізованої функціональності
 CrawlObserver. Він описує можливості продукту на рівні користувацьких сценаріїв,
@@ -118,12 +118,17 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
   і near-duplicate analytics, щоб downstream quality gates читали завершені
   derived metrics.
 - Session list/detail API додає response-only `effective_origin` та
-  `effective_origin_state`: `proven` походить лише з durable launched-request
-  і final-response evidence для кожного фактично запущеного URL, а
+  `effective_origin_state`; Daily Delta також може додати
+  `effective_origin_others`. `proven` походить лише з durable launched-request
+  і final-response evidence для кожного фактично запущеного URL. Для Daily
+  Delta основний origin доводиться response для первинного raw seed origin;
+  інші origin показуються лише для того самого registered domain із
+  узгодженою scheme або явним redirect evidence. Неоднозначне, неповне чи
+  стороннє свідчення не обирається за більшістю. Стани
   `unavailable`/`ambiguous` ніколи не виводять origin із raw seed, canonical,
   sitemap, DNS або config. Exact raw `SeedURLs` залишаються незмінною audit
-  provenance; Project Sessions показує proven operational origin і окремо
-  підписаний raw seed.
+  provenance; Project Sessions показує proven main origin, розгортуваний список
+  інших proven origins і окремо підписаний raw seed.
 
 ## 4. Налаштування crawl
 
@@ -668,6 +673,39 @@ shared rendered metadata shell diagnostics без site-specific правил.
 - First-run onboarding wizard.
 - API management і user management.
 - Application logs із filtering та export.
+- Адміністративний operational email history у Logs із робочим станом worker,
+  Resend, кількістю eligible admins та receipts за проєктом, terminal status,
+  подією, адресатом і станом доставки. Історія доступна лише admin.
+- Operational emails надсилаються на активні підтверджені адреси користувачів
+  із роллю `admin`; поточна модель надає admin доступ до всіх проєктів, тож така
+  адреса отримує повідомлення для всіх проєктів. Viewers та API keys не є
+  одержувачами. Eligibility повторно перевіряється перед retry.
+- Окрема email-подія надсилається для crawl execution `failed`, `crashed`,
+  `completed_with_errors` і структуровано позначених не-manual `stopped`, а
+  також для нових HTTP >=400, status 0 або fetch-error сторінок у terminal
+  `completed` / `completed_with_errors` sessions. Manual stop не надсилає
+  crawl-failure email.
+- Page errors порівнюються з найновішим попереднім durable page observation
+  цього проєкту за повною URL разом із query. Однаковий попередній error
+  suppress-иться; зникнення URL з наступного Delta не вважається resolution;
+  error надсилається знову після healthy latest observation. Для URL без
+  жодного попереднього observation перша помилка є новою, включно з першим
+  crawl нового проєкту. Для сесій без project lineage page-error email
+  пропускається; execution-failure повідомлення залишаються активними. Email
+  display містить лише sanitized origin сторінки (userinfo, path, query і
+  fragment відкидаються) та authenticated link на session; raw fetch-error
+  body ніколи не включається.
+- Worker створює activation watermark під час першого запуску і не надсилає
+  історичні session events. Для late-visible завершених sessions кожен tick
+  перевіряє обмежене п'ятихвилинне вікно (не раніше activation watermark) і
+  виключає sessions, уже позначені durable scan ledger; sessions, уперше
+  видимі ClickHouse поза цим вікном, не гарантовано будуть знайдені. Основний
+  keyset cursor рухається лише за результатами основного запиту, а не overlap
+  запиту. Durable SQLite
+  receipts дедуплікують session/event/admin після рестарту. Provider retries
+  обмежені трьома спробами протягом однієї години зі стабільним Resend
+  idempotency key. Історія розрізняє pending, failed, skipped, unknown та
+  `accepted` (Resend прийняв запит, це не підтвердження доставки до inbox).
 - In-app announcements із remote feed та opt-out settings.
 - Optional anonymous telemetry та окремий explicit session-recording consent.
 - Responsive desktop/mobile layouts, keyboard-oriented table controls і
@@ -757,6 +795,6 @@ flags. Web UI компілюється в Go binary, тому production не п
   збережений або відповідні дані вже були persisted.
 - Current Snapshot публікує лише trusted data; raw failed/untrusted sessions
   залишаються видимими окремо для audit.
-- Email-сповіщення про crawl, Quality, backup або operational errors не входять
-  до passwordless authentication; Resend у цій функції надсилає лише
-  запрошення та login codes.
+- Email-сповіщення про Quality, backup та інші категорії operational errors не
+  входять до цієї функції. Resend також використовується для passwordless
+  запрошень і login codes.

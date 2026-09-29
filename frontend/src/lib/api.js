@@ -1659,6 +1659,11 @@ export async function getLogs(
   return fetchJSON(url);
 }
 
+/** @returns {Promise<Object>} Operational email status and durable receipt history. */
+export async function getOperationalEmailHistory(limit = 100, offset = 0) {
+  return fetchJSON(`/admin/operational-emails?limit=${limit}&offset=${offset}`);
+}
+
 export function exportLogs() {
   window.open(`${BASE}/logs/export`, '_blank');
 }

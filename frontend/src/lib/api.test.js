@@ -16,6 +16,7 @@ import {
   getSessionQualityHistory,
   getSessionPageRankEvidence,
   reevaluateSessionQuality,
+  getOperationalEmailHistory,
   subscribeProgress,
   AUTH_EXPIRED_EVENT,
   AuthError,
@@ -180,6 +181,22 @@ describe('passwordless authentication API', () => {
     expect(globalThis.fetch).toHaveBeenCalledWith('/api/users/user%20%2F%201/invite', {
       method: 'POST',
     });
+  });
+});
+
+describe('operational email history API', () => {
+  beforeEach(() => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify({ receipts: [], total: 0, status: {} })),
+    });
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('requests the bounded admin history endpoint with pagination', async () => {
+    await getOperationalEmailHistory(25, 50);
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/admin/operational-emails?limit=25&offset=50', {});
   });
 });
 

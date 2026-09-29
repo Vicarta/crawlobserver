@@ -130,6 +130,11 @@ type Server struct {
 	deltaSchedulerMu     sync.Mutex
 	deltaSchedulerCancel context.CancelFunc
 
+	operationalEmailMu     sync.Mutex
+	operationalEmailCancel context.CancelFunc
+	operationalEmailWG     sync.WaitGroup
+	operationalEmailNow    func() time.Time
+
 	qualitySchedulerMu                sync.Mutex
 	qualitySchedulerCancel            context.CancelFunc
 	qualitySchedulerCursor            int
@@ -170,6 +175,7 @@ func (s *Server) TransitionToReady(store *storage.Store, keyStore *apikeys.Store
 	s.manager = crawler.NewManager(s.cfg, store, keyStore)
 	s.SetupMode = false
 	close(s.readyCh)
+	s.startOperationalEmailWorker()
 }
 
 // SetDownloadProgress updates the download progress visible to the frontend.
@@ -244,6 +250,7 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("GET /api/system-stats", s.handleSystemStats)
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/server-info", s.handleServerInfo)
+	mux.HandleFunc("GET /api/admin/operational-emails", s.handleOperationalEmailHistory)
 	mux.HandleFunc("GET /api/theme", s.handleTheme)
 	mux.HandleFunc("GET /api/compare/stats", s.handleCompareStats)
 	mux.HandleFunc("GET /api/compare/pages", s.handleComparePages)
@@ -574,6 +581,7 @@ func (s *Server) Start() error {
 	s.startAnnouncer()
 	s.startDeltaScheduler()
 	s.startQualityScheduler()
+	s.startOperationalEmailWorker()
 
 	handler, err := s.buildHandler()
 	if err != nil {
@@ -613,6 +621,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.announcerMu.Unlock()
 	s.stopDeltaScheduler()
 	s.stopQualityScheduler()
+	s.stopOperationalEmailWorker()
 
 	if s.manager != nil {
 		s.manager.Shutdown(30 * time.Second)

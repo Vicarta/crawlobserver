@@ -914,7 +914,11 @@
             onnavigate={navigateTo}
           />
         {:else if currentView === 'logs'}
-          <LogsPage onerror={(msg) => (error = msg)} />
+          <LogsPage
+            {currentUser}
+            onerror={(msg) => (error = msg)}
+            onnavigate={navigateTo}
+          />
         {:else if currentView === 'all-projects'}
           <AllProjectsPage
             onerror={(msg) => (error = msg)}
