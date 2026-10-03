@@ -3,10 +3,167 @@ package storage
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
+
+var operationalEmailURLPattern = regexp.MustCompile(`(?i)https?://[^\s<>"]+`)
+
+// SanitizeOperationalEmailURL removes URL credentials, fragments, and values
+// for credential-like query parameters while keeping public paths and useful
+// query parameters.
+func SanitizeOperationalEmailURL(raw string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", false
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return "", false
+	}
+	u.User = nil
+	u.Fragment = ""
+	u.RawFragment = ""
+	u.RawQuery = sanitizeOperationalEmailRawQuery(u.RawQuery)
+	return u.String(), true
+}
+
+func sanitizeOperationalEmailRawQuery(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var sanitized strings.Builder
+	start := 0
+	for i := 0; i <= len(raw); i++ {
+		if i < len(raw) && raw[i] != '&' && raw[i] != ';' {
+			continue
+		}
+		part := raw[start:i]
+		key, value, hasValue := strings.Cut(part, "=")
+		decodedKey, err := url.QueryUnescape(key)
+		if err == nil && sensitiveOperationalEmailQueryKey(decodedKey) {
+			sanitized.WriteString(key)
+			sanitized.WriteString("=%5BREDACTED%5D")
+		} else if hasValue && operationalEmailQueryValueHasCredentials(value, 0) {
+			sanitized.WriteString(key)
+			sanitized.WriteString("=%5BREDACTED%5D")
+		} else {
+			sanitized.WriteString(part)
+		}
+		if i < len(raw) {
+			sanitized.WriteByte(raw[i])
+		}
+		start = i + 1
+	}
+	return sanitized.String()
+}
+
+func operationalEmailQueryValueHasCredentials(raw string, depth int) bool {
+	if depth >= 2 {
+		return false
+	}
+	candidate := raw
+	if decoded, err := url.QueryUnescape(raw); err == nil {
+		candidate = decoded
+	}
+	nestedURL, err := url.Parse(candidate)
+	if err != nil || (nestedURL.Scheme != "http" && nestedURL.Scheme != "https") || nestedURL.Hostname() == "" {
+		return false
+	}
+	if nestedURL.User != nil {
+		return true
+	}
+	for _, part := range strings.FieldsFunc(nestedURL.RawQuery, func(r rune) bool { return r == '&' || r == ';' }) {
+		key, value, hasValue := strings.Cut(part, "=")
+		decodedKey, err := url.QueryUnescape(key)
+		if err == nil && sensitiveOperationalEmailQueryKey(decodedKey) {
+			return true
+		}
+		if hasValue && operationalEmailQueryValueHasCredentials(value, depth+1) {
+			return true
+		}
+	}
+	return false
+}
+
+// SanitizeOperationalEmailReason reuses the existing credential sanitizer,
+// then redacts sensitive URLs embedded in fetch or execution errors.
+func SanitizeOperationalEmailReason(reason string) string {
+	message := SanitizePageRankEvidenceFailure(reason)
+	matches := operationalEmailURLPattern.FindAllStringIndex(message, -1)
+	if len(matches) == 0 {
+		return message
+	}
+	var sanitized strings.Builder
+	last := 0
+	for _, match := range matches {
+		sanitized.WriteString(message[last:match[0]])
+		raw := message[match[0]:match[1]]
+		urlEnd := len(raw)
+		for urlEnd > 0 && strings.ContainsRune(".,;:!?)]}", rune(raw[urlEnd-1])) {
+			urlEnd--
+		}
+		trailing := raw[urlEnd:]
+		if safeURL, ok := SanitizeOperationalEmailURL(raw[:urlEnd]); ok {
+			sanitized.WriteString(safeURL)
+		} else {
+			sanitized.WriteString("[URL omitted]")
+		}
+		sanitized.WriteString(trailing)
+		last = match[1]
+	}
+	sanitized.WriteString(message[last:])
+	result := sanitized.String()
+	if len(result) > 1024 {
+		result = result[:1024]
+	}
+	return result
+}
+
+func sensitiveOperationalEmailQueryKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("-", "", "_", "", ".", "").Replace(key))
+	for _, marker := range []string{"token", "secret", "password", "passwd", "credential", "signature", "authorization", "apikey", "accesskey"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return normalized == "key" || normalized == "auth" || normalized == "code" || strings.HasSuffix(normalized, "oauthcode")
+}
+
+// PageErrorsForSession returns every page error observed in the terminal
+// session, independent of whether an error is new to the project.
+func (s *Store) PageErrorsForSession(ctx context.Context, session CrawlSession) ([]PageErrorObservation, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT url, status_code, error
+		FROM crawlobserver.pages FINAL
+		WHERE crawl_session_id = ? AND (status_code = 0 OR status_code >= 400 OR error != '')
+		ORDER BY url ASC`, session.ID)
+	if err != nil {
+		return nil, fmt.Errorf("querying page errors for session %s: %w", session.ID, err)
+	}
+	defer rows.Close()
+	var current []PageErrorObservation
+	for rows.Next() {
+		var observation PageErrorObservation
+		var fetchError string
+		if err := rows.Scan(&observation.URL, &observation.StatusCode, &fetchError); err != nil {
+			return nil, fmt.Errorf("scanning page error for session %s: %w", session.ID, err)
+		}
+		observation.FetchError = strings.TrimSpace(fetchError) != ""
+		observation.FetchReason = SanitizeOperationalEmailReason(fetchError)
+		current = append(current, observation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating page errors for session %s: %w", session.ID, err)
+	}
+	if current == nil {
+		current = []PageErrorObservation{}
+	}
+	return current, nil
+}
 
 func (s *Store) TerminalSessionsAfter(ctx context.Context, finishedAt time.Time, sessionID string, limit int) ([]CrawlSession, error) {
 	return s.terminalSessionsAfter(ctx, finishedAt, sessionID, nil, limit)
@@ -61,30 +218,8 @@ func (s *Store) terminalSessionsAfter(ctx context.Context, finishedAt time.Time,
 }
 
 func (s *Store) NewPageErrorsForSession(ctx context.Context, session CrawlSession) ([]PageErrorObservation, error) {
-	rows, err := s.conn.Query(ctx, `
-		SELECT url, status_code, error
-		FROM crawlobserver.pages FINAL
-		WHERE crawl_session_id = ? AND (status_code = 0 OR status_code >= 400 OR error != '')
-		ORDER BY url ASC`, session.ID)
+	current, err := s.PageErrorsForSession(ctx, session)
 	if err != nil {
-		return nil, fmt.Errorf("querying page errors for session %s: %w", session.ID, err)
-	}
-	var current []PageErrorObservation
-	for rows.Next() {
-		var observation PageErrorObservation
-		var fetchError string
-		if err := rows.Scan(&observation.URL, &observation.StatusCode, &fetchError); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scanning page error for session %s: %w", session.ID, err)
-		}
-		observation.FetchError = strings.TrimSpace(fetchError) != ""
-		current = append(current, observation)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, fmt.Errorf("iterating page errors for session %s: %w", session.ID, err)
-	}
-	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	if len(current) == 0 || session.ProjectID == nil || *session.ProjectID == "" {

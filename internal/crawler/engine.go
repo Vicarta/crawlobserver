@@ -1895,6 +1895,7 @@ func (e *Engine) finalizeSession(bufState storage.BufferErrorState) error {
 	if pageRankErr != nil {
 		applog.Warnf("crawler", "%s PageRank computation failed: %v", e.logTag(), pageRankErr)
 	}
+	e.recordFinalizationMetadata(bufState, pageRankErr)
 	if err := e.store.ComputeNearDuplicates(ctx, e.session.ID); err != nil {
 		applog.Warnf("crawler", "%s near-duplicate computation failed: %v", e.logTag(), err)
 	}
@@ -1921,6 +1922,19 @@ func (e *Engine) finalizeSession(bufState storage.BufferErrorState) error {
 		return fmt.Errorf("computing PageRank: %w", pageRankErr)
 	}
 	return nil
+}
+
+func (e *Engine) recordFinalizationMetadata(bufState storage.BufferErrorState, pageRankErr error) {
+	e.session.Finalization = config.SessionFinalizationMetadata{
+		LostPages: bufState.LostPages,
+		LostLinks: bufState.LostLinks,
+	}
+	if pageRankErr != nil {
+		e.session.Finalization.PageRankFailure = storage.SanitizeOperationalEmailReason(pageRankErr.Error())
+	}
+	if (bufState.LostPages > 0 || bufState.LostLinks > 0) && bufState.LastError != nil {
+		e.session.Finalization.BufferFailure = storage.SanitizeOperationalEmailReason(bufState.LastError.Error())
+	}
 }
 
 func finalizationStatus(stopped bool, bufState storage.BufferErrorState, pageRankErr error) string {

@@ -58,6 +58,26 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestSessionFinalizationMetadataPreservesExistingConfigMetadata(t *testing.T) {
+	raw := WithSessionStopMetadata(`{"crawler":{"workers":2}}`, SessionStopMetadata{Reason: "shutdown", Message: "Server shutdown"})
+	want := SessionFinalizationMetadata{
+		PageRankFailure: "reading pagerank graph pages: context deadline exceeded",
+		LostPages:       2,
+	}
+	gotJSON := WithSessionFinalizationMetadata(raw, want)
+	got, ok := SessionFinalizationMetadataFromJSON(gotJSON)
+	if !ok || got != want {
+		t.Fatalf("metadata = %#v, %v; want %#v", got, ok, want)
+	}
+	stop, ok := SessionStopMetadataFromJSON(gotJSON)
+	if !ok || stop.Reason != "shutdown" {
+		t.Fatalf("stop metadata = %#v, %v; want existing stop reason preserved", stop, ok)
+	}
+	if WithSessionFinalizationMetadata(gotJSON, SessionFinalizationMetadata{}) != gotJSON {
+		t.Fatal("empty finalization metadata should leave the new session config unchanged")
+	}
+}
+
 func TestWriterStateDirUsesNestedRelativeSQLiteParent(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)

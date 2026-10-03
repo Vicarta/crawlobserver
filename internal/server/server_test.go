@@ -90,6 +90,8 @@ type mockStore struct {
 	terminalSessions          []storage.CrawlSession
 	pageErrorsBySession       map[string][]storage.PageErrorObservation
 	pageErrorCalls            map[string]int
+	allPageErrorCalls         map[string]int
+	operationalErrorLogs      []applog.LogRow
 }
 
 type listPagesCall struct {
@@ -293,6 +295,17 @@ func (m *mockStore) UpdateSessionProject(_ context.Context, sessionID string, pr
 func (m *mockStore) ListPages(_ context.Context, sessionID string, limit, offset int, filters []storage.ParsedFilter, _ *storage.SortParam) ([]storage.PageRow, error) {
 	m.listPagesCalls = append(m.listPagesCalls, listPagesCall{sessionID, limit, offset, filters})
 	return m.pages, m.err
+}
+
+func (m *mockStore) PageErrorsForSession(_ context.Context, session storage.CrawlSession) ([]storage.PageErrorObservation, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.allPageErrorCalls == nil {
+		m.allPageErrorCalls = make(map[string]int)
+	}
+	m.allPageErrorCalls[session.ID]++
+	return append([]storage.PageErrorObservation(nil), m.pageErrorsBySession[session.ID]...), nil
 }
 
 func (m *mockStore) NewPageErrorsForSession(_ context.Context, session storage.CrawlSession) ([]storage.PageErrorObservation, error) {
@@ -645,8 +658,27 @@ func (m *mockStore) HreflangValidation(_ context.Context, _ string, _ string, _ 
 func (m *mockStore) InsertLogs(_ context.Context, _ []applog.LogRow) error {
 	return m.err
 }
-func (m *mockStore) ListLogs(_ context.Context, _, _ int, _, _, _ string) ([]applog.LogRow, int, error) {
-	return []applog.LogRow{}, 0, m.err
+func (m *mockStore) ListLogs(_ context.Context, limit, offset int, level, component, search string) ([]applog.LogRow, int, error) {
+	if m.err != nil {
+		return nil, 0, m.err
+	}
+	var matches []applog.LogRow
+	for _, row := range m.operationalErrorLogs {
+		if level != "" && row.Level != level || component != "" && row.Component != component || search != "" && !strings.Contains(strings.ToLower(row.Message), strings.ToLower(search)) {
+			continue
+		}
+		matches = append(matches, row)
+	}
+	total := len(matches)
+	sort.Slice(matches, func(i, j int) bool { return matches[i].Timestamp.After(matches[j].Timestamp) })
+	if offset >= len(matches) {
+		return []applog.LogRow{}, total, nil
+	}
+	matches = matches[offset:]
+	if limit >= 0 && len(matches) > limit {
+		matches = matches[:limit]
+	}
+	return matches, total, nil
 }
 func (m *mockStore) ExportLogs(_ context.Context) ([]applog.LogRow, error) {
 	return []applog.LogRow{}, m.err

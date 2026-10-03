@@ -283,6 +283,37 @@ func TestFinalizationStatus(t *testing.T) {
 	}
 }
 
+func TestFinalizationMetadataIsPersistedInTerminalRowAndClearedOnResume(t *testing.T) {
+	cfg := &config.Config{Crawler: config.CrawlerConfig{UserAgent: "TestBot/1.0"}}
+	engine := NewEngine(cfg, nil)
+	engine.SessionID([]string{"https://example.test/seed"})
+	bufferState := storage.BufferErrorState{LostPages: 2, LostLinks: 1, LastError: fmt.Errorf("insert failed for https://user:password@example.test/page?token=secret")}
+	pageRankErr := fmt.Errorf("reading pagerank graph pages: context deadline exceeded")
+	engine.recordFinalizationMetadata(bufferState, pageRankErr)
+	engine.session.Status = finalizationStatus(false, bufferState, pageRankErr)
+	row := engine.session.ToStorageRow()
+	if row.Status != "completed_with_errors" {
+		t.Fatalf("terminal status = %q, want completed_with_errors", row.Status)
+	}
+	metadata, ok := config.SessionFinalizationMetadataFromJSON(row.Config)
+	if !ok || metadata.PageRankFailure != pageRankErr.Error() || metadata.LostPages != 2 || metadata.LostLinks != 1 {
+		t.Fatalf("persisted finalization metadata = %#v, %v", metadata, ok)
+	}
+	for _, secret := range []string{"user:password", "token=secret"} {
+		if strings.Contains(row.Config, secret) {
+			t.Fatalf("terminal session config leaked %q: %s", secret, row.Config)
+		}
+	}
+	if metadata.BufferFailure == "" || !strings.Contains(metadata.BufferFailure, "/page") {
+		t.Fatalf("sanitized buffer failure = %q; want useful path context", metadata.BufferFailure)
+	}
+
+	engine.ResumeSession(row.ID, []string{"https://example.test/seed"})
+	if engine.session.Finalization != (config.SessionFinalizationMetadata{}) {
+		t.Fatalf("resumed session inherited stale finalization metadata: %#v", engine.session.Finalization)
+	}
+}
+
 // TestTerminalCompletionWaitsForFinalizedPageRankEvidenceAcrossRenderModes
 // protects the completion barrier shared by static and JS-rendered crawls.
 // A renderer changes how pages arrive in the pipeline, not the requirement

@@ -5,6 +5,7 @@ package storage
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,7 +46,11 @@ func TestOperationalEmailNewPageErrorsIntegration(t *testing.T) {
 		}
 		pages := make([]PageRow, 0, len(observations))
 		for _, observation := range observations {
-			pages = append(pages, PageRow{CrawlSessionID: sessionID, URL: observation.URL, StatusCode: observation.StatusCode})
+			fetchReason := observation.FetchReason
+			if observation.FetchError && fetchReason == "" {
+				fetchReason = "fixture fetch error"
+			}
+			pages = append(pages, PageRow{CrawlSessionID: sessionID, URL: observation.URL, StatusCode: observation.StatusCode, Error: fetchReason})
 		}
 		if err := store.InsertPages(ctx, pages); err != nil {
 			t.Fatalf("inserting pages for %s: %v", sessionID, err)
@@ -57,6 +62,7 @@ func TestOperationalEmailNewPageErrorsIntegration(t *testing.T) {
 	queryPriorURL := "https://example.test/query?key=old"
 	queryCurrentURL := "https://example.test/query?key=current"
 	projectScopedURL := "https://example.test/project-scoped?key=one"
+	fetchURL := "https://example.test/retry?lang=en&access_token=secret"
 	insertObservation(priorID, projectID, base,
 		PageErrorObservation{URL: repeatURL, StatusCode: 404},
 		PageErrorObservation{URL: reappearURL, StatusCode: 404},
@@ -77,8 +83,31 @@ func TestOperationalEmailNewPageErrorsIntegration(t *testing.T) {
 		{CrawlSessionID: currentID, URL: reappearURL, StatusCode: 404},
 		{CrawlSessionID: currentID, URL: queryCurrentURL, StatusCode: 404},
 		{CrawlSessionID: currentID, URL: projectScopedURL, StatusCode: 404},
+		{CrawlSessionID: currentID, URL: fetchURL, StatusCode: 0, Error: "GET https://user:password@example.test/retry?lang=en&access_token=secret: context deadline exceeded"},
 	}); err != nil {
 		t.Fatalf("inserting current page observations: %v", err)
+	}
+	allErrors, err := store.PageErrorsForSession(ctx, current)
+	if err != nil {
+		t.Fatalf("PageErrorsForSession: %v", err)
+	}
+	var fetchObservation *PageErrorObservation
+	for i := range allErrors {
+		if allErrors[i].URL == fetchURL {
+			fetchObservation = &allErrors[i]
+			break
+		}
+	}
+	if fetchObservation == nil || !fetchObservation.FetchError || fetchObservation.FetchReason == "" {
+		t.Fatalf("fetch observation = %#v; want the actual fetch error reason", fetchObservation)
+	}
+	for _, secret := range []string{"user:password", "access_token=secret"} {
+		if strings.Contains(fetchObservation.FetchReason, secret) {
+			t.Fatalf("fetch reason leaked %q: %s", secret, fetchObservation.FetchReason)
+		}
+	}
+	if !strings.Contains(fetchObservation.FetchReason, "context deadline exceeded") || !strings.Contains(fetchObservation.FetchReason, "/retry") || !strings.Contains(fetchObservation.FetchReason, "lang=en") {
+		t.Fatalf("sanitized fetch reason lost useful diagnostic context: %s", fetchObservation.FetchReason)
 	}
 
 	got, err := store.NewPageErrorsForSession(ctx, current)
@@ -89,7 +118,7 @@ func TestOperationalEmailNewPageErrorsIntegration(t *testing.T) {
 	for _, observation := range got {
 		gotURLs = append(gotURLs, observation.URL)
 	}
-	wantURLs := []string{projectScopedURL, queryCurrentURL, reappearURL}
+	wantURLs := []string{projectScopedURL, queryCurrentURL, reappearURL, fetchURL}
 	if !reflect.DeepEqual(gotURLs, wantURLs) {
 		t.Fatalf("new error URLs = %#v; want %#v", gotURLs, wantURLs)
 	}

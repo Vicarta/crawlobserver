@@ -33,6 +33,7 @@ type SessionStore interface {
 
 // PageStore handles reading and exploring crawled pages.
 type PageStore interface {
+	PageErrorsForSession(ctx context.Context, session storage.CrawlSession) ([]storage.PageErrorObservation, error)
 	NewPageErrorsForSession(ctx context.Context, session storage.CrawlSession) ([]storage.PageErrorObservation, error)
 	ListPages(ctx context.Context, sessionID string, limit, offset int, filters []storage.ParsedFilter, sort *storage.SortParam) ([]storage.PageRow, error)
 	ListPageIssues(ctx context.Context, sessionID string, limit, offset int, severity, issueType, urlFilter string) ([]storage.PageIssue, error)

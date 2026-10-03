@@ -24,6 +24,7 @@ const (
 	operationalEmailRetryHorizon = time.Hour
 	operationalEmailLease        = 2 * time.Minute
 	operationalEmailOverlap      = 5 * time.Minute
+	operationalEmailDetailLimit  = 50
 )
 
 func (s *Server) startOperationalEmailWorker() {
@@ -185,7 +186,8 @@ func (s *Server) operationalEmailEvents(ctx context.Context, session storage.Cra
 		} else if session.Status == "stopped" {
 			statusLabel = "Crawl stopped unexpectedly"
 		}
-		events = append(events, operationalEmailEvent(session, projectID, projectName, "crawl_failure", statusLabel, 0, nil, admins))
+		details, errorCount := s.operationalCrawlFailureDetails(ctx, session)
+		events = append(events, operationalEmailEvent(session, projectID, projectName, "crawl_failure", statusLabel, errorCount, details, admins))
 	}
 	if session.Status != "completed" && session.Status != "completed_with_errors" {
 		return events, nil
@@ -200,16 +202,99 @@ func (s *Server) operationalEmailEvents(ctx context.Context, session storage.Cra
 	if len(newErrors) == 0 {
 		return events, nil
 	}
-	details := make([]string, 0, min(len(newErrors), 10))
-	for _, pageError := range newErrors[:min(len(newErrors), 10)] {
-		details = append(details, fmt.Sprintf("%s: %s", pageErrorDescription(pageError.StatusCode, pageError.FetchError), safeEmailPageURL(pageError.URL)))
-	}
-	if len(newErrors) > len(details) {
-		details = append(details, fmt.Sprintf("and %d more", len(newErrors)-len(details)))
-	}
+	details := make([]string, 0, min(len(newErrors), operationalEmailDetailLimit))
+	details = appendBoundedPageErrorDetails(details, newErrors)
 	summary := fmt.Sprintf("%d new page error(s)", len(newErrors))
 	events = append(events, operationalEmailEvent(session, projectID, projectName, "new_page_errors", summary, len(newErrors), details, admins))
 	return events, nil
+}
+
+func (s *Server) operationalCrawlFailureDetails(ctx context.Context, session storage.CrawlSession) ([]string, int) {
+	details := operationalExecutionCauseDetails(ctx, session, s.store)
+	if session.ProjectID == nil || strings.TrimSpace(*session.ProjectID) == "" {
+		return details, 0
+	}
+	pageErrors, err := s.store.PageErrorsForSession(ctx, session)
+	if err != nil {
+		details = append(details, "Page-error observations could not be loaded; the execution failure is reported separately.")
+		return details, 0
+	}
+	if len(pageErrors) == 0 {
+		return details, 0
+	}
+	details = append(details, fmt.Sprintf("Observed page errors (separate from the execution failure): %d", len(pageErrors)))
+	details = appendBoundedPageErrorDetails(details, pageErrors)
+	return details, len(pageErrors)
+}
+
+func operationalExecutionCauseDetails(ctx context.Context, session storage.CrawlSession, store StorageService) []string {
+	var details []string
+	finalization, hasFinalization := config.SessionFinalizationMetadataFromJSON(session.Config)
+	if hasFinalization {
+		if finalization.PageRankFailure != "" {
+			details = append(details, "PageRank finalization failed: "+storage.SanitizeOperationalEmailReason(finalization.PageRankFailure))
+		}
+		if finalization.LostPages > 0 || finalization.LostLinks > 0 {
+			details = append(details, fmt.Sprintf("Buffer persistence exhausted retries and lost %d page row(s) and %d link row(s).", finalization.LostPages, finalization.LostLinks))
+			if finalization.BufferFailure != "" {
+				details = append(details, "Last buffer write failure: "+storage.SanitizeOperationalEmailReason(finalization.BufferFailure))
+			}
+		}
+	}
+	if session.Status == "stopped" {
+		if stop, ok := config.SessionStopMetadataFromJSON(session.Config); ok && !strings.EqualFold(stop.Reason, "manual") {
+			details = append(details, "Crawl stopped unexpectedly (reason: "+storage.SanitizeOperationalEmailReason(stop.Reason)+").")
+		}
+	}
+	if len(details) == 0 && !hasFinalization {
+		if cause := legacyCrawlExecutionCause(ctx, session, store); cause != "" {
+			details = append(details, "Crawl execution error: "+storage.SanitizeOperationalEmailReason(cause))
+		}
+	}
+	if len(details) == 0 {
+		details = append(details, fmt.Sprintf("The session ended as %s, but retained evidence does not identify its execution cause. Any observed page errors below are separate page-level outcomes.", session.Status))
+	}
+	return details
+}
+
+func legacyCrawlExecutionCause(ctx context.Context, session storage.CrawlSession, store StorageService) string {
+	if session.FinishedAt.IsZero() {
+		return ""
+	}
+	logs, _, err := store.ListLogs(ctx, 20, 0, "error", "crawler", session.ID)
+	if err != nil {
+		return ""
+	}
+	prefix := "Crawl " + session.ID + " failed: "
+	start := session.FinishedAt.Add(-time.Minute)
+	if !session.StartedAt.IsZero() && session.StartedAt.After(start) {
+		start = session.StartedAt
+	}
+	end := session.FinishedAt.Add(time.Minute)
+	for _, row := range logs {
+		if row.Timestamp.Before(start) || row.Timestamp.After(end) || row.Level != "error" || row.Component != "crawler" {
+			continue
+		}
+		if strings.HasPrefix(row.Message, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(row.Message, prefix))
+		}
+	}
+	return ""
+}
+
+func appendBoundedPageErrorDetails(details []string, pageErrors []storage.PageErrorObservation) []string {
+	shown := min(len(pageErrors), operationalEmailDetailLimit)
+	for _, pageError := range pageErrors[:shown] {
+		description := pageErrorDescription(pageError.StatusCode, pageError.FetchError)
+		if pageError.FetchReason != "" {
+			description += ": " + storage.SanitizeOperationalEmailReason(pageError.FetchReason)
+		}
+		details = append(details, fmt.Sprintf("%s: %s", description, safeEmailPageURL(pageError.URL)))
+	}
+	if len(pageErrors) > shown {
+		details = append(details, fmt.Sprintf("Showing %d of %d page errors; %d omitted.", shown, len(pageErrors), len(pageErrors)-shown))
+	}
+	return details
 }
 
 func operationalEmailEvent(session storage.CrawlSession, projectID, projectName, eventType, summary string, errorCount int, details []string, admins []apikeys.User) apikeys.OperationalEmailEvent {
@@ -254,11 +339,11 @@ func pageErrorDescription(statusCode uint16, fetchError bool) string {
 }
 
 func safeEmailPageURL(raw string) string {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Scheme == "" || u.Hostname() == "" {
+	safe, ok := storage.SanitizeOperationalEmailURL(raw)
+	if !ok {
 		return "[URL omitted]"
 	}
-	return strings.ToLower(u.Scheme) + "://" + u.Host
+	return safe
 }
 
 func (s *Server) eligibleOperationalEmailAdmins() ([]apikeys.User, error) {
@@ -381,20 +466,44 @@ func (s *Server) operationalAlertMessage(receipt apikeys.OperationalEmailReceipt
 	text := fmt.Sprintf("%s\nProject: %s\nSession: %s\nTerminal status: %s\nOpen session: %s\n", receipt.Summary, projectLabel, receipt.SessionID, receipt.SessionStatus, link)
 	if receipt.Type == "new_page_errors" {
 		subject = fmt.Sprintf("CrawlObserver: %s - %s", projectLabel, receipt.Summary)
-		text = fmt.Sprintf("%s\nProject: %s\nSession: %s\nTerminal status: %s\nOpen session: %s\n\n%s\n", receipt.Summary, projectLabel, receipt.SessionID, receipt.SessionStatus, link, strings.Join(receipt.Details, "\n"))
+	}
+	if len(receipt.Details) > 0 {
+		detailHeading := "Execution and observed page details"
+		if receipt.Type == "new_page_errors" {
+			detailHeading = "New page errors"
+		}
+		text += "\n" + detailHeading + ":\n" + strings.Join(receipt.Details, "\n") + "\n"
 	}
 	var htmlDetails strings.Builder
 	for _, detail := range receipt.Details {
 		htmlDetails.WriteString("<li>")
-		htmlDetails.WriteString(html.EscapeString(detail))
+		htmlDetails.WriteString(htmlOperationalEmailDetail(detail))
 		htmlDetails.WriteString("</li>")
 	}
 	htmlBody := "<p>" + html.EscapeString(receipt.Summary) + "</p><p>Project: " + html.EscapeString(projectLabel) + "</p><p>Session: " + html.EscapeString(receipt.SessionID) + "</p><p>Terminal status: " + html.EscapeString(receipt.SessionStatus) + "</p>"
-	if receipt.Type == "new_page_errors" && htmlDetails.Len() > 0 {
+	if htmlDetails.Len() > 0 {
+		heading := "Execution and observed page details"
+		if receipt.Type == "new_page_errors" {
+			heading = "New page errors"
+		}
+		htmlBody += "<h3>" + html.EscapeString(heading) + "</h3>"
 		htmlBody += "<ul>" + htmlDetails.String() + "</ul>"
 	}
 	htmlBody += "<p><a href=\"" + html.EscapeString(link) + "\">Open session</a></p>"
 	return OperationalAlertEmail{Subject: subject, Text: text, HTML: htmlBody}
+}
+
+func htmlOperationalEmailDetail(detail string) string {
+	separator := strings.LastIndex(detail, ": ")
+	if separator < 0 {
+		return html.EscapeString(detail)
+	}
+	rawURL := detail[separator+2:]
+	safeURL := safeEmailPageURL(rawURL)
+	if safeURL == "[URL omitted]" {
+		return html.EscapeString(detail)
+	}
+	return html.EscapeString(detail[:separator+2]) + "<a href=\"" + html.EscapeString(safeURL) + `" style="overflow-wrap:anywhere;word-break:break-all">` + html.EscapeString(safeURL) + "</a>"
 }
 
 func (s *Server) operationalEmailStatus() map[string]interface{} {

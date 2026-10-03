@@ -27,9 +27,10 @@ type EffectiveOrigin struct {
 }
 
 type PageErrorObservation struct {
-	URL        string
-	StatusCode uint16
-	FetchError bool
+	URL         string
+	StatusCode  uint16
+	FetchError  bool
+	FetchReason string
 }
 
 const (

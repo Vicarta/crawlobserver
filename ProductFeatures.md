@@ -691,10 +691,19 @@ shared rendered metadata shell diagnostics без site-specific правил.
   error надсилається знову після healthy latest observation. Для URL без
   жодного попереднього observation перша помилка є новою, включно з першим
   crawl нового проєкту. Для сесій без project lineage page-error email
-  пропускається; execution-failure повідомлення залишаються активними. Email
-  display містить лише sanitized origin сторінки (userinfo, path, query і
-  fragment відкидаються) та authenticated link на session; raw fetch-error
-  body ніколи не включається.
+  пропускається; execution-failure повідомлення залишаються активними. Crawl-
+  failure email показує збережену причину PageRank finalization або втрати
+  buffer rows, окремо від наявних page errors; для історичних сесій без цього
+  metadata перевіряється лише точний session-specific crawler error у вузькому
+  часовому вікні. Якщо причину неможливо встановити, лист прямо повідомляє про
+  відсутність retained evidence і не приписує execution failure окремій
+  сторінці. Email показує повний public path сторінки, робить URL clickable в
+  HTML і залишає повний URL як plain text; довгі HTML-посилання переносяться в
+  межах рядка. URL userinfo, fragment та значення чутливих query-параметрів
+  редагуються. У листі показуються перші 50 page errors; якщо їх більше,
+  додається кількість пропущених. Actual fetch-error reason теж включається
+  після credential/URL sanitization та обмежується 1 024 символами;
+  raw fetch-error body ніколи не включається.
 - Worker створює activation watermark під час першого запуску і не надсилає
   історичні session events. Для late-visible завершених sessions кожен tick
   перевіряє обмежене п'ятихвилинне вікно (не раніше activation watermark) і
