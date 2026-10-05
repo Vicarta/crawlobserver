@@ -1959,10 +1959,11 @@ func (s *Store) ComputePageRankWithOptions(ctx context.Context, sessionID string
 	query := fmt.Sprintf(`ALTER TABLE crawlobserver.pages UPDATE
 		pagerank = joinGet('%s', 'new_pagerank', url),
 		pagerank_revision = toUUID(?)
+		IN PARTITION tuple(toUUID(?))
 		WHERE crawl_session_id = ?
 		SETTINGS mutations_sync = 1`,
 		tmpTable)
-	if err := s.conn.Exec(ctx, query, attempt.AttemptID, sessionID); err != nil {
+	if err := s.conn.Exec(ctx, query, attempt.AttemptID, sessionID, sessionID); err != nil {
 		return fmt.Errorf("updating pagerank via joinGet: %w", err)
 	}
 	if _, err := s.finalizeComputedPageRankEvidence(ctx, attempt, before.Graph); err != nil {
@@ -2185,6 +2186,10 @@ func ComputeBFSDepths(seedURLs []string, crawledSet map[string]bool, adj map[str
 }
 
 func (s *Store) RecomputeDepths(ctx context.Context, sessionID string, seedURLs []string) error {
+	if !isValidUUID(sessionID) {
+		return fmt.Errorf("invalid session ID: %s", sessionID)
+	}
+
 	// 1. Get all crawled URLs
 	crawledRows, err := s.conn.Query(ctx, `
 		SELECT url FROM crawlobserver.pages FINAL WHERE crawl_session_id = ?`, sessionID)
@@ -2241,10 +2246,6 @@ func (s *Store) RecomputeDepths(ctx context.Context, sessionID string, seedURLs 
 	foundOn := bfsResult.FoundOn
 
 	// 4. Write back depths via temp table (avoids SQL injection from crawled URLs)
-	if !isValidUUID(sessionID) {
-		return fmt.Errorf("invalid session ID: %s", sessionID)
-	}
-
 	tmpTable := fmt.Sprintf("crawlobserver.tmp_depths_%s", strings.ReplaceAll(sessionID, "-", ""))
 	if err := s.conn.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)); err != nil {
 		return fmt.Errorf("dropping old temp depths table: %w", err)
@@ -2289,11 +2290,12 @@ func (s *Store) RecomputeDepths(ctx context.Context, sessionID string, seedURLs 
 	query := fmt.Sprintf(`ALTER TABLE crawlobserver.pages UPDATE
 		depth = joinGet('%s', 'new_depth', url),
 		found_on = joinGet('%s', 'new_found_on', url)
+		IN PARTITION tuple(toUUID(?))
 		WHERE crawl_session_id = ?
 		SETTINGS mutations_sync = 1`,
 		tmpTable, tmpTable)
 
-	if err := s.conn.Exec(ctx, query, sessionID); err != nil {
+	if err := s.conn.Exec(ctx, query, sessionID, sessionID); err != nil {
 		return fmt.Errorf("updating depths via joinGet: %w", err)
 	}
 

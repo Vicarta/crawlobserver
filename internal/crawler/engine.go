@@ -1888,15 +1888,20 @@ func (e *Engine) finalizeSession(bufState storage.BufferErrorState) error {
 	if err := e.store.RecomputeDepths(ctx, e.session.ID, e.session.SeedURLs); err != nil {
 		applog.Warnf("crawler", "%s depth recomputation failed: %v", e.logTag(), err)
 	}
-	pageRankErr := e.store.ComputePageRankWithOptions(ctx, e.session.ID, storage.PageRankOptions{
-		IncludeFooterLinks: e.includeFooterLinksInPageRank,
-		FooterSelectors:    append([]string(nil), e.footerSelectorPatterns...),
+	cancel()
+	pageRankErr := withFreshPageRankFinalizationContext(func(pageRankCtx context.Context) error {
+		return e.store.ComputePageRankWithOptions(pageRankCtx, e.session.ID, storage.PageRankOptions{
+			IncludeFooterLinks: e.includeFooterLinksInPageRank,
+			FooterSelectors:    append([]string(nil), e.footerSelectorPatterns...),
+		})
 	})
 	if pageRankErr != nil {
 		applog.Warnf("crawler", "%s PageRank computation failed: %v", e.logTag(), pageRankErr)
 	}
 	e.recordFinalizationMetadata(bufState, pageRankErr)
-	if err := e.store.ComputeNearDuplicates(ctx, e.session.ID); err != nil {
+	nearDuplicatesCtx, nearDuplicatesCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer nearDuplicatesCancel()
+	if err := e.store.ComputeNearDuplicates(nearDuplicatesCtx, e.session.ID); err != nil {
 		applog.Warnf("crawler", "%s near-duplicate computation failed: %v", e.logTag(), err)
 	}
 
@@ -1922,6 +1927,12 @@ func (e *Engine) finalizeSession(bufState storage.BufferErrorState) error {
 		return fmt.Errorf("computing PageRank: %w", pageRankErr)
 	}
 	return nil
+}
+
+func withFreshPageRankFinalizationContext(compute func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	return compute(ctx)
 }
 
 func (e *Engine) recordFinalizationMetadata(bufState storage.BufferErrorState, pageRankErr error) {

@@ -117,6 +117,11 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
 - Terminal session status публікується після recompute depth, Internal PageRank
   і near-duplicate analytics, щоб downstream quality gates читали завершені
   derived metrics.
+- Depth і Internal PageRank mutations обмежені партицією своєї сесії та
+  синхронно очікують її завершення, а не обробки історичних сесій. PageRank
+  отримує окремий обмежений context після count/depth; їхній таймаут не
+  витрачає його бюджет. Durable finalized evidence залишається обов'язковим
+  для успішної фіналізації; збої зберігаються як `completed_with_errors`.
 - Session list/detail API додає response-only `effective_origin` та
   `effective_origin_state`; Daily Delta також може додати
   `effective_origin_others`. `proven` походить лише з durable launched-request

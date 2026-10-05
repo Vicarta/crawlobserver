@@ -283,6 +283,33 @@ func TestFinalizationStatus(t *testing.T) {
 	}
 }
 
+func TestPageRankFinalizationContextDoesNotInheritExpiredOptionalBudget(t *testing.T) {
+	optionalCtx, cancelOptional := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelOptional()
+	if optionalCtx.Err() == nil {
+		t.Fatal("test setup: optional finalization context must be expired")
+	}
+
+	called := false
+	err := withFreshPageRankFinalizationContext(func(pageRankCtx context.Context) error {
+		called = true
+		if pageRankCtx == optionalCtx || pageRankCtx.Err() != nil {
+			t.Fatalf("PageRank received an expired optional context: %v", pageRankCtx.Err())
+		}
+		deadline, ok := pageRankCtx.Deadline()
+		if !ok || time.Until(deadline) < 4*time.Minute {
+			t.Fatalf("PageRank context deadline = %v, present=%v; want a fresh 5m budget", deadline, ok)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("PageRank finalization context callback: %v", err)
+	}
+	if !called {
+		t.Fatal("PageRank finalization callback was not invoked")
+	}
+}
+
 func TestFinalizationMetadataIsPersistedInTerminalRowAndClearedOnResume(t *testing.T) {
 	cfg := &config.Config{Crawler: config.CrawlerConfig{UserAgent: "TestBot/1.0"}}
 	engine := NewEngine(cfg, nil)
