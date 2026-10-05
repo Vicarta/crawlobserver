@@ -267,6 +267,7 @@ notifications.
 
 | Date | Task | Result |
 | --- | --- | --- |
+| 2026-10-05 | Isolate PageRank finalization from unrelated session mutations | Quick task 11 deployed from 659f493: session-partition depth/PageRank updates and fresh bounded PR budget; full race suite, real isolated ClickHouse fixtures and independent reviews passed. No-force app-only rollout verified health, unchanged healthy ClickHouse, historical session and 404; no live crawl or historical repair. |
 | 2026-10-03 | Concrete administrator crawl-error email details | Quick task 10 deployed from 25b81b7: persisted execution causes, separate HTTP/fetch error list with full sanitized clickable page URLs, 50-item omission notice; final reviews/tests passed and production app/ClickHouse/email worker verified healthy without a live crawl or test email. |
 | 2026-06-06 | Fix Google Search Console OAuth return flow and property switching | OAuth callback now returns to the project GSC tab, connected admins can change property without disconnecting, manual GSC fetches replace stale project data, and production health is OK after Docker Compose deploy. |
 | 2026-06-06 | Add GSC page keyword drilldown | Added a project-scoped GSC page query API and Search Console Pages UI drilldown showing ranking queries per URL, sorted by impressions by default; production health and live DI endpoint verified. |
