@@ -77,6 +77,50 @@ describe('LoginPage passwordless authentication', () => {
     });
   });
 
+  it('accepts native-valid six-digit codes including leading zeroes', async () => {
+    authAPI.requestLoginCode.mockResolvedValue({ status: 'accepted' });
+    authAPI.verifyLoginCode.mockResolvedValue({ id: 'user-1', email: 'person@example.test' });
+    mountLogin();
+
+    setInput('#login-email', 'person@example.test');
+    await tick();
+    document.querySelector('.login-submit').click();
+    await vi.waitFor(() => expect(document.querySelector('#login-code')).not.toBeNull());
+
+    const input = document.querySelector('#login-code');
+    expect(input.pattern).toBe('[0-9]{6}');
+
+    setInput('#login-code', '012345');
+    await tick();
+    expect(input.checkValidity()).toBe(true);
+    expect(document.querySelector('.login-submit').disabled).toBe(false);
+
+    document.querySelector('.login-submit').click();
+    await vi.waitFor(() =>
+      expect(authAPI.verifyLoginCode).toHaveBeenCalledWith('person@example.test', '012345'),
+    );
+  });
+
+  it('keeps non-six-digit and non-ASCII-digit codes natively invalid', async () => {
+    authAPI.requestLoginCode.mockResolvedValue({ status: 'accepted' });
+    mountLogin();
+
+    setInput('#login-email', 'person@example.test');
+    await tick();
+    document.querySelector('.login-submit').click();
+    await vi.waitFor(() => expect(document.querySelector('#login-code')).not.toBeNull());
+
+    const input = document.querySelector('#login-code');
+    for (const invalidCode of ['12345', '1234567', '\u0661\u0662\u0663\u0664\u0665\u0666']) {
+      setInput('#login-code', invalidCode);
+      await tick();
+      expect(input.checkValidity()).toBe(false);
+      expect(document.querySelector('.login-submit').disabled).toBe(true);
+    }
+
+    expect(authAPI.verifyLoginCode).not.toHaveBeenCalled();
+  });
+
   it('keeps wrong-code feedback generic when the server reports invalid or expired', async () => {
     authAPI.requestLoginCode.mockResolvedValue({ status: 'accepted' });
     authAPI.verifyLoginCode.mockRejectedValue({ status: 401, message: 'invalid or expired' });

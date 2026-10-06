@@ -201,7 +201,7 @@
               inputmode="numeric"
               autocomplete="one-time-code"
               maxlength="6"
-              pattern="[0-9]{6}"
+              pattern={'[0-9]{6}'}
               bind:value={code}
               aria-invalid={error ? 'true' : 'false'}
               required
