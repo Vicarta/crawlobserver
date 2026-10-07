@@ -282,10 +282,20 @@ three 20 MB files. Scheduled application backups default to every 24 hours with
 two retained generations; app restarts preserve the due time instead of
 creating an extra archive. Set `backup.time` to a daily `HH:MM` wall-clock time
 and optionally `backup.timezone` to an IANA timezone (for example,
-`Europe/Kyiv`) when a fixed local schedule is required. A successful separate
+`Europe/Kyiv`) when a fixed local schedule is required. The production example
+uses `00:20` Europe/Kyiv time and retains the latest archive from three distinct
+local dates plus the newest archive from the previous Monday-to-Sunday week
+(`backup.retain: 3`, `backup.retain_weekly: 1`). With `retain_weekly: 0`,
+`backup.retain` keeps its legacy count-based behavior. A successful separate
 critical export allows the scheduled full archive to omit `gsc_analytics` rows;
-if that export fails, the full archive keeps those rows automatically. Manual
-full backups always keep all table data.
+if that export fails, the full archive keeps those rows automatically. In
+calendar mode, overlapping daily and weekly dates are deduplicated, exports are
+not pruned by scheduled or manual export runs until a full archive succeeds,
+and the nearest earlier critical export remains for each retained full archive.
+In weekly mode, SQLite/config-only pre-update copies are marked `-pre-update`
+and count against `backup.retain` separately, so they cannot displace full
+archives; existing unmarked copies are not reclassified.
+Manual full backups always keep all table data.
 
 The default paths assume the Compose project name is `deploy`. If the project
 name changes, update `deploy/logrotate/crawlobserver-clickhouse` before

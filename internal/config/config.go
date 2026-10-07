@@ -279,12 +279,13 @@ type ResendConfig struct {
 }
 
 type BackupConfig struct {
-	Enabled  bool   `mapstructure:"enabled"`
-	Interval string `mapstructure:"interval"` // duration string: "12h", "24h"
-	Time     string `mapstructure:"time"`     // optional daily wall-clock time: "HH:MM"
-	Timezone string `mapstructure:"timezone"` // optional IANA timezone for Time
-	Dir      string `mapstructure:"dir"`      // backup directory, "" = <dataDir>/backups
-	Retain   int    `mapstructure:"retain"`   // number of backups to keep
+	Enabled      bool   `mapstructure:"enabled"`
+	Interval     string `mapstructure:"interval"`      // duration string: "12h", "24h"
+	Time         string `mapstructure:"time"`          // optional daily wall-clock time: "HH:MM"
+	Timezone     string `mapstructure:"timezone"`      // optional IANA timezone for Time
+	Dir          string `mapstructure:"dir"`           // backup directory, "" = <dataDir>/backups
+	Retain       int    `mapstructure:"retain"`        // number of backups to keep in legacy count mode
+	RetainWeekly int    `mapstructure:"retain_weekly"` // 1 keeps three daily dates plus the previous calendar week
 }
 
 type RetentionConfig struct {
@@ -374,6 +375,7 @@ func SetDefaults() {
 	viper.SetDefault("backup.timezone", "")
 	viper.SetDefault("backup.dir", "")
 	viper.SetDefault("backup.retain", 2)
+	viper.SetDefault("backup.retain_weekly", 0)
 
 	viper.SetDefault("retention.sessions_per_project", 0)
 	viper.SetDefault("retention.interval", "15m")
@@ -547,6 +549,14 @@ func WriterStateDir() (string, error) {
 }
 
 func validate(cfg *Config) error {
+	if cfg.Backup.RetainWeekly != 0 && cfg.Backup.RetainWeekly != 1 {
+		return fmt.Errorf("backup.retain_weekly must be 0 or 1")
+	}
+	if cfg.Backup.RetainWeekly == 1 && cfg.Backup.Timezone != "" {
+		if _, err := time.LoadLocation(cfg.Backup.Timezone); err != nil {
+			return fmt.Errorf("backup.timezone must be a valid IANA timezone for weekly retention: %w", err)
+		}
+	}
 	if cfg.Crawler.Workers < 1 {
 		return fmt.Errorf("crawler.workers must be >= 1")
 	}

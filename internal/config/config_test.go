@@ -56,6 +56,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Backup.Retain != 2 {
 		t.Errorf("Backup.Retain = %d, want 2", cfg.Backup.Retain)
 	}
+	if cfg.Backup.RetainWeekly != 0 {
+		t.Errorf("Backup.RetainWeekly = %d, want 0", cfg.Backup.RetainWeekly)
+	}
 }
 
 func TestSessionFinalizationMetadataPreservesExistingConfigMetadata(t *testing.T) {
@@ -118,6 +121,9 @@ func TestValidateRejectsInvalid(t *testing.T) {
 		{"invalid backup time", func(c *Config) { c.Backup.Time = "25:00" }},
 		{"invalid backup timezone", func(c *Config) { c.Backup.Timezone = "Not/A_Timezone" }},
 		{"zero backup retention", func(c *Config) { c.Backup.Retain = 0 }},
+		{"invalid weekly backup retention below range", func(c *Config) { c.Backup.RetainWeekly = -1 }},
+		{"invalid weekly backup retention above range", func(c *Config) { c.Backup.RetainWeekly = 2 }},
+		{"invalid timezone for weekly retention", func(c *Config) { c.Backup.RetainWeekly = 1; c.Backup.Timezone = "Not/A_Timezone" }},
 	}
 
 	for _, tt := range tests {
@@ -182,6 +188,8 @@ storage:
 backup:
   time: "00:20"
   timezone: "Europe/Kyiv"
+  retain: 3
+  retain_weekly: 1
 server:
   password: "strong-test-password"
 `
@@ -220,6 +228,9 @@ server:
 	}
 	if cfg.Backup.Timezone != "Europe/Kyiv" {
 		t.Errorf("Backup.Timezone = %q, want Europe/Kyiv", cfg.Backup.Timezone)
+	}
+	if cfg.Backup.Retain != 3 || cfg.Backup.RetainWeekly != 1 {
+		t.Errorf("Backup retention = %d + weekly %d, want 3 + weekly 1", cfg.Backup.Retain, cfg.Backup.RetainWeekly)
 	}
 }
 

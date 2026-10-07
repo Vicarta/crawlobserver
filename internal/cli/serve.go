@@ -129,6 +129,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 // runBackupScheduler runs periodic SQL backups and critical table exports.
 func runBackupScheduler(ctx context.Context, cfg *config.Config, opts *backup.SQLBackupOptions, store *storage.Store) {
+	if cfg.Backup.RetainWeekly != 0 && cfg.Backup.RetainWeekly != 1 {
+		applog.Errorf("cli", "Auto-backup disabled: backup.retain_weekly must be 0 or 1")
+		return
+	}
 	interval, err := time.ParseDuration(cfg.Backup.Interval)
 	if err != nil || interval < 1*time.Hour {
 		interval = 24 * time.Hour
@@ -151,13 +155,17 @@ func runBackupScheduler(ctx context.Context, cfg *config.Config, opts *backup.SQ
 			}
 			location = loaded
 		}
-		applog.Infof("cli", "Auto-backup enabled: daily at %s (%s), retaining %d backups in %s", cfg.Backup.Time, location, retain, opts.BackupDir)
+		if cfg.Backup.RetainWeekly == 1 {
+			applog.Infof("cli", "Auto-backup enabled: daily at %s (%s), retaining three daily dates plus the previous calendar week in %s", cfg.Backup.Time, location, opts.BackupDir)
+		} else {
+			applog.Infof("cli", "Auto-backup enabled: daily at %s (%s), retaining %d backups in %s", cfg.Backup.Time, location, retain, opts.BackupDir)
+		}
 		for {
 			delay := nextScheduledBackupDelayAt(opts.BackupDir, interval, cfg.Backup.Time, location, time.Now())
 			timer := time.NewTimer(delay)
 			select {
 			case <-timer.C:
-				performBackup(ctx, opts, retain, store, exportDir)
+				performBackup(ctx, opts, retain, cfg.Backup.RetainWeekly, location, store, exportDir)
 			case <-ctx.Done():
 				if !timer.Stop() {
 					<-timer.C
@@ -167,7 +175,17 @@ func runBackupScheduler(ctx context.Context, cfg *config.Config, opts *backup.SQ
 		}
 	}
 
-	applog.Infof("cli", "Auto-backup enabled: every %s, retaining %d backups in %s", interval, retain, opts.BackupDir)
+	retentionLocation := time.Local
+	if cfg.Backup.RetainWeekly == 1 {
+		retentionLocation, err = backup.RetentionLocation(cfg.Backup.Timezone)
+		if err != nil {
+			applog.Errorf("cli", "Auto-backup disabled: %v", err)
+			return
+		}
+		applog.Infof("cli", "Auto-backup enabled: every %s, retaining three daily dates plus the previous calendar week in %s", interval, opts.BackupDir)
+	} else {
+		applog.Infof("cli", "Auto-backup enabled: every %s, retaining %d backups in %s", interval, retain, opts.BackupDir)
+	}
 
 	// Preserve the interval across app restarts. A recent backup postpones the
 	// first run until it is actually due; a missing or overdue backup runs after
@@ -178,14 +196,14 @@ func runBackupScheduler(ctx context.Context, cfg *config.Config, opts *backup.SQ
 	case <-ctx.Done():
 		return
 	}
-	performBackup(ctx, opts, retain, store, exportDir)
+	performBackup(ctx, opts, retain, cfg.Backup.RetainWeekly, retentionLocation, store, exportDir)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			performBackup(ctx, opts, retain, store, exportDir)
+			performBackup(ctx, opts, retain, cfg.Backup.RetainWeekly, retentionLocation, store, exportDir)
 		case <-ctx.Done():
 			return
 		}
@@ -201,11 +219,14 @@ func nextScheduledBackupDelay(backupDir string, interval time.Duration, now time
 func nextScheduledBackupDelayAt(backupDir string, interval time.Duration, scheduleTime string, location *time.Location, now time.Time) time.Duration {
 	backups, err := backup.ListBackups(backupDir)
 	if scheduleTime == "" {
-		if err != nil || len(backups) == 0 {
+		if err != nil {
 			return scheduledBackupStartupDelay
 		}
-
-		remaining := interval - now.Sub(backups[0].CreatedAt)
+		latest, ok := latestFullBackup(backups)
+		if !ok {
+			return scheduledBackupStartupDelay
+		}
+		remaining := interval - now.Sub(latest.CreatedAt)
 		if remaining < scheduledBackupStartupDelay {
 			return scheduledBackupStartupDelay
 		}
@@ -221,10 +242,11 @@ func nextScheduledBackupDelayAt(backupDir string, interval time.Duration, schedu
 	}
 	localNow := now.In(location)
 	todaySchedule := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), parsed.Hour(), parsed.Minute(), 0, 0, location)
-	if len(backups) > 0 {
-		latest := backups[0].CreatedAt.In(location)
+	latest, hasFullBackup := latestFullBackup(backups)
+	if hasFullBackup {
+		latest := latest.CreatedAt.In(location)
 		if !latest.Before(todaySchedule) {
-			todaySchedule = todaySchedule.Add(24 * time.Hour)
+			todaySchedule = todaySchedule.AddDate(0, 0, 1)
 		} else if !localNow.Before(todaySchedule) {
 			return scheduledBackupStartupDelay
 		}
@@ -235,7 +257,16 @@ func nextScheduledBackupDelayAt(backupDir string, interval time.Duration, schedu
 	return todaySchedule.Sub(localNow)
 }
 
-func performBackup(ctx context.Context, opts *backup.SQLBackupOptions, retain int, store *storage.Store, exportDir string) {
+func latestFullBackup(backups []backup.BackupInfo) (backup.BackupInfo, bool) {
+	for _, archive := range backups {
+		if !backup.IsPreUpdateBackupFilename(archive.Filename) {
+			return archive, true
+		}
+	}
+	return backup.BackupInfo{}, false
+}
+
+func performBackup(ctx context.Context, opts *backup.SQLBackupOptions, retain, retainWeekly int, retentionLocation *time.Location, store *storage.Store, exportDir string) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -245,7 +276,12 @@ func performBackup(ctx context.Context, opts *backup.SQLBackupOptions, retain in
 	// self-contained rather than trading disk usage for recoverability.
 	applog.Info("cli", "Exporting critical tables...")
 	criticalExported := true
-	if err := store.ExportCriticalTables(ctx, exportDir, retain); err != nil {
+	exportRetain := retain
+	if retainWeekly == 1 {
+		// Calendar-based exports are pruned only after the full archive succeeds.
+		exportRetain = 0
+	}
+	if err := store.ExportCriticalTables(ctx, exportDir, exportRetain); err != nil {
 		criticalExported = false
 		applog.Errorf("cli", "Critical table export failed; scheduled full backup will retain critical table data: %v", err)
 	} else {
@@ -255,13 +291,51 @@ func performBackup(ctx context.Context, opts *backup.SQLBackupOptions, retain in
 	applog.Info("cli", "Starting scheduled backup...")
 	scheduledOpts := scheduledSQLBackupOptions(opts, criticalExported)
 	info, err := backup.CreateSQLBackup(ctx, scheduledOpts, updater.Version)
+	finishScheduledBackup(info, err, opts.BackupDir, exportDir, retain, retainWeekly, retentionLocation, time.Now())
+}
+
+func finishScheduledBackup(info *backup.BackupInfo, err error, backupDir, exportDir string, retain, retainWeekly int, location *time.Location, now time.Time) {
 	if err != nil {
 		applog.Errorf("cli", "Scheduled backup failed: %v", err)
-	} else {
-		applog.Infof("cli", "Backup created: %s (%.1f MB)", info.Filename, float64(info.Size)/(1024*1024))
-		if pruned, _ := backup.PruneBackups(opts.BackupDir, retain); pruned > 0 {
-			applog.Infof("cli", "Pruned %d old backup(s)", pruned)
+		return
+	}
+	if info == nil {
+		applog.Errorf("cli", "Scheduled backup failed: no archive returned")
+		return
+	}
+	applog.Infof("cli", "Backup created: %s (%.1f MB)", info.Filename, float64(info.Size)/(1024*1024))
+	pruneScheduledBackupOutputs(backupDir, exportDir, retain, retainWeekly, location, now)
+}
+
+func pruneScheduledBackupOutputs(backupDir, exportDir string, retain, retainWeekly int, location *time.Location, now time.Time) {
+	pruned, err := backup.PruneBackupsWithPolicy(backupDir, retain, retainWeekly, location, now)
+	if err != nil {
+		applog.Errorf("cli", "Backup retention failed: %v", err)
+		return
+	}
+	if pruned > 0 {
+		applog.Infof("cli", "Pruned %d old backup(s)", pruned)
+	}
+	if retainWeekly != 1 {
+		return
+	}
+
+	backups, err := backup.ListBackups(backupDir)
+	if err != nil {
+		applog.Errorf("cli", "Reading retained backups for critical export retention failed: %v", err)
+		return
+	}
+	archiveTimes := make([]time.Time, 0, len(backups))
+	for _, archive := range backups {
+		if backup.IsPreUpdateBackupFilename(archive.Filename) {
+			continue
 		}
+		archiveTimes = append(archiveTimes, archive.CreatedAt)
+	}
+	if pruned, err := storage.PruneWeeklyCriticalExports(exportDir, location, archiveTimes, now); err != nil {
+		applog.Errorf("cli", "Critical export retention failed: %v", err)
+	} else if pruned > 0 {
+		applog.Infof("cli", "Pruned %d old critical export(s)", pruned)
 	}
 }
 

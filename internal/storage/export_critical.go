@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/SEObserver/crawlobserver/internal/backup"
 )
 
 // CriticalTables lists the non-regenerable tables that must be backed up separately.
@@ -54,6 +56,91 @@ func (s *Store) ExportCriticalTables(ctx context.Context, dir string, retain int
 		return fmt.Errorf("export errors: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+type criticalExportFile struct {
+	name    string
+	path    string
+	modTime time.Time
+}
+
+// PruneWeeklyCriticalExports keeps three distinct local dates, the newest
+// export from the previous calendar week, and the nearest earlier export for
+// every retained full backup. It only removes files with known table names and
+// the export timestamp filename format.
+func PruneWeeklyCriticalExports(dir string, location *time.Location, retainedArchiveTimes []time.Time, now time.Time) (int, error) {
+	if location == nil {
+		return 0, fmt.Errorf("backup timezone is required for weekly critical export retention")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("reading critical export directory: %w", err)
+	}
+	deleted := 0
+	for _, table := range CriticalTables {
+		prefix := table + "_"
+		var files []criticalExportFile
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".jsonl.gz") {
+				continue
+			}
+			timestamp := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".jsonl.gz")
+			if len(timestamp) != len("20060102T150405") {
+				continue
+			}
+			if _, err := time.Parse("20060102T150405", timestamp); err != nil {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return deleted, fmt.Errorf("reading critical export %s: %w", name, err)
+			}
+			files = append(files, criticalExportFile{name: name, path: filepath.Join(dir, name), modTime: info.ModTime()})
+		}
+		sort.Slice(files, func(i, j int) bool {
+			if files[i].modTime.Equal(files[j].modTime) {
+				return files[i].name < files[j].name
+			}
+			return files[i].modTime.After(files[j].modTime)
+		})
+
+		times := make([]time.Time, len(files))
+		for i, file := range files {
+			times[i] = file.modTime
+		}
+		indices, err := backup.CalendarRetentionIndices(times, location, now)
+		if err != nil {
+			return deleted, err
+		}
+		keep := make([]bool, len(files))
+		for _, index := range indices {
+			keep[index] = true
+		}
+
+		for _, archiveTime := range retainedArchiveTimes {
+			for i, file := range files {
+				if !file.modTime.After(archiveTime) {
+					keep[i] = true
+					break
+				}
+			}
+		}
+
+		for i, file := range files {
+			if keep[i] {
+				continue
+			}
+			if err := os.Remove(file.path); err != nil {
+				return deleted, fmt.Errorf("removing critical export %s: %w", file.name, err)
+			}
+			deleted++
+		}
+	}
+	return deleted, nil
 }
 
 func (s *Store) exportCriticalTable(ctx context.Context, dir, table, ts string) error {

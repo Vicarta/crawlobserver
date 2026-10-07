@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/SEObserver/crawlobserver/internal/apikeys"
 	"github.com/SEObserver/crawlobserver/internal/applog"
 	"github.com/SEObserver/crawlobserver/internal/backup"
+	"github.com/SEObserver/crawlobserver/internal/storage"
 	"github.com/SEObserver/crawlobserver/internal/updater"
 )
 
@@ -492,18 +494,23 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 
 	// Auto-backup SQLite + config before applying update
 	if s.BackupOpts != nil && s.BackupOpts.SQLitePath != "" {
+		weeklyRetention := s.cfg != nil && s.cfg.Backup.RetainWeekly == 1
 		preUpdateOpts := backup.BackupOptions{
 			SQLitePath: s.BackupOpts.SQLitePath,
 			ConfigPath: s.BackupOpts.ConfigPath,
 			BackupDir:  s.BackupOpts.BackupDir,
+			PreUpdate:  weeklyRetention,
 		}
-		if info, err := backup.Create(preUpdateOpts, updater.Version); err != nil {
+		info, err := backup.Create(preUpdateOpts, updater.Version)
+		if err != nil {
 			applog.Warnf("server", "pre-update backup failed: %v", err)
 		} else {
 			applog.Infof("server", "Pre-update backup created: %s", info.Filename)
 		}
-		if pruned, _ := backup.PruneBackups(s.BackupOpts.BackupDir, s.backupRetain()); pruned > 0 {
-			applog.Infof("server", "Pruned %d old backup(s)", pruned)
+		if weeklyRetention {
+			applog.Info("server", "Calendar backup pruning deferred until a full archive succeeds")
+		} else {
+			s.pruneBackupRetention(s.BackupOpts.BackupDir, time.Now())
 		}
 	}
 
@@ -571,6 +578,83 @@ func (s *Server) backupRetain() int {
 	return retain
 }
 
+func (s *Server) backupRetentionPolicy() (int, int, *time.Location, error) {
+	retain := s.backupRetain()
+	weekly := 0
+	timezone := ""
+	if s.cfg != nil {
+		weekly = s.cfg.Backup.RetainWeekly
+		timezone = s.cfg.Backup.Timezone
+	}
+	if weekly != 0 && weekly != 1 {
+		return 0, 0, nil, fmt.Errorf("backup.retain_weekly must be 0 or 1")
+	}
+	location := time.Local
+	if weekly == 1 {
+		var err error
+		location, err = backup.RetentionLocation(timezone)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+	}
+	return retain, weekly, location, nil
+}
+
+func (s *Server) pruneBackupRetention(backupDir string, now time.Time) {
+	retain, weekly, location, err := s.backupRetentionPolicy()
+	if err != nil {
+		applog.Errorf("server", "Backup retention failed: %v", err)
+		return
+	}
+	pruned, err := backup.PruneBackupsWithPolicy(backupDir, retain, weekly, location, now)
+	if err != nil {
+		applog.Errorf("server", "Backup retention failed: %v", err)
+		return
+	}
+	if pruned > 0 {
+		applog.Infof("server", "Pruned %d old backup(s)", pruned)
+	}
+	if weekly != 1 {
+		return
+	}
+	archiveTimes, err := s.retainedArchiveTimes(backupDir, retain, weekly, location, now)
+	if err != nil {
+		applog.Errorf("server", "Reading retained backups for critical export retention failed: %v", err)
+		return
+	}
+	if pruned, err := storage.PruneWeeklyCriticalExports(s.criticalExportDir(backupDir), location, archiveTimes, now); err != nil {
+		applog.Errorf("server", "Critical export retention failed: %v", err)
+	} else if pruned > 0 {
+		applog.Infof("server", "Pruned %d old critical export(s)", pruned)
+	}
+}
+
+func (s *Server) retainedArchiveTimes(backupDir string, retain, weekly int, location *time.Location, now time.Time) ([]time.Time, error) {
+	backups, err := backup.ListBackups(backupDir)
+	if err != nil {
+		return nil, err
+	}
+	retained, err := backup.BackupsToRetain(backups, retain, weekly, location, now)
+	if err != nil {
+		return nil, err
+	}
+	times := make([]time.Time, 0, len(retained))
+	for _, archive := range retained {
+		if backup.IsPreUpdateBackupFilename(archive.Filename) {
+			continue
+		}
+		times = append(times, archive.CreatedAt)
+	}
+	return times, nil
+}
+
+func (s *Server) criticalExportDir(backupDir string) string {
+	if s.ExportDir != "" {
+		return s.ExportDir
+	}
+	return filepath.Join(backupDir, "exports")
+}
+
 func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 	if !requireFullAccess(w, r) {
 		return
@@ -584,9 +668,7 @@ func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 			internalError(w, r, err)
 			return
 		}
-		if pruned, _ := backup.PruneBackups(s.SQLBackupOpts.BackupDir, s.backupRetain()); pruned > 0 {
-			applog.Infof("server", "Pruned %d old backup(s)", pruned)
-		}
+		s.pruneBackupRetention(s.SQLBackupOpts.BackupDir, time.Now())
 		w.WriteHeader(http.StatusCreated)
 		writeJSON(w, info)
 		return
@@ -617,9 +699,7 @@ func (s *Server) handleCreateBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if pruned, _ := backup.PruneBackups(s.BackupOpts.BackupDir, s.backupRetain()); pruned > 0 {
-		applog.Infof("server", "Pruned %d old backup(s)", pruned)
-	}
+	s.pruneBackupRetention(s.BackupOpts.BackupDir, time.Now())
 
 	w.WriteHeader(http.StatusCreated)
 	writeJSON(w, info)
@@ -721,14 +801,24 @@ func (s *Server) handleExportCritical(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	applog.Info("server", "Starting critical table export...")
-	retain := s.ExportRetain
-	if retain < 1 {
-		retain = 5
+	retain, weekly, _, err := s.backupRetentionPolicy()
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	if weekly == 1 {
+		retain = 0
+	} else {
+		retain = s.ExportRetain
+		if retain < 1 {
+			retain = 5
+		}
 	}
 	if err := s.store.ExportCriticalTables(r.Context(), s.ExportDir, retain); err != nil {
 		internalError(w, r, err)
 		return
 	}
+	// Calendar-based exports are pruned only after a successful full archive.
 	applog.Info("server", "Critical table export complete")
 	writeJSON(w, map[string]string{"status": "exported", "dir": s.ExportDir})
 }

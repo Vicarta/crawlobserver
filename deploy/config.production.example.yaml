@@ -66,11 +66,12 @@ resend:
 backup:
   enabled: true
   interval: 24h
-  # Optional daily wall-clock schedule. Uses the server's local timezone when omitted.
-  time: ""
-  timezone: ""
+  # Daily wall-clock schedule and retention dates use the same local timezone.
+  time: "00:20"
+  timezone: "Europe/Kyiv"
   dir: /var/backups/crawlobserver
-  retain: 2
+  retain: 3
+  retain_weekly: 1
 
 retention:
   # Keep 0 to disable automatic deletion of old crawl sessions.

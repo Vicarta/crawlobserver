@@ -19,6 +19,7 @@ type BackupOptions struct {
 	SQLitePath string // Path to crawlobserver.db
 	ConfigPath string // Path to config.yaml
 	BackupDir  string // Where to store backups
+	PreUpdate  bool   // Mark a SQLite/config-only pre-update backup in its filename
 }
 
 // BackupInfo describes a backup archive.
@@ -44,6 +45,9 @@ func Create(opts BackupOptions, version string) (*BackupInfo, error) {
 
 	ts := time.Now()
 	name := fmt.Sprintf("backup-%s-%s.tar.gz", version, ts.Format("20060102T150405"))
+	if opts.PreUpdate {
+		name = strings.TrimSuffix(name, ".tar.gz") + "-pre-update.tar.gz"
+	}
 	archivePath := filepath.Join(opts.BackupDir, name)
 
 	f, err := os.Create(archivePath)
@@ -227,17 +231,7 @@ func DeleteBackup(archivePath string) error {
 
 // PruneBackups keeps only the most recent maxKeep backups, deleting older ones.
 func PruneBackups(backupDir string, maxKeep int) (deleted int, err error) {
-	backups, err := ListBackups(backupDir)
-	if err != nil || len(backups) <= maxKeep {
-		return 0, err
-	}
-	// ListBackups returns newest first — delete everything after maxKeep
-	for _, b := range backups[maxKeep:] {
-		if removeErr := os.Remove(b.Path); removeErr == nil {
-			deleted++
-		}
-	}
-	return deleted, nil
+	return PruneBackupsWithPolicy(backupDir, maxKeep, 0, nil, time.Now())
 }
 
 func writeToTar(tw *tar.Writer, name string, data []byte) error {

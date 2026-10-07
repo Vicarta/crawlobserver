@@ -761,8 +761,16 @@ flags. Web UI компілюється в Go binary, тому production не п
   дві останні копії; interval і retention залишаються configurable. Для
   фіксованого щоденного часу можна задати `backup.time` у форматі `HH:MM` і
   `backup.timezone` як IANA timezone; без timezone використовується локальна
-  timezone сервера. App restart не створює зайву копію, якщо останній
-  scheduled archive ще не прострочений.
+  timezone сервера. `backup.retain_weekly: 1` зберігає найновіший archive з
+  трьох різних local dates і найновіший archive попереднього calendar week
+  (Monday-Sunday); overlapping dates deduplicate, а найближчий попередній
+  critical export зберігається для кожного retained archive. Calendar-mode
+  scheduled і manual export не prune-ять exports до успішного full archive;
+  SQLite/config-only pre-update copies are marked `-pre-update` and count
+  against `backup.retain` separately, so they do not displace full archives;
+  existing unmarked copies are not reclassified. `0` залишає count-based
+  `backup.retain`. App restart не
+  створює зайву копію, якщо останній scheduled archive ще не прострочений.
 - Critical-data export є окремим recovery-шляхом. Scheduled full archive зберігає
   DDL `gsc_analytics`, але не дублює її rows, які входять до critical export;
   manual full backup залишається самодостатнім і містить усі таблиці.
