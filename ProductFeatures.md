@@ -774,6 +774,11 @@ flags. Web UI компілюється в Go binary, тому production не п
   видалення TTL рядків відбувається асинхронно під час звичайних merges, тому
   це не є суворою фізичною межею. Файлові логи обмежені 100 MB і трьома
   ротаціями.
+- Host systemd timer підтримує active parts явного allowlist ClickHouse system
+  logs у межах 150,000,000 bytes, видаляючи найстаріший за `event_time` part
+  лише коли сума перевищує бюджет. Це може скоротити історію нижче TTL-вікна;
+  inactive parts очікують звичайного фізичного cleanup ClickHouse, тож диск
+  може тимчасово перевищувати бюджет.
 - Docker JSON logs app і ClickHouse обмежені трьома файлами по 20 MB.
 - Host-side ClickHouse log rotation, compression і триденний retention для
   Docker deployment без restart ClickHouse.

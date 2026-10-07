@@ -252,6 +252,29 @@ them through normal asynchronous TTL materialization during background merges,
 so it is not a strict physical-size cap. Do not force materialization with
 `OPTIMIZE TABLE ... FINAL`.
 
+The same installer also enables a host systemd timer that runs every five
+minutes. It keeps active parts in an explicit allowlist of ClickHouse system
+log tables at or below 150,000,000 bytes (150 MB decimal), dropping the oldest
+active part by its minimum `event_time` only while the active total is over the
+budget. It does not inspect or delete application tables, and it leaves the
+24-hour `query_log` TTL and three-day TTLs unchanged. A dropped part can contain
+newer rows as well as the oldest event, so the budget can shorten available
+history below those TTL windows. `--dry-run` reports the plan without issuing
+DDL:
+
+```bash
+sudo /usr/local/sbin/crawlobserver-clickhouse-system-log-budget --dry-run
+sudo systemctl status crawlobserver-clickhouse-log-budget.timer
+```
+
+The budget is based on active part bytes. Parts made inactive by merges or
+deletion remain visible as `pending_gc_bytes` until ClickHouse releases them;
+the old-parts cleanup lifetime is not changed. Physical disk usage can
+temporarily exceed 150 MB. The job uses `ALTER TABLE ... DROP PART` for one
+validated system-log part at a time, re-reads ClickHouse metadata after each
+drop, and fails if it cannot verify progress. Newly introduced system log
+tables are excluded until explicitly added to the script's literal allowlist.
+
 The app and ClickHouse Docker `json-file` logs are independently capped at
 three 20 MB files. Scheduled application backups default to every 24 hours with
 two retained generations; app restarts preserve the due time instead of

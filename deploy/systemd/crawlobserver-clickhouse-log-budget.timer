@@ -1,0 +1,11 @@
+[Unit]
+Description=Check CrawlObserver ClickHouse system-log size every five minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=1min
+Unit=crawlobserver-clickhouse-log-budget.service
+
+[Install]
+WantedBy=timers.target

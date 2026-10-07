@@ -1,0 +1,8 @@
+[Unit]
+Description=Keep CrawlObserver ClickHouse system logs within a byte budget
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/crawlobserver-clickhouse-system-log-budget --budget-bytes 150000000
+TimeoutStartSec=120s
