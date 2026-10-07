@@ -20,7 +20,7 @@ MAX_QUERY_ROWS = 10_000
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_RUNTIME_SECONDS = 110
 DOCKER_COMMAND_TIMEOUT_SECONDS = 25
-MAX_AGE_SNAPSHOT_ATTEMPTS = 3
+MAX_AGE_SNAPSHOT_ATTEMPTS = 10
 CONTAINER_NAME = "crawlobserver-clickhouse"
 
 # Only persisted ClickHouse system-log tables are eligible. Numeric suffixes

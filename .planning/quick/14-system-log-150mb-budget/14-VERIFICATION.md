@@ -2,7 +2,7 @@
 
 ## Implementation Gates
 
-- 27 fake-client unit tests pass; no fixture invokes Docker, SSH or a real DB.
+- 28 fake-client unit tests pass; no fixture invokes Docker, SSH or a real DB.
 - Python compile and installer shell syntax pass; git diff --check passes.
 - Fresh final Code, Tests and CLI/UX critics: PASS (Sol, high).
 - Builder: Luna, max. Runtime and tests are the builder's sole owned edits.
@@ -15,6 +15,10 @@
   for the same table/name/bytes, and every DROP requires fresh over-budget
   inventory plus complete current age evidence. Merge/TTL/size-change fixtures
   cover the discovered races; no production deletion occurred before review.
+- The first bounded apply made partial progress but safely stopped on live
+  part churn. Age-snapshot attempts are now 10 within the unchanged 110s job
+  deadline; a four-change convergence regression and all three fresh reviews
+  pass. This is a retry-bound correction, not relaxation of any DDL gate.
 
 ## Release Contract
 

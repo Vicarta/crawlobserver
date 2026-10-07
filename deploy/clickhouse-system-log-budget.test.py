@@ -285,7 +285,7 @@ class BudgetValidationTests(unittest.TestCase):
         self.assertEqual(fake.drops, [("query_log", "oldest"), ("query_log", "middle")])
         self.assertEqual(len([sql for sql in fake.queries if "AS oldest_event_time" in sql]), 1)
 
-    def test_repeated_missing_ages_fail_after_three_snapshot_attempts(self):
+    def test_repeated_missing_ages_fail_after_max_snapshot_attempts(self):
         manager, fake = self.manager(
             [part("has_no_age", 60), part("has_age", 50)],
             {("query_log", "has_age"): 1},
@@ -293,16 +293,22 @@ class BudgetValidationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(budget.BudgetError, "kept changing"):
             manager.run()
-        self.assertEqual(len([sql for sql in fake.queries if "AS oldest_event_time" in sql]), 3)
+        self.assertEqual(
+            len([sql for sql in fake.queries if "AS oldest_event_time" in sql]),
+            budget.MAX_AGE_SNAPSHOT_ATTEMPTS,
+        )
         self.assertEqual(fake.drops, [])
 
     def test_repeated_identity_churn_is_bounded_and_never_drops(self):
         manager, fake = self.manager(
             [part("changing_0_1_1_0", 200)],
-            {("query_log", f"changing_{i}_1_1_0"): i for i in range(5)},
+            {
+                ("query_log", f"changing_{i}_1_1_0"): i
+                for i in range(budget.MAX_AGE_SNAPSHOT_ATTEMPTS + 1)
+            },
             budget_bytes=100,
         )
-        sequence = iter(range(1, 4))
+        sequence = iter(range(1, budget.MAX_AGE_SNAPSHOT_ATTEMPTS + 1))
 
         def rename_part():
             fake.parts[0]["name"] = f"changing_{next(sequence)}_1_1_0"
@@ -310,8 +316,33 @@ class BudgetValidationTests(unittest.TestCase):
         fake.before_age_query = rename_part
         with self.assertRaisesRegex(budget.BudgetError, "kept changing"):
             manager.run()
-        self.assertEqual(len([sql for sql in fake.queries if "AS oldest_event_time" in sql]), 3)
+        self.assertEqual(
+            len([sql for sql in fake.queries if "AS oldest_event_time" in sql]),
+            budget.MAX_AGE_SNAPSHOT_ATTEMPTS,
+        )
         self.assertEqual(fake.drops, [])
+
+    def test_snapshot_discovery_converges_after_four_identity_changes(self):
+        manager, fake = self.manager(
+            [part("changing_0_1_1_0", 200)],
+            {
+                ("query_log", f"changing_{i}_1_1_0"): i
+                for i in range(budget.MAX_AGE_SNAPSHOT_ATTEMPTS + 1)
+            },
+            budget_bytes=100,
+        )
+        changes = iter(range(1, 5))
+
+        def change_identity_four_times():
+            try:
+                fake.parts[0]["name"] = f"changing_{next(changes)}_1_1_0"
+            except StopIteration:
+                fake.before_age_query = None
+
+        fake.before_age_query = change_identity_four_times
+        self.assertEqual(manager.run(), 0)
+        self.assertEqual(fake.drops, [("query_log", "changing_4_1_1_0")])
+        self.assertEqual(len([sql for sql in fake.queries if "AS oldest_event_time" in sql]), 5)
 
     def test_duplicate_age_rows_fail_closed(self):
         manager, fake = self.manager(

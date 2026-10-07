@@ -778,7 +778,9 @@ flags. Web UI компілюється в Go binary, тому production не п
   logs у межах 150,000,000 bytes, видаляючи найстаріший за `event_time` part
   лише коли сума перевищує бюджет. Це може скоротити історію нижче TTL-вікна;
   inactive parts очікують звичайного фізичного cleanup ClickHouse, тож диск
-  може тимчасово перевищувати бюджет.
+  може тимчасово перевищувати бюджет. Age discovery повторюється до десяти разів
+  під час churn; тривала нестабільність завершує oneshot видимою помилкою systemd,
+  а наступний timer tick повторює перевірку.
 - Docker JSON logs app і ClickHouse обмежені трьома файлами по 20 MB.
 - Host-side ClickHouse log rotation, compression і триденний retention для
   Docker deployment без restart ClickHouse.

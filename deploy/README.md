@@ -272,7 +272,9 @@ deletion remain visible as `pending_gc_bytes` until ClickHouse releases them;
 the old-parts cleanup lifetime is not changed. Physical disk usage can
 temporarily exceed 150 MB. The job uses `ALTER TABLE ... DROP PART` for one
 validated system-log part at a time, re-reads ClickHouse metadata after each
-drop, and fails if it cannot verify progress. Newly introduced system log
+drop, and fails if it cannot verify progress. Age discovery retries up to ten
+times during part churn; continued churn fails the oneshot visibly in systemd,
+and the next timer tick retries it. Newly introduced system log
 tables are excluded until explicitly added to the script's literal allowlist.
 
 The app and ClickHouse Docker `json-file` logs are independently capped at
