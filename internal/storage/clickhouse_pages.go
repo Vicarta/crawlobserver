@@ -1895,20 +1895,20 @@ func (s *Store) ComputePageRankWithOptions(ctx context.Context, sessionID string
 	// 5. PageRank iteration + normalization
 	rank := ComputePageRankIterations(n, outLinks, totalOutLinks, edgeWeights)
 
-	// 7. Write back via temp table + single mutation (avoids 100s of mutations)
+	// 7. Write back via the attempt-scoped table and foreground insert.
 	if !isValidUUID(sessionID) {
 		return fmt.Errorf("invalid session ID: %s", sessionID)
 	}
 
-	tmpTable := fmt.Sprintf("crawlobserver.tmp_pagerank_%s", strings.ReplaceAll(sessionID, "-", ""))
-	if err := s.conn.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)); err != nil {
-		return fmt.Errorf("dropping old temp pagerank table: %w", err)
-	}
+	tmpTable := fmt.Sprintf("crawlobserver.tmp_pagerank_%s_%s",
+		strings.ReplaceAll(sessionID, "-", ""), strings.ReplaceAll(attempt.AttemptID, "-", ""))
 	if err := s.conn.Exec(ctx, fmt.Sprintf("CREATE TABLE %s (page_url String, new_pagerank Float64) ENGINE = Join(ANY, LEFT, page_url)", tmpTable)); err != nil {
 		return fmt.Errorf("creating temp pagerank table: %w", err)
 	}
 	defer func() {
-		if err := s.conn.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.conn.Exec(cleanupCtx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)); err != nil {
 			applog.Warnf("storage", "cleanup temp table %s: %v", tmpTable, err)
 		}
 	}()
@@ -1954,17 +1954,19 @@ func (s *Store) ComputePageRankWithOptions(ctx context.Context, sessionID string
 		}
 	}
 
-	// Use joinGet to look up pagerank from the Join-engine temp table.
-	// Single mutation, no data copy, no correlated subquery.
-	query := fmt.Sprintf(`ALTER TABLE crawlobserver.pages UPDATE
-		pagerank = joinGet('%s', 'new_pagerank', url),
-		pagerank_revision = toUUID(?)
-		IN PARTITION tuple(toUUID(?))
+	// Insert the FINAL rows with only the PageRank fields replaced. Keeping
+	// crawled_at unchanged lets ReplacingMergeTree select this newer insert
+	// without changing the stored crawl timestamp.
+	query := fmt.Sprintf(`INSERT INTO crawlobserver.pages
+		SELECT * REPLACE (
+			joinGet('%s', 'new_pagerank', url) AS pagerank,
+			toUUID(?) AS pagerank_revision
+		)
+		FROM crawlobserver.pages FINAL
 		WHERE crawl_session_id = ?
-		SETTINGS mutations_sync = 1`,
-		tmpTable)
-	if err := s.conn.Exec(ctx, query, attempt.AttemptID, sessionID, sessionID); err != nil {
-		return fmt.Errorf("updating pagerank via joinGet: %w", err)
+		SETTINGS async_insert = 0`, tmpTable)
+	if err := s.conn.Exec(ctx, query, attempt.AttemptID, sessionID); err != nil {
+		return fmt.Errorf("writing pagerank via joinGet: %w", err)
 	}
 	if _, err := s.finalizeComputedPageRankEvidence(ctx, attempt, before.Graph); err != nil {
 		return fmt.Errorf("verifying pagerank evidence: %w", err)

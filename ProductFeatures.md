@@ -120,11 +120,15 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
 - Terminal session status публікується після recompute depth, Internal PageRank
   і near-duplicate analytics, щоб downstream quality gates читали завершені
   derived metrics.
-- Depth і Internal PageRank mutations обмежені партицією своєї сесії та
-  синхронно очікують її завершення, а не обробки історичних сесій. PageRank
-  отримує окремий обмежений context після count/depth; їхній таймаут не
-  витрачає його бюджет. Durable finalized evidence залишається обов'язковим
-  для успішної фіналізації; збої зберігаються як `completed_with_errors`.
+- Depth mutation обмежена партицією своєї сесії та синхронно очікує її
+  завершення. PageRank записує session-scoped `FINAL` rows через
+  `INSERT ... SELECT`, не очікуючи сторонні queued mutations у `pages`, і
+  зберігає початковий `crawled_at`. Він отримує окремий обмежений context
+  після count/depth; їхній таймаут не витрачає його бюджет. Durable finalized
+  evidence залишається обов'язковим для успішної фіналізації; помилки
+  фіналізації PageRank для незупинених crawl завершуються як
+  `completed_with_errors`, тоді як фактичний stopped status зберігається як
+  `stopped`.
 - Session list/detail API додає response-only `effective_origin` та
   `effective_origin_state`; Daily Delta також може додати
   `effective_origin_others`. `proven` походить лише з durable launched-request
@@ -419,8 +423,8 @@ shared rendered metadata shell diagnostics без site-specific правил.
 - Кожна спроба розрахунку має append-only evidence зі станом `started`,
   `finalized` або `failed`, джерелом, версіями алгоритму/predicate, fingerprint
   graph/rank та кількістю eligible/positive/zero сторінок.
-- `finalized` публікується лише після `FINAL`-перевірки synchronous ClickHouse
-  mutation; новіша pending/failed evidence закриває доступ до старої finalized
+- `finalized` публікується лише після `FINAL`-перевірки записаної PageRank
+  revision; новіша pending/failed evidence закриває доступ до старої finalized
   revision для downstream trust decisions.
 - Історичній завершеній сесії можна детерміновано додати
   `observed_existing` evidence після подвійної read-only перевірки наявних rank;
