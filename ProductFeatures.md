@@ -769,8 +769,11 @@ flags. Web UI компілюється в Go binary, тому production не п
 - Session retention scheduler.
 - ClickHouse працює з logger level `information`; `trace_log`,
   `processors_profile_log` і невикористаний OpenTelemetry span log не
-  зберігаються постійно. Решта operational system logs мають
-  триденний TTL, файлові логи обмежені 100 MB і трьома ротаціями.
+  зберігаються постійно. `system.query_log` має rolling 24-hour TTL за
+  `event_time`; решта operational system logs мають триденний TTL. Фізичне
+  видалення TTL рядків відбувається асинхронно під час звичайних merges, тому
+  це не є суворою фізичною межею. Файлові логи обмежені 100 MB і трьома
+  ротаціями.
 - Docker JSON logs app і ClickHouse обмежені трьома файлами по 20 MB.
 - Host-side ClickHouse log rotation, compression і триденний retention для
   Docker deployment без restart ClickHouse.

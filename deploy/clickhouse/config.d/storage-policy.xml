@@ -12,7 +12,7 @@
 
     <!-- Operational system logs keep only the evidence needed for recent incidents. -->
     <query_log>
-        <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>
+        <ttl>event_time + INTERVAL 24 HOUR DELETE</ttl>
     </query_log>
     <query_thread_log>
         <ttl>event_date + INTERVAL 3 DAY DELETE</ttl>

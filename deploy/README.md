@@ -219,7 +219,8 @@ The policy:
 - uses ClickHouse logger level `information` and native `100 MB x 3` file
   rotation;
 - disables continuously persisted `trace_log` and `processors_profile_log`;
-- applies a three-day TTL to operational ClickHouse system logs;
+- applies a rolling 24-hour TTL to `system.query_log` using `event_time`; other
+  operational system logs retain their three-day TTL;
 - rotates `clickhouse-server.log` and `clickhouse-server.err.log` daily or at
   100 MB;
 - compresses rotated files;
@@ -227,6 +228,29 @@ The policy:
 - uses `copytruncate`, so ClickHouse does not need to restart;
 - removes old numeric archives created by ClickHouse's native size-based
   rotation.
+
+The mounted XML policy is persisted for future ClickHouse startups, but changing
+it alone does not update an existing `system.query_log` table's metadata. Apply
+the TTL to the existing table with a live ALTER; no app or ClickHouse restart is
+required. Before this load-producing TTL mutation, run the existing no-`FORCE`
+preflight and stop if it fails or reports active/queued crawls:
+
+```bash
+if cd deploy && FORCE=0 CHECK_ONLY=1 ./restart-app-safe.sh; then
+  docker compose --env-file .env exec -T clickhouse sh -lc \
+    'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --query "$1"' \
+    sh 'ALTER TABLE system.query_log MODIFY TTL event_time + INTERVAL 24 HOUR DELETE'
+else
+  printf '%s\n' 'Preflight failed; query_log TTL was not changed.' >&2
+fi
+```
+
+This uses the existing container-side credential pattern; do not put the
+ClickHouse password in the SQL, shell command, or logs. The 24-hour TTL makes
+rows eligible for deletion after their `event_time` expires; ClickHouse removes
+them through normal asynchronous TTL materialization during background merges,
+so it is not a strict physical-size cap. Do not force materialization with
+`OPTIMIZE TABLE ... FINAL`.
 
 The app and ClickHouse Docker `json-file` logs are independently capped at
 three 20 MB files. Scheduled application backups default to every 24 hours with
