@@ -32,11 +32,28 @@ and do not displace or postpone full backups. Archive contents/API unchanged.
 
 ## Production Acceptance Contract
 
-Deployment pending. Require no-force safety gate before app image build and
-again after build, safe app-only restart, health response status=ok, unchanged
-healthy ClickHouse identity and SELECT 1=1, and scheduler log with 00:20
-Europe/Kyiv and three dates plus previous week. Compare archive/export names,
-sizes and modification times before/after; no acceptance-time archive cleanup.
+Deployed 2026-10-07 from implementation commit
+`1fd86a710d5f02816e34e81d26b2b423c7b95671`. Both no-force safety gates passed;
+only app was rebuilt/recreated. API health returned status=ok. ClickHouse
+remained healthy, with identical container ID and start time, SELECT 1=1.
+Existing archive/export names, sizes and modification times are unchanged.
+No live crawl/rescan/backup/restore or acceptance-time archive cleanup occurred.
+
+Scheduler startup readback:
+`daily at 00:20 (Europe/Kyiv), retaining three daily dates plus the previous calendar week`.
+Production config parsed back as retain=3 / retain_weekly=1, enabled=true,
+interval=24h; structured comparison proved no other config changes.
+Unexpected startup-error scan: zero matching lines.
+
+App image: `sha256:ec973c67d6d606989be28175a870024dde61eda3b650c1fdc1d58b0c8b928fe8`.
+App container: `62d700a1a3c973173d1a8e0735621b362ac8a332830e22efa3c9226e672f9df0`,
+started 2026-10-07T12:49:45.423493852Z.
+Unchanged ClickHouse: `685ab71b0245ebfbcb339fa3ab6dd5fe404aec72e4d7602056ecbf4eb0cf5078`,
+started 2026-10-04T01:30:46.812520785Z.
+Restricted rollback source/config copies are retained under
+`/opt/crawlobserver/app/.deploy-backups/backup-retention-1fd86a710d5f02816e34e81d26b2b423c7b95671`.
+Production npm install reported existing dependency audit warnings; no dependency
+updates were included in this bounded retention release.
 
 Only two SQL archive/export generations (local October 6 and 7) exist before
 release. There is no previous-week backup to reconstruct; future successful
