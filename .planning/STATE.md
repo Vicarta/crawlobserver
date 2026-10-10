@@ -1,5 +1,14 @@
 # GSD State
 
+## Quick 17 Release (2026-10-10)
+
+Robots eligibility before Daily Delta launch implemented, independently
+reviewed, tested, committed/pushed (`4f44ab2`) and deployed app-only through
+both no-force active-crawl gates. Health OK; ClickHouse identity unchanged,
+healthy, SELECT 1 PASS. Quality coverage stays 100 percent. Historical sessions
+unchanged; no live crawl/rescan. See quick/17-delta-robots-plan-eligibility
+PLAN, VERIFICATION and SUMMARY for evidence and explicit limitations.
+
 ## Project Reference
 
 See: `.planning/PROJECT.md` (updated 2026-05-29)
