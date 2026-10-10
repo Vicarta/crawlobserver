@@ -41,6 +41,9 @@ type deltaPreview struct {
 	SitemapPublishedDifferences         *int                          `json:"sitemap_published_differences,omitempty"`
 	SitemapActionable                   *int                          `json:"sitemap_actionable,omitempty"`
 	SitemapStableAcknowledged           *int                          `json:"sitemap_stable_acknowledged,omitempty"`
+	RobotsExcludedCandidates            int                           `json:"robots_excluded_candidates"`
+	RobotsExcludedSampleURLs            []string                      `json:"robots_excluded_sample_urls,omitempty"`
+	RobotsExcludedSources               map[string][]string           `json:"robots_excluded_sources,omitempty"`
 	HeldPublicationReason               string                        `json:"held_publication_reason,omitempty"`
 }
 
@@ -60,6 +63,7 @@ type deltaCandidateResult struct {
 	sitemapURLRows           []storage.SitemapURLRow
 	sitemapRefresh           *config.DeltaSitemapRefresh
 	sitemapSelection         *config.DeltaSitemapSelection
+	sitemapRobotsExcluded    map[string]struct{}
 	heldPublicationReason    string
 	preview                  deltaPreview
 }
@@ -619,7 +623,8 @@ func (s *Server) validateDeltaLaunchReservation(ctx context.Context, projectID s
 		}
 		return fmt.Errorf("%w: raw sitemap proof is unavailable: %v", errDeltaLaunchEvidenceStale, err)
 	}
-	reloaded := SelectDeltaSitemapCandidates(deltaSitemapSelectionInput(projectID, lineage, result.sitemapRefresh, result.sitemapURLRows, terms, result.settings, result.baseline))
+	reloadedInput := deltaSitemapSelectionInput(projectID, lineage, result.sitemapRefresh, result.sitemapURLRows, terms, result.settings, result.baseline)
+	reloaded, _ := selectDeltaSitemapCandidatesWithRobotsExclusions(reloadedInput, result.sitemapRobotsExcluded)
 	expected := deltaSitemapSelectionConfig(reloaded, terms, lineage, result.sitemapRefresh.FetchedAt)
 	if !deltaSitemapSelectionReservationMatches(selection, expected) {
 		return fmt.Errorf("%w: sitemap proof pair, digest, or URL partition changed", errDeltaLaunchEvidenceStale)
@@ -789,6 +794,9 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 	var sitemapRefresh *config.DeltaSitemapRefresh
 	var sitemapSelection *config.DeltaSitemapSelection
 	var sitemapCanaryURLs []string
+	var robots deltaRobotsChecker
+	sitemapRobotsExcluded := map[string]struct{}{}
+	robotsExcludedSources := map[string]map[string]struct{}{}
 	heldPublicationReason := ""
 	if settings.SourceSitemap {
 		terms, termsErr := s.store.LoadDeltaSitemapTerms(ctx, projectID, lineage.CurrentSessionID, lineage.SourceSessionID, deltaSitemapComparisonLimit)
@@ -803,11 +811,20 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 			return nil, refreshErr
 		}
 		sitemapRefresh = refreshed.Refresh
+		robots = refreshed.robots
 		sitemapRows = refreshed.SitemapRows
 		sitemapURLRows = refreshed.SitemapURLRows
 		switch sitemapRefresh.Mode {
 		case deltaSitemapRefreshFresh:
-			selection := SelectDeltaSitemapCandidates(deltaSitemapSelectionInput(projectID, lineage, sitemapRefresh, refreshed.SitemapURLRows, terms, settings, baseline))
+			selectionInput := deltaSitemapSelectionInput(projectID, lineage, sitemapRefresh, refreshed.SitemapURLRows, terms, settings, baseline)
+			if settings.RespectRobotsTxt {
+				if robots == nil {
+					robots = newDeltaRobotsCache(s.deltaRobotsCrawlerConfig(baseline))
+				}
+				sitemapRobotsExcluded = deltaRobotsExcludedURLs(selectionInput.Fresh, robots)
+			}
+			selection, excludedSitemapSources := selectDeltaSitemapCandidatesWithRobotsExclusions(selectionInput, sitemapRobotsExcluded)
+			mergeDeltaRobotsExcludedSources(robotsExcludedSources, excludedSitemapSources)
 			sitemapSelection = deltaSitemapSelectionConfig(selection, terms, lineage, sitemapRefresh.FetchedAt)
 			selected := make([]string, 0, len(selection.Selected))
 			for _, candidate := range selection.Selected {
@@ -862,6 +879,14 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 
 	scope := baselineCrawlScope(baseline)
 	filteredAll := filterDeltaURLs(candidates, baseline.SeedURLs, scope, settings)
+	if settings.RespectRobotsTxt {
+		if robots == nil {
+			robots = newDeltaRobotsCache(s.deltaRobotsCrawlerConfig(baseline))
+		}
+		var robotsExcluded map[string]struct{}
+		filteredAll, robotsExcluded = filterDeltaCandidatesByRobots(filteredAll, robots, nil)
+		mergeDeltaRobotsExcludedCandidateSources(robotsExcludedSources, robotsExcluded, sourceSets)
+	}
 	knownSet, err := s.deltaKnownURLSet(ctx, baseline.ID, settings)
 	if err != nil {
 		return nil, err
@@ -920,6 +945,7 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 	if len(sample) > 20 {
 		sample = sample[:20]
 	}
+	robotsExcludedCount, robotsExcludedSampleURLs, robotsExcludedSourceSample := deltaRobotsExclusionSummary(robotsExcludedSources)
 	preview := deltaPreview{
 		ProjectID:                           projectID,
 		BaselineSessionID:                   baseline.ID,
@@ -933,6 +959,9 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 		SampleURLs:                          sample,
 		SitemapRefresh:                      cloneDeltaSitemapRefresh(sitemapRefresh),
 		SitemapSelection:                    cloneDeltaSitemapSelection(sitemapSelection),
+		RobotsExcludedCandidates:            robotsExcludedCount,
+		RobotsExcludedSampleURLs:            robotsExcludedSampleURLs,
+		RobotsExcludedSources:               robotsExcludedSourceSample,
 		HeldPublicationReason:               heldPublicationReason,
 	}
 	if sitemapSelection != nil {
@@ -954,6 +983,7 @@ func (s *Server) buildDeltaCandidatesLocked(ctx context.Context, projectID strin
 		sitemapURLRows:           sitemapURLRows,
 		sitemapRefresh:           cloneDeltaSitemapRefresh(sitemapRefresh),
 		sitemapSelection:         cloneDeltaSitemapSelection(sitemapSelection),
+		sitemapRobotsExcluded:    sitemapRobotsExcluded,
 		heldPublicationReason:    heldPublicationReason,
 		preview:                  preview,
 	}, nil
@@ -1213,6 +1243,9 @@ func (s *Server) deltaCrawlRequest(result *deltaCandidateResult) (crawler.CrawlR
 			CandidateSources:                    copyStringSliceMap(result.candidateSources),
 			SitemapRefresh:                      cloneDeltaSitemapRefresh(result.sitemapRefresh),
 			SitemapSelection:                    cloneDeltaSitemapSelection(result.sitemapSelection),
+			RobotsExcludedCandidates:            result.preview.RobotsExcludedCandidates,
+			RobotsExcludedSampleURLs:            append([]string(nil), result.preview.RobotsExcludedSampleURLs...),
+			RobotsExcludedSources:               copyStringSliceMap(result.preview.RobotsExcludedSources),
 		},
 		InitialSitemaps:              copySitemapRows(result.sitemapRows),
 		InitialSitemapURLs:           copySitemapURLRows(result.sitemapURLRows),

@@ -490,6 +490,11 @@ shared rendered metadata shell diagnostics без site-specific правил.
   `Last-Modified` validators. Якщо server
   відповідає `304 Not Modified`, Delta зберігає raw response evidence без
   parsing/rendering/resource/extraction/link-discovery work.
+- Коли `Respect robots.txt` увімкнено, robot-disallowed execution candidates
+  вилучаються до sitemap і global run limits, не рахуються як deferred і не
+  споживають manual queue. Raw sitemap observations та stable publication holds
+  залишаються незміненими; Preview і збережений plan показують кількість,
+  обмежений URL sample та candidate sources виключень.
 - URL policy: canonical host, trailing slash, fragments, tracking/query params,
   allowed params та allow/block patterns.
 - Confirmation policies для scope change і full recrawl.

@@ -27,6 +27,7 @@ type deltaSitemapRefreshResult struct {
 	Candidates     []string
 	SitemapRows    []storage.SitemapRow
 	SitemapURLRows []storage.SitemapURLRow
+	robots         *fetcher.RobotsCache
 }
 
 // refreshDeltaSitemap obtains one complete sitemap observation before a Delta
@@ -43,12 +44,12 @@ func (s *Server) refreshDeltaSitemap(ctx context.Context, baseline *storage.Craw
 	}
 
 	crawlerCfg := s.deltaCrawlerConfig(baseline)
-	dialOpts := fetcher.DialOptions{
-		SourceIP:        crawlerCfg.SourceIP,
-		ForceIPv4:       crawlerCfg.ForceIPv4,
-		AllowPrivateIPs: crawlerCfg.AllowPrivateIPs,
+	robotsCfg := crawlerCfg
+	if settings != nil && settings.RespectRobotsTxt {
+		robotsCfg = s.deltaRobotsCrawlerConfig(baseline)
 	}
-	robots := fetcher.NewRobotsCache(crawlerCfg.UserAgent, crawlerCfg.Timeout, dialOpts, fetcher.TLSProfile(crawlerCfg.TLSProfile))
+	robots := newDeltaRobotsCache(robotsCfg)
+	dialOpts := deltaDialOptions(crawlerCfg)
 	for _, seed := range baseline.SeedURLs {
 		// IsAllowed primes the cache. The return value is irrelevant here: sitemap
 		// declarations are an independent robots.txt capability.
@@ -60,16 +61,25 @@ func (s *Server) refreshDeltaSitemap(ctx context.Context, baseline *storage.Craw
 		roots = stableUniqueURLs(robots.SitemapFallbackURLs())
 	}
 	if len(roots) == 0 {
-		return s.deltaSitemapRefreshFailure(ctx, baseline.ID, baselineURLs, settings, time.Now().UTC(), "no declared or conventional sitemap URLs were available")
+		result, err := s.deltaSitemapRefreshFailure(ctx, baseline.ID, baselineURLs, settings, time.Now().UTC(), "no declared or conventional sitemap URLs were available")
+		if result != nil {
+			result.robots = robots
+		}
+		return result, err
 	}
 
 	client := fetcher.New(crawlerCfg.UserAgent, crawlerCfg.Timeout, crawlerCfg.MaxBodySize, dialOpts, fetcher.TLSProfile(crawlerCfg.TLSProfile)).Client()
 	observation := fetcher.ObserveSitemaps(ctx, client, crawlerCfg.UserAgent, roots)
 	if !observation.Complete {
-		return s.deltaSitemapRefreshFailure(ctx, baseline.ID, baselineURLs, settings, observation.FetchedAt, sitemapObservationWarning(observation))
+		result, err := s.deltaSitemapRefreshFailure(ctx, baseline.ID, baselineURLs, settings, observation.FetchedAt, sitemapObservationWarning(observation))
+		if result != nil {
+			result.robots = robots
+		}
+		return result, err
 	}
 
 	result := &deltaSitemapRefreshResult{
+		robots: robots,
 		Refresh: &config.DeltaSitemapRefresh{
 			Mode:                deltaSitemapRefreshFresh,
 			FetchedAt:           observation.FetchedAt,

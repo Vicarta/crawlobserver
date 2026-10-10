@@ -77,6 +77,160 @@ func TestRefreshDeltaSitemapUsesConfiguredRootAndExcludesHistoricalURL(t *testin
 	}
 }
 
+func TestBuildDeltaCandidatesFiltersRobotsBeforeBudgetAndKeepsManualQueuePending(t *testing.T) {
+	robotsDisallow := "/order/"
+	robotsRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/robots.txt":
+			robotsRequests++
+			_, _ = w.Write([]byte("User-agent: delta-test-bot\nDisallow: " + robotsDisallow + "\n"))
+		case "/sitemap.xml":
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<urlset><url><loc>` + serverURL(r) + `/order/first</loc></url><url><loc>` + serverURL(r) + `/allowed/second</loc></url><url><loc>` + serverURL(r) + `/allowed/third</loc></url></urlset>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	fixture := newDeltaLaunchFixture(t)
+	fixture.server.cfg.Crawler.Timeout = 2 * time.Second
+	fixture.server.cfg.Crawler.AllowPrivateIPs = true
+	fixture.baseline.SeedURLs = []string{server.URL + "/"}
+	saved, err := json.Marshal(config.Config{Crawler: config.CrawlerConfig{
+		Timeout: 2 * time.Second, UserAgent: "delta-test-bot", CrawlScope: "host",
+		AllowPrivateIPs: true, SitemapURLs: []string{server.URL + "/sitemap.xml"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.baseline.Config = string(saved)
+	store := fixture.server.store.(qualitySnapshotServerStore).mockStore
+	store.deltaProblemURLs = []string{server.URL + "/order/problem"}
+	store.deltaSitemapTerms = &storage.DeltaSitemapTerms{
+		Raw:       storage.DeltaSitemapObservation{SessionID: "raw-observation", ObservedAt: time.Now().UTC()},
+		Published: storage.DeltaSitemapObservation{SessionID: fixture.baseline.ID},
+	}
+	manualURL := server.URL + "/order/manual"
+	if _, err := fixture.keyStore.AddProjectDeltaManualURLs(fixture.projectID, []string{manualURL}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.settings.SourceSitemap = true
+	fixture.settings.SourceManualQueue = true
+	fixture.settings.RespectRobotsTxt = true
+	fixture.settings.MaxCandidatesPerRun = 2
+	fixture.settings.MaxChangedPagesPerRun = 2
+	fixture.settings.MaxNewPagesPerRun = 2
+	fixture.settings.SitemapChangedLimit = 2
+	fixture.settings.SitemapCanaryCount = 0
+	if _, err := fixture.keyStore.SaveProjectDeltaSettings(*fixture.settings); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := fixture.server.buildDeltaCandidates(context.Background(), fixture.projectID)
+	if err != nil {
+		t.Fatalf("buildDeltaCandidates() error = %v", err)
+	}
+	wantURLs := []string{server.URL + "/allowed/second", server.URL + "/allowed/third"}
+	if !reflect.DeepEqual(result.urls, wantURLs) {
+		t.Fatalf("planned URLs = %#v, want allowed siblings filling cap %#v", result.urls, wantURLs)
+	}
+	selection := result.preview.SitemapSelection
+	if selection == nil || selection.EventTotal != 2 || selection.EventSelected != 2 || selection.EventDeferred != 0 || !selection.SelectionComplete {
+		t.Fatalf("sitemap selection = %#v, want complete eligible event set", selection)
+	}
+	if selection.PublishedDifferenceTotal != 3 || selection.ActionableTotal != 2 || selection.SourceByURL[server.URL+"/order/first"] != "" {
+		t.Fatalf("sitemap evidence or execution accounting = %#v", selection)
+	}
+	if result.preview.SitemapRefresh.FreshURLCount != 3 || result.preview.SitemapRefresh.RawURLRowCount != 3 || len(result.sitemapURLRows) != 3 {
+		t.Fatalf("raw sitemap observation changed by execution filtering: refresh=%#v rows=%d", result.preview.SitemapRefresh, len(result.sitemapURLRows))
+	}
+	if result.preview.TotalCandidates != 2 || result.preview.WillLaunch != 2 || result.preview.LaunchLimit != 2 || result.preview.Deferred != 0 {
+		t.Fatalf("plan counts = %#v, want two allowed URLs and no deferred work", result.preview)
+	}
+	if result.preview.BySource["sitemap"] != 2 || result.preview.BySource["manual_queue"] != 1 || result.preview.BySource["problem_pages"] != 1 {
+		t.Fatalf("raw source counts = %#v", result.preview.BySource)
+	}
+	if result.preview.RobotsExcludedCandidates != 3 || !reflect.DeepEqual(result.preview.RobotsExcludedSampleURLs, []string{
+		server.URL + "/order/first", manualURL, server.URL + "/order/problem",
+	}) {
+		t.Fatalf("robot exclusion summary = count %d, URLs %#v", result.preview.RobotsExcludedCandidates, result.preview.RobotsExcludedSampleURLs)
+	}
+	if !reflect.DeepEqual(result.preview.RobotsExcludedSources[server.URL+"/order/first"], []string{DeltaSitemapSourceAdded}) ||
+		!reflect.DeepEqual(result.preview.RobotsExcludedSources[manualURL], []string{"manual_queue"}) ||
+		!reflect.DeepEqual(result.preview.RobotsExcludedSources[server.URL+"/order/problem"], []string{"problem_pages"}) {
+		t.Fatalf("robot exclusion source provenance = %#v", result.preview.RobotsExcludedSources)
+	}
+	if len(result.manual) != 0 {
+		t.Fatalf("blocked manual URLs were marked consumed: %#v", result.manual)
+	}
+	pending, err := fixture.keyStore.ListProjectDeltaManualURLs(fixture.projectID, 10)
+	if err != nil || !reflect.DeepEqual(pending, []string{manualURL}) {
+		t.Fatalf("blocked manual queue = %#v, error %v; want item pending", pending, err)
+	}
+	request, err := fixture.server.deltaCrawlRequest(result)
+	if err != nil {
+		t.Fatalf("deltaCrawlRequest() error = %v", err)
+	}
+	if request.MaxPages != 2 || request.DeltaPlan == nil || request.DeltaPlan.LaunchedCandidates != 2 || request.DeltaPlan.TotalCandidates != 2 ||
+		request.DeltaPlan.DeferredCandidates != 0 || request.DeltaPlan.LaunchLimit != 2 || request.DeltaPlan.RobotsExcludedCandidates != 3 {
+		t.Fatalf("immutable delta plan = %#v", request.DeltaPlan)
+	}
+	if !reflect.DeepEqual(request.DeltaPlan.LaunchedURLs, wantURLs) || !reflect.DeepEqual(request.DeltaPlan.RobotsExcludedSampleURLs, result.preview.RobotsExcludedSampleURLs) {
+		t.Fatalf("persisted plan URLs/exclusions = %#v / %#v", request.DeltaPlan.LaunchedURLs, request.DeltaPlan.RobotsExcludedSampleURLs)
+	}
+	if err := fixture.server.validateDeltaLaunchReservation(context.Background(), fixture.projectID, result); err != nil {
+		t.Fatalf("plan-time robots exclusions made reservation stale: %v", err)
+	}
+	if robotsRequests != 1 {
+		t.Fatalf("robots.txt requests = %d, want one shared plan-time cache fetch", robotsRequests)
+	}
+
+	robotsDisallow = "/"
+	allBlocked, err := fixture.server.buildDeltaCandidates(context.Background(), fixture.projectID)
+	if err != nil {
+		t.Fatalf("build all-blocked plan: %v", err)
+	}
+	if allBlocked.preview.WillLaunch != 0 || len(allBlocked.urls) != 0 || allBlocked.preview.Deferred != 0 {
+		t.Fatalf("all-blocked plan = %#v / %#v, want no launch and no deferred work", allBlocked.preview, allBlocked.urls)
+	}
+	if _, _, err := fixture.server.launchDeltaCandidateLocked(context.Background(), fixture.projectID, allBlocked); !errors.Is(err, errDeltaLaunchNoCandidates) {
+		t.Fatalf("all-blocked launch error = %v, want no candidates", err)
+	}
+}
+
+func TestDeltaRobotsRespectDisabledIncludesBlockedCandidateWithoutFetch(t *testing.T) {
+	robotsRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/robots.txt" {
+			robotsRequests++
+			_, _ = w.Write([]byte("User-agent: *\nDisallow: /blocked\n"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	fixture := newDeltaLaunchFixture(t)
+	fixture.baseline.SeedURLs = []string{server.URL + "/"}
+	fixture.server.store.(qualitySnapshotServerStore).mockStore.deltaProblemURLs = []string{server.URL + "/blocked/page"}
+	fixture.settings.RespectRobotsTxt = false
+	if _, err := fixture.keyStore.SaveProjectDeltaSettings(*fixture.settings); err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.server.buildDeltaCandidates(context.Background(), fixture.projectID)
+	if err != nil {
+		t.Fatalf("buildDeltaCandidates() error = %v", err)
+	}
+	if !reflect.DeepEqual(result.urls, []string{server.URL + "/blocked/page"}) || result.preview.RobotsExcludedCandidates != 0 {
+		t.Fatalf("robots-disabled plan = URLs %#v, exclusions %d", result.urls, result.preview.RobotsExcludedCandidates)
+	}
+	if robotsRequests != 0 {
+		t.Fatalf("robots.txt requests = %d with RespectRobotsTxt disabled, want none", robotsRequests)
+	}
+}
+
 func TestDeltaSitemapRefreshFailureSkipsByDefaultAndFallbackIsExplicit(t *testing.T) {
 	settings := apikeys.DefaultProjectDeltaSettings("project-di")
 	store := &mockStore{deltaSitemapURLs: []string{"https://example.com/old"}}
@@ -303,6 +457,209 @@ func TestDeltaSitemapSelectionConfigPersistsV2StabilityProvenance(t *testing.T) 
 	}
 	if got.SourceByURL["https://example.test/stable"] != DeltaSitemapSourceStableUnpublished {
 		t.Fatalf("v2 source provenance = %#v", got.SourceByURL)
+	}
+}
+
+func TestDeltaRobotsExclusionFillsSitemapBudgetAndPreservesStableEvidence(t *testing.T) {
+	blockedEvent := "https://example.test/a-blocked-event"
+	allowedEvent1 := "https://example.test/b-allowed-event"
+	allowedEvent2 := "https://example.test/c-allowed-event"
+	blockedCanary := "https://example.test/d-blocked-canary"
+	allowedCanary := "https://example.test/e-allowed-canary"
+	blockedStable := "https://example.test/z-blocked-stable"
+	input := DeltaSitemapSelectionInput{
+		Fresh: []DeltaSitemapSelectionURL{
+			{URL: blockedEvent, LastMod: "2026-10-10"},
+			{URL: allowedEvent1, LastMod: "2026-10-10"},
+			{URL: allowedEvent2, LastMod: "2026-10-10"},
+			{URL: blockedCanary, LastMod: "2026-10-10"},
+			{URL: allowedCanary, LastMod: "2026-10-10"},
+			{URL: blockedStable, LastMod: "2026-10-10"},
+		},
+		Published: []DeltaSitemapSelectionURL{
+			{URL: blockedCanary, LastMod: "2026-10-10"},
+			{URL: allowedCanary, LastMod: "2026-10-10"},
+			{URL: blockedStable, LastMod: "2026-10-01"},
+		},
+		Stable:        []DeltaSitemapStabilityProof{{URL: blockedStable, LastMod: "2026-10-10"}},
+		ChangedLimit:  2,
+		CanaryCount:   1,
+		MaxCandidates: 3,
+	}
+
+	selection, excludedSources := selectDeltaSitemapCandidatesWithRobotsExclusions(input, map[string]struct{}{
+		blockedEvent: {}, blockedCanary: {}, blockedStable: {},
+	})
+	if selection.EventTotal != 2 || selection.EventSelected != 2 || selection.EventDeferred != 0 || !selection.SelectionComplete {
+		t.Fatalf("eligible event accounting = %#v; blocked event must not consume budget or become deferred", selection)
+	}
+	if selection.PublishedDifferenceTotal != 4 || selection.ActionableTotal != 2 || selection.StableAcknowledgedTotal != 1 || !selection.PublicationHeld {
+		t.Fatalf("raw/stable sitemap evidence changed by execution filtering: %#v", selection)
+	}
+	if selection.SourceByURL[blockedEvent] != "" || selection.SourceByURL[blockedCanary] != "" {
+		t.Fatalf("robot-blocked execution URLs remain in selected provenance: %#v", selection.SourceByURL)
+	}
+	if selection.SourceByURL[blockedStable] != DeltaSitemapSourceStableUnpublished {
+		t.Fatalf("stable evidence was removed by robots exclusion: %#v", selection.SourceByURL)
+	}
+	if selection.SourceByURL[allowedCanary] != DeltaSitemapSourceCanary || selection.CanarySelected != 1 {
+		t.Fatalf("eligible canary did not fill remaining capacity: %#v", selection)
+	}
+	if excludedSources[blockedEvent] != DeltaSitemapSourceAdded {
+		t.Fatalf("excluded event provenance = %#v", excludedSources)
+	}
+}
+
+func TestFilterDeltaCandidatesByRobotsHonorsExactAgentAllowOverridesQueryAndHosts(t *testing.T) {
+	userAgents := make(chan string, 4)
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/robots.txt" {
+			userAgents <- r.Header.Get("User-Agent")
+			_, _ = w.Write([]byte("User-agent: *\nDisallow: /wildcard\nUser-agent: DeltaBot\nDisallow: /private\nAllow: /private/open\n"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/robots.txt" {
+			userAgents <- r.Header.Get("User-Agent")
+			_, _ = w.Write([]byte("User-agent: *\nDisallow: /private\n"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer second.Close()
+
+	robots := newDeltaRobotsCache(config.CrawlerConfig{UserAgent: "DeltaBot", Timeout: 2 * time.Second, AllowPrivateIPs: true})
+	candidates := []string{
+		first.URL + "/private/order?source=1",
+		first.URL + "/private/open?source=1",
+		first.URL + "/wildcard",
+		second.URL + "/private/order",
+	}
+	got, excluded := filterDeltaCandidatesByRobots(candidates, robots, nil)
+	want := []string{first.URL + "/private/open?source=1", first.URL + "/wildcard"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("robot-filtered URLs = %#v, want %#v", got, want)
+	}
+	if len(excluded) != 2 {
+		t.Fatalf("excluded URLs = %#v, want both disallowed paths across hosts", excluded)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case userAgent := <-userAgents:
+			if userAgent != "DeltaBot" {
+				t.Fatalf("robots User-Agent = %q, want exact configured value", userAgent)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("robots.txt was not requested for each origin")
+		}
+	}
+}
+
+func TestDeltaRobotsCrawlerConfigMatchesManagerOverrides(t *testing.T) {
+	tests := []struct {
+		name    string
+		runtime config.CrawlerConfig
+		saved   config.CrawlerConfig
+		want    config.CrawlerConfig
+	}{
+		{
+			name: "saved request fields override runtime values",
+			runtime: config.CrawlerConfig{
+				Timeout: 8 * time.Second, UserAgent: "runtime-bot", TLSProfile: "runtime-tls",
+				SourceIP: "203.0.113.10", AllowPrivateIPs: true,
+			},
+			saved: config.CrawlerConfig{
+				Timeout: time.Millisecond, UserAgent: "saved-bot", TLSProfile: "saved-tls",
+				SourceIP: "198.51.100.10", ForceIPv4: true, AllowPrivateIPs: false,
+			},
+			want: config.CrawlerConfig{
+				Timeout: 8 * time.Second, UserAgent: "saved-bot", TLSProfile: "saved-tls",
+				SourceIP: "198.51.100.10", ForceIPv4: true, AllowPrivateIPs: true,
+			},
+		},
+		{
+			name: "empty request fields fall back to runtime values",
+			runtime: config.CrawlerConfig{
+				Timeout: 8 * time.Second, UserAgent: "runtime-bot", TLSProfile: "runtime-tls",
+				SourceIP: "203.0.113.10", ForceIPv4: true, AllowPrivateIPs: true,
+			},
+			saved: config.CrawlerConfig{
+				Timeout: time.Millisecond, AllowPrivateIPs: false,
+			},
+			want: config.CrawlerConfig{
+				Timeout: 8 * time.Second, UserAgent: "runtime-bot", TLSProfile: "runtime-tls",
+				SourceIP: "203.0.113.10", ForceIPv4: true, AllowPrivateIPs: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			saved, err := json.Marshal(config.Config{Crawler: tt.saved})
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := &Server{cfg: &config.Config{Crawler: tt.runtime}}
+			got := srv.deltaRobotsCrawlerConfig(&storage.CrawlSession{Config: string(saved)})
+			if got.Timeout != tt.want.Timeout || got.UserAgent != tt.want.UserAgent ||
+				got.TLSProfile != tt.want.TLSProfile || got.SourceIP != tt.want.SourceIP ||
+				got.ForceIPv4 != tt.want.ForceIPv4 || got.AllowPrivateIPs != tt.want.AllowPrivateIPs {
+				t.Fatalf("effective robots config = %#v, want fields from %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildDeltaCandidatesUsesRuntimeRobotsNetworkSettings(t *testing.T) {
+	robotsUserAgent := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/robots.txt" {
+			http.NotFound(w, r)
+			return
+		}
+		robotsUserAgent <- r.Header.Get("User-Agent")
+		time.Sleep(25 * time.Millisecond)
+		_, _ = w.Write([]byte("User-agent: saved-bot\nDisallow: /blocked\n"))
+	}))
+	defer server.Close()
+
+	fixture := newDeltaLaunchFixture(t)
+	fixture.server.cfg.Crawler = config.CrawlerConfig{
+		Timeout: 2 * time.Second, UserAgent: "runtime-bot", AllowPrivateIPs: true, CrawlScope: "host",
+	}
+	fixture.baseline.SeedURLs = []string{server.URL + "/"}
+	saved, err := json.Marshal(config.Config{Crawler: config.CrawlerConfig{
+		Timeout: time.Nanosecond, UserAgent: "saved-bot", AllowPrivateIPs: false,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.baseline.Config = string(saved)
+	fixture.server.store.(qualitySnapshotServerStore).mockStore.deltaProblemURLs = []string{server.URL + "/blocked/page"}
+	fixture.settings.SourceSitemap = false
+	fixture.settings.RespectRobotsTxt = true
+	if _, err := fixture.keyStore.SaveProjectDeltaSettings(*fixture.settings); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := fixture.server.buildDeltaCandidates(context.Background(), fixture.projectID)
+	if err != nil {
+		t.Fatalf("buildDeltaCandidates() error = %v", err)
+	}
+	if len(result.urls) != 0 || result.preview.RobotsExcludedCandidates != 1 ||
+		!reflect.DeepEqual(result.preview.RobotsExcludedSampleURLs, []string{server.URL + "/blocked/page"}) {
+		t.Fatalf("plan URLs/exclusions = %#v / %#v, want one robots-excluded candidate", result.urls, result.preview)
+	}
+	select {
+	case got := <-robotsUserAgent:
+		if got != "saved-bot" {
+			t.Fatalf("robots User-Agent = %q, want saved-bot as the non-empty launch override", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("robots.txt was not requested")
 	}
 }
 
@@ -736,6 +1093,7 @@ func newDeltaLaunchFixture(t *testing.T) *deltaLaunchFixture {
 	settings.SourceProblemPages = true
 	settings.SourceStalePages = false
 	settings.SourceManualQueue = false
+	settings.RespectRobotsTxt = false
 	settings.MaxCandidatesPerRun = 10
 	settings.MaxChangedPagesPerRun = 10
 	settings.MaxNewPagesPerRun = 10
@@ -961,6 +1319,7 @@ func TestDeltaPlanningSerializesLineageAndCandidateReadsAgainstPromotion(t *test
 	settings.SourceProblemPages = true
 	settings.SourceStalePages = false
 	settings.SourceManualQueue = false
+	settings.RespectRobotsTxt = false
 	settings.MaxDiscoveredPagesPerRun = 0
 	if _, err := keyStore.SaveProjectDeltaSettings(settings); err != nil {
 		t.Fatal(err)

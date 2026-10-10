@@ -102,6 +102,9 @@ type DeltaPlanConfig struct {
 	CandidateSources                    map[string][]string    `json:"candidate_sources,omitempty" mapstructure:"candidate_sources"`
 	SitemapRefresh                      *DeltaSitemapRefresh   `json:"sitemap_refresh,omitempty" mapstructure:"sitemap_refresh"`
 	SitemapSelection                    *DeltaSitemapSelection `json:"sitemap_selection,omitempty" mapstructure:"sitemap_selection"`
+	RobotsExcludedCandidates            int                    `json:"robots_excluded_candidates,omitempty" mapstructure:"robots_excluded_candidates"`
+	RobotsExcludedSampleURLs            []string               `json:"robots_excluded_sample_urls,omitempty" mapstructure:"robots_excluded_sample_urls"`
+	RobotsExcludedSources               map[string][]string    `json:"robots_excluded_sources,omitempty" mapstructure:"robots_excluded_sources"`
 }
 
 // DeltaSitemapSelection records the immutable bounded changed-only selection
