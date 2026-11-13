@@ -94,14 +94,19 @@ type exportPage struct {
 }
 
 type exportLink struct {
-	SourceURL    string    `json:"source_url"`
-	TargetURL    string    `json:"target_url"`
-	AnchorText   string    `json:"anchor_text"`
-	Rel          string    `json:"rel"`
-	IsInternal   bool      `json:"is_internal"`
-	Tag          string    `json:"tag"`
-	LinkLocation string    `json:"link_location,omitempty"`
-	CrawledAt    time.Time `json:"crawled_at"`
+	SourceURL      string    `json:"source_url"`
+	TargetURL      string    `json:"target_url"`
+	AnchorText     string    `json:"anchor_text"`
+	Rel            string    `json:"rel"`
+	IsInternal     bool      `json:"is_internal"`
+	Tag            string    `json:"tag"`
+	LinkLocation   string    `json:"link_location,omitempty"`
+	Landmark       string    `json:"landmark"`
+	XPath          string    `json:"xpath"`
+	Depth          uint16    `json:"depth"`
+	DocumentIndex  uint32    `json:"document_index"`
+	BlockSignature uint64    `json:"block_signature,string"`
+	CrawledAt      time.Time `json:"crawled_at"`
 }
 
 type exportRobots struct {
@@ -283,7 +288,8 @@ func (s *Store) exportPages(ctx context.Context, enc *json.Encoder, sessionID st
 
 func (s *Store) exportLinks(ctx context.Context, enc *json.Encoder, sessionID string) error {
 	query := `
-		SELECT source_url, target_url, anchor_text, rel, is_internal, tag, link_location, crawled_at
+		SELECT source_url, target_url, anchor_text, rel, is_internal, tag, link_location,
+		       landmark, xpath, depth, document_index, block_signature, crawled_at
 		FROM crawlobserver.links
 		WHERE crawl_session_id = ?
 		ORDER BY source_url, target_url
@@ -298,7 +304,8 @@ func (s *Store) exportLinks(ctx context.Context, enc *json.Encoder, sessionID st
 		count := 0
 		for rows.Next() {
 			var l exportLink
-			if err := rows.Scan(&l.SourceURL, &l.TargetURL, &l.AnchorText, &l.Rel, &l.IsInternal, &l.Tag, &l.LinkLocation, &l.CrawledAt); err != nil {
+			if err := rows.Scan(&l.SourceURL, &l.TargetURL, &l.AnchorText, &l.Rel, &l.IsInternal, &l.Tag,
+				&l.LinkLocation, &l.Landmark, &l.XPath, &l.Depth, &l.DocumentIndex, &l.BlockSignature, &l.CrawledAt); err != nil {
 				rows.Close()
 				return fmt.Errorf("scanning link: %w", err)
 			}

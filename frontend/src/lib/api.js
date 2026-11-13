@@ -64,6 +64,11 @@
  * @property {string} TargetURL
  * @property {string} AnchorText
  * @property {string} Tag
+ * @property {string} Landmark
+ * @property {string} XPath
+ * @property {number} Depth
+ * @property {number} DocumentIndex
+ * @property {string} BlockSignature
  */
 
 /**

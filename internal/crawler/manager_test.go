@@ -22,6 +22,66 @@ func newTestManager(maxSessions int) *Manager {
 	}
 }
 
+func TestApplySavedCrawlerConfigLinkPositionOptIn(t *testing.T) {
+	tests := []struct {
+		name       string
+		current    bool
+		saved      bool
+		newSession bool
+		want       bool
+	}{
+		{name: "existing session requires both opt-ins", current: true, saved: true, want: true},
+		{name: "process opt-out disables existing session", current: false, saved: true, want: false},
+		{name: "existing session opt-out stays disabled", current: true, saved: false, want: false},
+		{name: "new full recrawl uses current opt-in", current: true, saved: false, newSession: true, want: true},
+		{name: "new full recrawl respects process opt-out", current: false, saved: true, newSession: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{Crawler: config.CrawlerConfig{StoreLinkPosition: tt.current}}
+			applySavedCrawlerConfig(cfg, config.CrawlerConfig{StoreLinkPosition: tt.saved}, tt.newSession)
+			if cfg.Crawler.StoreLinkPosition != tt.want {
+				t.Errorf("StoreLinkPosition = %t, want %t", cfg.Crawler.StoreLinkPosition, tt.want)
+			}
+		})
+	}
+}
+
+func TestRestoreSavedCrawlerConfigLinkPositionOptIn(t *testing.T) {
+	tests := []struct {
+		name             string
+		serialized       string
+		newSession       bool
+		wantLinkPosition bool
+		wantMaxPages     int
+		wantStoreHTML    bool
+	}{
+		{name: "empty existing session config disables opt-in", wantLinkPosition: false, wantMaxPages: 77, wantStoreHTML: true},
+		{name: "malformed existing session config disables opt-in", serialized: `{"crawler":`, wantLinkPosition: false, wantMaxPages: 77, wantStoreHTML: true},
+		{name: "malformed full recrawl keeps process config", serialized: `{"crawler":`, newSession: true, wantLinkPosition: true, wantMaxPages: 77, wantStoreHTML: true},
+		{name: "legacy saved config without flag stays opt-out", serialized: `{"Crawler":{"MaxPages":23,"StoreHTML":false}}`, wantLinkPosition: false, wantMaxPages: 23, wantStoreHTML: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{Crawler: config.CrawlerConfig{
+				MaxPages:          77,
+				StoreHTML:         true,
+				StoreLinkPosition: true,
+			}}
+			restoreSavedCrawlerConfig(cfg, tt.serialized, tt.newSession)
+			if cfg.Crawler.StoreLinkPosition != tt.wantLinkPosition {
+				t.Errorf("StoreLinkPosition = %t, want %t", cfg.Crawler.StoreLinkPosition, tt.wantLinkPosition)
+			}
+			if cfg.Crawler.MaxPages != tt.wantMaxPages {
+				t.Errorf("MaxPages = %d, want %d", cfg.Crawler.MaxPages, tt.wantMaxPages)
+			}
+			if cfg.Crawler.StoreHTML != tt.wantStoreHTML {
+				t.Errorf("StoreHTML = %t, want %t", cfg.Crawler.StoreHTML, tt.wantStoreHTML)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // NewManager
 // ---------------------------------------------------------------------------

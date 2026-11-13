@@ -1196,7 +1196,8 @@ func (s *Store) GetPageLinks(ctx context.Context, sessionID, url string, outLimi
 
 	// Outbound links (paginated)
 	outRows, err := s.conn.Query(ctx, `
-		SELECT crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag, crawled_at
+		SELECT crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag,
+		       landmark, xpath, depth, document_index, block_signature, crawled_at
 		FROM crawlobserver.links
 		WHERE crawl_session_id = ? AND source_url = ?
 		ORDER BY target_url
@@ -1208,7 +1209,8 @@ func (s *Store) GetPageLinks(ctx context.Context, sessionID, url string, outLimi
 	for outRows.Next() {
 		var l LinkRow
 		if err := outRows.Scan(&l.CrawlSessionID, &l.SourceURL, &l.TargetURL, &l.AnchorText,
-			&l.Rel, &l.IsInternal, &l.Tag, &l.CrawledAt); err != nil {
+			&l.Rel, &l.IsInternal, &l.Tag, &l.Landmark, &l.XPath,
+			&l.Depth, &l.DocumentIndex, &l.BlockSignature, &l.CrawledAt); err != nil {
 			return nil, fmt.Errorf("scanning outbound link: %w", err)
 		}
 		result.OutLinks = append(result.OutLinks, l)
@@ -1219,7 +1221,8 @@ func (s *Store) GetPageLinks(ctx context.Context, sessionID, url string, outLimi
 
 	// Inbound links (paginated)
 	inRows, err := s.conn.Query(ctx, `
-		SELECT crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag, crawled_at
+		SELECT crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag,
+		       landmark, xpath, depth, document_index, block_signature, crawled_at
 		FROM crawlobserver.links
 		WHERE crawl_session_id = ? AND target_url = ?
 		ORDER BY source_url
@@ -1231,7 +1234,8 @@ func (s *Store) GetPageLinks(ctx context.Context, sessionID, url string, outLimi
 	for inRows.Next() {
 		var l LinkRow
 		if err := inRows.Scan(&l.CrawlSessionID, &l.SourceURL, &l.TargetURL, &l.AnchorText,
-			&l.Rel, &l.IsInternal, &l.Tag, &l.CrawledAt); err != nil {
+			&l.Rel, &l.IsInternal, &l.Tag, &l.Landmark, &l.XPath,
+			&l.Depth, &l.DocumentIndex, &l.BlockSignature, &l.CrawledAt); err != nil {
 			return nil, fmt.Errorf("scanning inbound link: %w", err)
 		}
 		result.InLinks = append(result.InLinks, l)
@@ -1977,6 +1981,28 @@ func (s *Store) ComputePageRankWithOptions(ctx context.Context, sessionID string
 }
 
 func (s *Store) refreshLinkLocations(ctx context.Context, sessionID string, footerSelectors []string) error {
+	positionEnabledSources := make(map[string]bool)
+	positionRows, err := s.conn.Query(ctx, `
+		SELECT DISTINCT source_url
+		FROM crawlobserver.links
+		WHERE crawl_session_id = ? AND xpath != ''`, sessionID)
+	if err != nil {
+		return fmt.Errorf("querying existing link positions: %w", err)
+	}
+	for positionRows.Next() {
+		var sourceURL string
+		if err := positionRows.Scan(&sourceURL); err != nil {
+			positionRows.Close()
+			return fmt.Errorf("scanning existing link position source: %w", err)
+		}
+		positionEnabledSources[sourceURL] = true
+	}
+	if err := positionRows.Err(); err != nil {
+		positionRows.Close()
+		return fmt.Errorf("iterating existing link position sources: %w", err)
+	}
+	positionRows.Close()
+
 	rows, err := s.conn.Query(ctx, `
 		SELECT url, body_html, crawled_at
 		FROM crawlobserver.pages FINAL
@@ -1997,6 +2023,7 @@ func (s *Store) refreshLinkLocations(ctx context.Context, sessionID string, foot
 		pageURLs = append(pageURLs, pageURL)
 		data, err := parser.ParseWithOptions([]byte(bodyHTML), pageURL, parser.ParseOptions{
 			FooterSelectors: footerSelectors,
+			LinkPosition:    positionEnabledSources[pageURL],
 		})
 		if err != nil {
 			return fmt.Errorf("parsing stored HTML for %s: %w", pageURL, err)
@@ -2011,6 +2038,11 @@ func (s *Store) refreshLinkLocations(ctx context.Context, sessionID string, foot
 				IsInternal:     l.IsInternal,
 				Tag:            l.Tag,
 				LinkLocation:   l.Location,
+				Landmark:       l.Landmark,
+				XPath:          l.XPath,
+				Depth:          l.Depth,
+				DocumentIndex:  l.DocumentIndex,
+				BlockSignature: l.BlockSignature,
 				CrawledAt:      crawledAt,
 			})
 		}

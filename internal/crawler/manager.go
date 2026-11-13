@@ -37,10 +37,29 @@ const (
 	stopReasonShutdown     = "shutdown"
 )
 
-func applySavedCrawlerConfig(cfg *config.Config, saved config.CrawlerConfig) {
+func applySavedCrawlerConfig(cfg *config.Config, saved config.CrawlerConfig, newSession bool) {
 	cloudflareAPIKey := cfg.Crawler.Cloudflare.APIKey
+	currentLinkPositionOptIn := cfg.Crawler.StoreLinkPosition
 	cfg.Crawler = saved
 	cfg.Crawler.Cloudflare.APIKey = cloudflareAPIKey
+	if newSession {
+		cfg.Crawler.StoreLinkPosition = currentLinkPositionOptIn
+	} else {
+		cfg.Crawler.StoreLinkPosition = currentLinkPositionOptIn && saved.StoreLinkPosition
+	}
+}
+
+func restoreSavedCrawlerConfig(cfg *config.Config, serialized string, newSession bool) {
+	if serialized != "" {
+		var savedCfg config.Config
+		if err := json.Unmarshal([]byte(serialized), &savedCfg); err == nil {
+			applySavedCrawlerConfig(cfg, savedCfg.Crawler, newSession)
+			return
+		}
+	}
+	if !newSession {
+		cfg.Crawler.StoreLinkPosition = false
+	}
 }
 
 func boolPtr(v bool) *bool {
@@ -478,12 +497,7 @@ func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string
 
 	// Restore config from original session so UA, TLS profile, etc. are preserved
 	cfg := *m.cfg
-	if originalSession.Config != "" {
-		var savedCfg config.Config
-		if err := json.Unmarshal([]byte(originalSession.Config), &savedCfg); err == nil {
-			applySavedCrawlerConfig(&cfg, savedCfg.Crawler)
-		}
-	}
+	restoreSavedCrawlerConfig(&cfg, originalSession.Config, fullRecrawl)
 	if overrides != nil {
 		crawlerCfg := cfg.Crawler
 		if overrides.MaxPages > 0 {
@@ -680,12 +694,7 @@ func (m *Manager) RetryFailed(sessionID string, overrides *CrawlRequest) (int, e
 
 	// Restore config from original session so UA, TLS profile, etc. are preserved
 	cfg := *m.cfg
-	if originalSession.Config != "" {
-		var savedCfg config.Config
-		if err := json.Unmarshal([]byte(originalSession.Config), &savedCfg); err == nil {
-			applySavedCrawlerConfig(&cfg, savedCfg.Crawler)
-		}
-	}
+	restoreSavedCrawlerConfig(&cfg, originalSession.Config, false)
 	if overrides != nil {
 		crawlerCfg := cfg.Crawler
 		if overrides.MaxDepth > 0 {
@@ -811,12 +820,7 @@ func (m *Manager) RescanPages(sessionID string, urls []string) (int, error) {
 	}
 
 	cfg := *m.cfg
-	if originalSession.Config != "" {
-		var savedCfg config.Config
-		if err := json.Unmarshal([]byte(originalSession.Config), &savedCfg); err == nil {
-			applySavedCrawlerConfig(&cfg, savedCfg.Crawler)
-		}
-	}
+	restoreSavedCrawlerConfig(&cfg, originalSession.Config, false)
 	cfg.Crawler.MaxPages = len(uniqueURLs)
 	if cfg.Crawler.Workers <= 0 || cfg.Crawler.Workers > len(uniqueURLs) {
 		cfg.Crawler.Workers = len(uniqueURLs)

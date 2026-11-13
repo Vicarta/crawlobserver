@@ -433,6 +433,11 @@ type LinkRow struct {
 	IsInternal     bool
 	Tag            string
 	LinkLocation   string
+	Landmark       string
+	XPath          string
+	Depth          uint16
+	DocumentIndex  uint32
+	BlockSignature uint64 `json:"BlockSignature,string"`
 	CrawledAt      time.Time
 }
 

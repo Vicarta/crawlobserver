@@ -18,10 +18,20 @@ type Link struct {
 	IsInternal bool
 	Tag        string // "a", "link", "area", etc.
 	Location   string // "body", "footer"
+
+	Landmark       string
+	XPath          string
+	Depth          uint16
+	DocumentIndex  uint32
+	BlockSignature uint64
 }
 
-func extractLinks(doc *goquery.Document, baseURL *url.URL, footerSelectors []string) []Link {
+func extractLinks(doc *goquery.Document, baseURL *url.URL, opts ParseOptions) []Link {
 	var links []Link
+	var xpathCache *xpathIndexCache
+	if opts.LinkPosition {
+		xpathCache = newXPathIndexCache()
+	}
 
 	doc.Find("a, area").Each(func(_ int, s *goquery.Selection) {
 		href, exists := htmlutil.Attr(s, "href")
@@ -44,14 +54,24 @@ func extractLinks(doc *goquery.Document, baseURL *url.URL, footerSelectors []str
 		rel, _ := htmlutil.Attr(s, "rel")
 		tag := goquery.NodeName(s)
 
-		links = append(links, Link{
+		link := Link{
 			TargetURL:  resolved,
 			AnchorText: strings.TrimSpace(s.Text()),
 			Rel:        strings.TrimSpace(rel),
 			IsInternal: isInternal(baseURL, resolved),
 			Tag:        tag,
-			Location:   linkLocation(s, footerSelectors),
-		})
+			Location:   linkLocation(s, opts.FooterSelectors),
+		}
+		if opts.LinkPosition && len(links) < DefaultMaxLinkPositions {
+			if position, ok := positionForLink(s.Nodes[0], xpathCache); ok {
+				link.Landmark = position.landmark
+				link.XPath = position.xpath
+				link.Depth = position.depth
+				link.DocumentIndex = uint32(len(links))
+				link.BlockSignature = position.blockSignature
+			}
+		}
+		links = append(links, link)
 	})
 
 	return links

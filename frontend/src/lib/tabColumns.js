@@ -42,7 +42,7 @@ export const TAB_FILTERS = {
     'fetch_duration_ms',
   ],
   redirects: ['url', 'status_code', 'final_url'],
-  internal: ['source_url', 'target_url', 'anchor_text', 'tag'],
+  internal: ['source_url', 'target_url', 'anchor_text', 'tag', 'landmark', 'xpath'],
 };
 
 // SVG path data for each tab icon (24x24 viewBox, stroke-based)

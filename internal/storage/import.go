@@ -298,6 +298,11 @@ func linkFromExport(sessionID string, l *exportLink) LinkRow {
 		IsInternal:     l.IsInternal,
 		Tag:            l.Tag,
 		LinkLocation:   normalizeLinkLocation(l.LinkLocation),
+		Landmark:       l.Landmark,
+		XPath:          l.XPath,
+		Depth:          l.Depth,
+		DocumentIndex:  l.DocumentIndex,
+		BlockSignature: l.BlockSignature,
 		CrawledAt:      crawledAt,
 	}
 }

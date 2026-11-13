@@ -175,8 +175,28 @@
       );
       downloadCSV(
         'links-internal.csv',
-        ['Source URL', 'Target URL', 'Anchor Text', 'Tag'],
-        ['SourceURL', 'TargetURL', 'AnchorText', 'Tag'],
+        [
+          'Source URL',
+          'Target URL',
+          'Anchor Text',
+          'Tag',
+          'Landmark',
+          'XPath',
+          'Depth',
+          'Document Index',
+          'Block Signature',
+        ],
+        [
+          'SourceURL',
+          'TargetURL',
+          'AnchorText',
+          'Tag',
+          'Landmark',
+          'XPath',
+          'Depth',
+          'DocumentIndex',
+          'BlockSignature',
+        ],
         allData,
       );
     }
@@ -232,6 +252,8 @@
         { label: t('common.target'), sortKey: 'target_url' },
         { label: t('session.anchorText'), sortKey: 'anchor_text' },
         { label: t('session.tag'), sortKey: 'tag' },
+        { label: 'Landmark', sortKey: 'landmark' },
+        { label: 'XPath', sortKey: 'xpath' },
       ]}
       filterKeys={TAB_FILTERS.internal}
       {filters}
@@ -267,6 +289,8 @@
           >
           <td class="cell-title">{l.AnchorText || '-'}</td>
           <td>{l.Tag}</td>
+          <td>{l.Landmark || '-'}</td>
+          <td class="cell-xpath" title={l.XPath}>{l.XPath || '-'}</td>
         </tr>
       {/snippet}
     </DataTable>
@@ -332,5 +356,14 @@
 <style>
   .links-explorer {
     padding: 24px;
+  }
+
+  .cell-xpath {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.85em;
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

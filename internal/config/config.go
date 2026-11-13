@@ -59,6 +59,7 @@ type CrawlerConfig struct {
 	MaxBodySize           int64            `mapstructure:"max_body_size"`
 	RespectRobots         bool             `mapstructure:"respect_robots"`
 	StoreHTML             bool             `mapstructure:"store_html"`
+	StoreLinkPosition     bool             `mapstructure:"store_link_position"`
 	CrawlScope            string           `mapstructure:"crawl_scope"`             // "host" (default), "domain" (eTLD+1), or "subdirectory"
 	AllowPrivateIPs       bool             `mapstructure:"allow_private_ips"`       // allow crawling private/reserved IPs (default: false)
 	TLSProfile            string           `mapstructure:"tls_profile"`             // "", "chrome", "firefox", "edge"
@@ -306,6 +307,7 @@ func SetDefaults() {
 	viper.SetDefault("crawler.max_body_size", 10*1024*1024) // 10MB
 	viper.SetDefault("crawler.respect_robots", true)
 	viper.SetDefault("crawler.store_html", false)
+	viper.SetDefault("crawler.store_link_position", false)
 	viper.SetDefault("crawler.crawl_scope", "host")
 	viper.SetDefault("crawler.allow_private_ips", false)
 	viper.SetDefault("crawler.max_concurrent_sessions", 20)

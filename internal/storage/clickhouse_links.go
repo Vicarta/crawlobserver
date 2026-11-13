@@ -16,7 +16,8 @@ func (s *Store) InsertLinks(ctx context.Context, links []LinkRow) error {
 	batch, err := s.conn.PrepareBatch(ctx, `
 		INSERT INTO crawlobserver.links (
 			crawl_session_id, source_url, target_url, anchor_text, rel,
-			is_internal, tag, link_location, crawled_at
+			is_internal, tag, link_location, landmark, xpath, depth,
+			document_index, block_signature, crawled_at
 		)`)
 	if err != nil {
 		return fmt.Errorf("preparing links batch: %w", err)
@@ -25,7 +26,8 @@ func (s *Store) InsertLinks(ctx context.Context, links []LinkRow) error {
 	for _, l := range links {
 		if err := batch.Append(
 			l.CrawlSessionID, l.SourceURL, l.TargetURL, l.AnchorText, l.Rel,
-			l.IsInternal, l.Tag, normalizeLinkLocation(l.LinkLocation), l.CrawledAt,
+			l.IsInternal, l.Tag, normalizeLinkLocation(l.LinkLocation), l.Landmark,
+			l.XPath, l.Depth, l.DocumentIndex, l.BlockSignature, l.CrawledAt,
 		); err != nil {
 			return fmt.Errorf("appending link row: %w", err)
 		}
@@ -134,7 +136,8 @@ func urlWWWVariants(rawURL string) []string {
 // ExternalLinks retrieves external links for a given session (or all sessions).
 func (s *Store) ExternalLinks(ctx context.Context, sessionID string) ([]LinkRow, error) {
 	query := `
-		SELECT crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag, link_location, crawled_at
+		SELECT crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag,
+		       link_location, landmark, xpath, depth, document_index, block_signature, crawled_at
 		FROM crawlobserver.links
 		WHERE is_internal = false`
 	args := []interface{}{}
@@ -156,7 +159,8 @@ func (s *Store) ExternalLinks(ctx context.Context, sessionID string) ([]LinkRow,
 		var l LinkRow
 		if err := rows.Scan(
 			&l.CrawlSessionID, &l.SourceURL, &l.TargetURL, &l.AnchorText,
-			&l.Rel, &l.IsInternal, &l.Tag, &l.LinkLocation, &l.CrawledAt,
+			&l.Rel, &l.IsInternal, &l.Tag, &l.LinkLocation,
+			&l.Landmark, &l.XPath, &l.Depth, &l.DocumentIndex, &l.BlockSignature, &l.CrawledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scanning link: %w", err)
 		}
@@ -168,7 +172,8 @@ func (s *Store) ExternalLinks(ctx context.Context, sessionID string) ([]LinkRow,
 // ExternalLinksPaginated retrieves external links with pagination and optional filters.
 func (s *Store) ExternalLinksPaginated(ctx context.Context, sessionID string, limit, offset int, filters []ParsedFilter, sort *SortParam) ([]LinkRow, error) {
 	query := `
-		SELECT crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag, link_location, crawled_at
+		SELECT crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag,
+		       link_location, landmark, xpath, depth, document_index, block_signature, crawled_at
 		FROM crawlobserver.links
 		WHERE is_internal = false`
 	args := []interface{}{}
@@ -201,7 +206,8 @@ func (s *Store) ExternalLinksPaginated(ctx context.Context, sessionID string, li
 		var l LinkRow
 		if err := rows.Scan(
 			&l.CrawlSessionID, &l.SourceURL, &l.TargetURL, &l.AnchorText,
-			&l.Rel, &l.IsInternal, &l.Tag, &l.LinkLocation, &l.CrawledAt,
+			&l.Rel, &l.IsInternal, &l.Tag, &l.LinkLocation,
+			&l.Landmark, &l.XPath, &l.Depth, &l.DocumentIndex, &l.BlockSignature, &l.CrawledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scanning link: %w", err)
 		}
@@ -213,7 +219,8 @@ func (s *Store) ExternalLinksPaginated(ctx context.Context, sessionID string, li
 // InternalLinksPaginated retrieves internal links with pagination and optional filters.
 func (s *Store) InternalLinksPaginated(ctx context.Context, sessionID string, limit, offset int, filters []ParsedFilter, sort *SortParam) ([]LinkRow, error) {
 	query := `
-		SELECT crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag, link_location, crawled_at
+		SELECT crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag,
+		       link_location, landmark, xpath, depth, document_index, block_signature, crawled_at
 		FROM crawlobserver.links
 		WHERE is_internal = true AND crawl_session_id = ?`
 	args := []interface{}{sessionID}
@@ -241,7 +248,8 @@ func (s *Store) InternalLinksPaginated(ctx context.Context, sessionID string, li
 		var l LinkRow
 		if err := rows.Scan(
 			&l.CrawlSessionID, &l.SourceURL, &l.TargetURL, &l.AnchorText,
-			&l.Rel, &l.IsInternal, &l.Tag, &l.LinkLocation, &l.CrawledAt,
+			&l.Rel, &l.IsInternal, &l.Tag, &l.LinkLocation,
+			&l.Landmark, &l.XPath, &l.Depth, &l.DocumentIndex, &l.BlockSignature, &l.CrawledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scanning link: %w", err)
 		}

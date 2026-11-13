@@ -383,6 +383,12 @@ shared rendered metadata shell diagnostics без site-specific правил.
 
 - Один рядок на source-target edge.
 - Source, target, anchor і tag.
+- Опційний пілот `crawler.store_link_position` зберігає XPath, семантичну
+  область (landmark), глибину, порядок у документі та підпис блоку для перших
+  1 000 посилань на сторінці. Ліміт не обрізає граф і не змінює PageRank.
+- Links → Internal показує landmark і XPath; URL Detail показує landmark
+  із XPath у підказці. Метадані зберігаються в Daily Delta та Current Snapshot.
+  Пілот вимкнено за замовчуванням; історичні сесії не перераховуються.
 - Filtering, sorting, pagination, URL Detail navigation та CSV export.
 
 ### External links

@@ -1119,6 +1119,7 @@
               <th>{t('common.type')}</th>
               <th>{t('session.tag')}</th>
               <th>{t('session.rel')}</th>
+              <th>Landmark</th>
             </tr>
           </thead>
           <tbody>
@@ -1146,6 +1147,7 @@
                 </td>
                 <td>{l.Tag || '-'}</td>
                 <td>{l.Rel || '-'}</td>
+                <td title={l.XPath}>{l.Landmark || '-'}</td>
               </tr>
             {/each}
           </tbody>
@@ -1186,6 +1188,7 @@
               <th>{t('urlDetail.anchor')}</th>
               <th>{t('session.tag')}</th>
               <th>{t('session.rel')}</th>
+              <th>Landmark</th>
             </tr>
           </thead>
           <tbody>
@@ -1200,6 +1203,7 @@
                 <td class="cell-title">{l.AnchorText || '-'}</td>
                 <td>{l.Tag || '-'}</td>
                 <td>{l.Rel || '-'}</td>
+                <td title={l.XPath}>{l.Landmark || '-'}</td>
               </tr>
             {/each}
           </tbody>

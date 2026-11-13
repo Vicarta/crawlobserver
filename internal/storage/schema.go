@@ -106,6 +106,15 @@ ALTER TABLE crawlobserver.links
     ADD COLUMN IF NOT EXISTS link_location LowCardinality(String) DEFAULT 'body' AFTER tag
 `
 
+const AlterLinksV3Position = `
+ALTER TABLE crawlobserver.links
+    ADD COLUMN IF NOT EXISTS landmark LowCardinality(String) DEFAULT '',
+    ADD COLUMN IF NOT EXISTS xpath String DEFAULT '' CODEC(ZSTD(3)),
+    ADD COLUMN IF NOT EXISTS depth UInt16 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS document_index UInt32 DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS block_signature UInt64 DEFAULT 0
+`
+
 // AlterPagesV2 adds new columns to existing pages table.
 const AlterPagesV2 = `
 ALTER TABLE crawlobserver.pages
@@ -797,6 +806,7 @@ var Migrations = []Migration{
 	{Name: "create crawl_quality_results", DDL: CreateCrawlQualityResults},
 	{Name: "create crawl_quality_findings", DDL: CreateCrawlQualityFindings},
 	{Name: "alter links v2 link location post-repartition", DDL: AlterLinksV2},
+	{Name: "alter links v3 position", DDL: AlterLinksV3Position},
 	{Name: "create project_current_snapshots", DDL: CreateProjectCurrentSnapshots},
 	{Name: "create project_current_snapshot_deltas", DDL: CreateProjectCurrentSnapshotDeltas},
 	{Name: "alter pages v10 static render diagnostics", DDL: AlterPagesV10StaticRenderDiagnostics},

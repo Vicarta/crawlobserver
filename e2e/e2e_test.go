@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -35,6 +36,10 @@ type testEnv struct {
 
 // setup creates a ClickHouse store, API server, and test site server.
 func setup(t *testing.T) *testEnv {
+	return setupWithLinkPosition(t, false)
+}
+
+func setupWithLinkPosition(t *testing.T, storeLinkPosition bool) *testEnv {
 	t.Helper()
 
 	chHost := envOr("CH_HOST", "localhost")
@@ -61,15 +66,16 @@ func setup(t *testing.T) *testEnv {
 
 	cfg := &config.Config{
 		Crawler: config.CrawlerConfig{
-			Workers:         4,
-			MaxPages:        100,
-			Delay:           0,
-			Timeout:         10 * time.Second,
-			UserAgent:       "CrawlObserverE2ETest/1.0",
-			MaxBodySize:     10 * 1024 * 1024,
-			RespectRobots:   true,
-			AllowPrivateIPs: true,
-			CrawlScope:      "host",
+			Workers:           4,
+			MaxPages:          100,
+			Delay:             0,
+			Timeout:           10 * time.Second,
+			UserAgent:         "CrawlObserverE2ETest/1.0",
+			MaxBodySize:       10 * 1024 * 1024,
+			RespectRobots:     true,
+			AllowPrivateIPs:   true,
+			CrawlScope:        "host",
+			StoreLinkPosition: storeLinkPosition,
 			Retry: config.RetryConfig{
 				MaxRetries:          0,
 				MaxConsecutiveFails: 10,
@@ -306,6 +312,59 @@ func TestE2E_FullCrawl(t *testing.T) {
 	count404, _ := statusCodes["404"].(float64)
 	if count404 == 0 {
 		t.Error("expected status_codes[404] > 0 (the /gone page)")
+	}
+}
+
+func TestE2E_LinkPosition(t *testing.T) {
+	env := setupWithLinkPosition(t, true)
+	sid := startCrawl(t, env)
+	t.Cleanup(func() {
+		apiDELETE(t, env.apiURL, "/api/sessions/"+sid)
+	})
+	waitForCrawl(t, env.apiURL, sid, 60*time.Second)
+
+	var links []map[string]interface{}
+	mustUnmarshal(t, apiGET(t, env.apiURL, "/api/sessions/"+sid+"/internal-links?limit=1000"), &links)
+	if len(links) == 0 {
+		t.Fatal("expected internal links from the fixture crawl")
+	}
+
+	var navLink map[string]interface{}
+	for _, link := range links {
+		if link["SourceURL"] == env.siteURL+"/" && link["TargetURL"] == env.siteURL+"/products" {
+			navLink = link
+			break
+		}
+	}
+	if navLink == nil {
+		t.Fatal("fixture crawl did not retain the homepage link to /products")
+	}
+	if navLink["Landmark"] != "nav" || navLink["XPath"] != "/html/body/nav/a[1]" || navLink["Depth"] != float64(3) || navLink["DocumentIndex"] != float64(0) {
+		t.Errorf("homepage navigation link position = %+v", navLink)
+	}
+	if signature, ok := navLink["BlockSignature"].(string); !ok || signature == "" || signature == "0" {
+		t.Errorf("BlockSignature = %#v, want a non-zero decimal string", navLink["BlockSignature"])
+	}
+
+	var detail struct {
+		Links struct {
+			OutLinks []map[string]interface{} `json:"out_links"`
+		} `json:"links"`
+	}
+	pageDetailURL := "/api/sessions/" + sid + "/page-detail?url=" + url.QueryEscape(env.siteURL+"/")
+	mustUnmarshal(t, apiGET(t, env.apiURL, pageDetailURL), &detail)
+	var detailNavLink map[string]interface{}
+	for _, link := range detail.Links.OutLinks {
+		if link["TargetURL"] == env.siteURL+"/products" {
+			detailNavLink = link
+			break
+		}
+	}
+	if detailNavLink == nil {
+		t.Fatalf("page detail API omitted the /products outbound link: %+v", detail.Links.OutLinks)
+	}
+	if detailNavLink["Landmark"] != "nav" || detailNavLink["XPath"] != "/html/body/nav/a[1]" {
+		t.Errorf("page detail position = {%v %v}, want {nav /html/body/nav/a[1]}", detailNavLink["Landmark"], detailNavLink["XPath"])
 	}
 }
 

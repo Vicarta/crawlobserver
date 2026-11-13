@@ -44,7 +44,10 @@ type PageData struct {
 
 type ParseOptions struct {
 	FooterSelectors []string
+	LinkPosition    bool
 }
+
+const DefaultMaxLinkPositions = 1000
 
 // Heading preserves a heading tag in document order.
 type Heading struct {
@@ -96,7 +99,7 @@ func ParseWithOptions(body []byte, pageURL string, opts ParseOptions) (*PageData
 	data.H5 = extractHeadings(doc, "h5")
 	data.H6 = extractHeadings(doc, "h6")
 	data.HeadingOutline = extractHeadingOutline(doc)
-	data.Links = extractLinks(doc, baseURL, opts.FooterSelectors)
+	data.Links = extractLinks(doc, baseURL, opts)
 	data.Images = extractImages(doc, baseURL)
 	data.Hreflang = extractHreflang(doc)
 	data.Lang = extractLang(doc)

@@ -35,6 +35,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Crawler.StoreHTML {
 		t.Error("StoreHTML should default to false")
 	}
+	if cfg.Crawler.StoreLinkPosition {
+		t.Error("StoreLinkPosition should default to false")
+	}
 	if cfg.ClickHouse.Host != "localhost" {
 		t.Errorf("Host = %q, want localhost", cfg.ClickHouse.Host)
 	}

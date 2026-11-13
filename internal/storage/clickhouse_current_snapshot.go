@@ -1176,9 +1176,11 @@ func (s *Store) overlayDeltaLinks(ctx context.Context, currentSessionID, deltaSe
 	}
 	return s.conn.Exec(ctx, `
 		INSERT INTO crawlobserver.links (
-			crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag, link_location, crawled_at
+			crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag,
+			link_location, landmark, xpath, depth, document_index, block_signature, crawled_at
 		)
-		SELECT toUUID(?), source_url, target_url, anchor_text, rel, is_internal, tag, link_location, crawled_at
+		SELECT toUUID(?), source_url, target_url, anchor_text, rel, is_internal, tag,
+		       link_location, landmark, xpath, depth, document_index, block_signature, crawled_at
 		FROM crawlobserver.links
 		WHERE crawl_session_id = ?
 		  AND source_url NOT IN (
@@ -1199,9 +1201,11 @@ func (s *Store) copySnapshotPages(ctx context.Context, sourceSessionID, targetSe
 func (s *Store) copySnapshotLinks(ctx context.Context, sourceSessionID, targetSessionID string) error {
 	return s.conn.Exec(ctx, `
 		INSERT INTO crawlobserver.links (
-			crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag, link_location, crawled_at
+			crawl_session_id, source_url, target_url, anchor_text, rel, is_internal, tag,
+			link_location, landmark, xpath, depth, document_index, block_signature, crawled_at
 		)
-		SELECT toUUID(?), source_url, target_url, anchor_text, rel, is_internal, tag, link_location, crawled_at
+		SELECT toUUID(?), source_url, target_url, anchor_text, rel, is_internal, tag,
+		       link_location, landmark, xpath, depth, document_index, block_signature, crawled_at
 		FROM crawlobserver.links
 		WHERE crawl_session_id = ?`,
 		targetSessionID, sourceSessionID,

@@ -1116,6 +1116,7 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 		if result.IsHTML() && len(result.Body) > 0 && result.Error == "" {
 			pageData, err := parser.ParseWithOptions(result.Body, result.FinalURL, parser.ParseOptions{
 				FooterSelectors: e.footerSelectorPatterns,
+				LinkPosition:    e.cfg.Crawler.StoreLinkPosition,
 			})
 			if err != nil {
 				applog.Warnf("crawler", "Parse error for %s: %v", result.URL, err)
@@ -1205,6 +1206,11 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 						IsInternal:     link.IsInternal,
 						Tag:            link.Tag,
 						LinkLocation:   link.Location,
+						Landmark:       link.Landmark,
+						XPath:          link.XPath,
+						Depth:          link.Depth,
+						DocumentIndex:  link.DocumentIndex,
+						BlockSignature: link.BlockSignature,
 						CrawledAt:      now,
 					})
 
@@ -2025,6 +2031,7 @@ func (e *Engine) renderWorker(id int, in <-chan *renderItem) {
 			// Re-parse rendered HTML
 			renderedData, err := parser.ParseWithOptions([]byte(renderResult.RenderedHTML), finalURL, parser.ParseOptions{
 				FooterSelectors: e.footerSelectorPatterns,
+				LinkPosition:    e.cfg.Crawler.StoreLinkPosition,
 			})
 			if err != nil {
 				item.pageRow.JSRenderError = fmt.Sprintf("parse rendered: %v", err)
@@ -2129,6 +2136,11 @@ func buildLinkRows(sessionID, sourceURL string, links []parser.Link, crawledAt t
 			IsInternal:     link.IsInternal,
 			Tag:            link.Tag,
 			LinkLocation:   link.Location,
+			Landmark:       link.Landmark,
+			XPath:          link.XPath,
+			Depth:          link.Depth,
+			DocumentIndex:  link.DocumentIndex,
+			BlockSignature: link.BlockSignature,
 			CrawledAt:      crawledAt,
 		})
 		if link.IsInternal {
