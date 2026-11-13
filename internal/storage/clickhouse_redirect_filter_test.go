@@ -24,15 +24,25 @@ func insertTestPages(t *testing.T, s *Store, sessionID string, pages []PageRow) 
 func cleanupRedirectTestSession(t *testing.T, s *Store, sessionID string) {
 	t.Helper()
 	ctx := context.Background()
-	tables := []string{"pages", "links", "sitemap_urls", "sitemaps", "crawl_sessions"}
+	// These tests share one session ID, so a delete that has not finished by the
+	// time the next one starts shows up as rows left over from the previous
+	// test. mutations_sync makes the statement wait for the mutation instead of
+	// racing it against a sleep. crawl_sessions keys the session on id, every
+	// other table on crawl_session_id.
+	tables := []struct{ name, column string }{
+		{"pages", "crawl_session_id"},
+		{"links", "crawl_session_id"},
+		{"sitemap_urls", "crawl_session_id"},
+		{"sitemaps", "crawl_session_id"},
+		{"crawl_sessions", "id"},
+	}
 	for _, tbl := range tables {
 		if err := s.conn.Exec(ctx, fmt.Sprintf(
-			"ALTER TABLE crawlobserver.%s DELETE WHERE crawl_session_id = ?", tbl,
+			"ALTER TABLE crawlobserver.%s DELETE WHERE %s = ? SETTINGS mutations_sync = 2", tbl.name, tbl.column,
 		), sessionID); err != nil {
-			t.Logf("cleanup %s: %v", tbl, err)
+			t.Logf("cleanup %s: %v", tbl.name, err)
 		}
 	}
-	time.Sleep(500 * time.Millisecond)
 }
 
 // redirectTestSessionID is a fixed UUID for redirect filter tests.

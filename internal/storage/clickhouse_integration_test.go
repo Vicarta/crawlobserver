@@ -61,8 +61,9 @@ func cleanupSession(t *testing.T, s *Store, sessionID string) {
 	ctx := context.Background()
 	tables := []string{"external_link_checks", "links"}
 	for _, tbl := range tables {
+		// Wait for the mutation rather than leaving rows for the next test.
 		if err := s.conn.Exec(ctx, fmt.Sprintf(
-			"ALTER TABLE crawlobserver.%s DELETE WHERE crawl_session_id = ?", tbl,
+			"ALTER TABLE crawlobserver.%s DELETE WHERE crawl_session_id = ? SETTINGS mutations_sync = 2", tbl,
 		), sessionID); err != nil {
 			t.Logf("cleanup %s: %v", tbl, err)
 		}
