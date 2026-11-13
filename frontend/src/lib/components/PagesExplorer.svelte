@@ -712,6 +712,9 @@
           <span>{t('pages.search.regex')}</span>
         </label>
         <button class="btn btn-sm" type="submit">{t('common.search')}</button>
+        <span class="pages-search-status" role="status">
+          {searchPending ? t('pages.search.pending') : ''}
+        </span>
       </form>
       <p class="pages-search-note">{t('pages.search.storedHtmlNote')}</p>
       {#if searchError}
@@ -1316,6 +1319,15 @@
     margin: 5px 0 0;
     color: var(--text-muted);
     font-size: 12px;
+  }
+
+  .pages-search-status {
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+
+  .pages-search-status:empty {
+    position: absolute;
   }
 
   .pages-search-error {

@@ -54,7 +54,10 @@ describe('PagesExplorer unified search', () => {
   });
 
   it('applies changed query and regex state through the existing Pages URL', async () => {
-    pagesAPI.getPages.mockResolvedValue([]);
+    let resolveSearch;
+    pagesAPI.getPages
+      .mockResolvedValueOnce([])
+      .mockReturnValueOnce(new Promise((resolve) => (resolveSearch = resolve)));
     const onpushurl = vi.fn();
     component = mount(PagesExplorer, {
       target: document.body,
@@ -71,6 +74,7 @@ describe('PagesExplorer unified search', () => {
     input.form.requestSubmit();
 
     await vi.waitFor(() => expect(pagesAPI.getPages).toHaveBeenCalledTimes(2));
+    expect(document.querySelector('.pages-search-status').textContent.trim()).toBe('Searching…');
     expect(pagesAPI.getPages).toHaveBeenLastCalledWith(
       'sess-1',
       100,
@@ -80,6 +84,10 @@ describe('PagesExplorer unified search', () => {
       '',
     );
     expect(onpushurl).toHaveBeenLastCalledWith('/sessions/sess-1/pages/all?q=+fox+&regex=1');
+    resolveSearch([]);
+    await vi.waitFor(() =>
+      expect(document.querySelector('.pages-search-status').textContent.trim()).toBe(''),
+    );
   });
 
   it('uses the submitted search for pagination and CSV export while newer input is a draft', async () => {

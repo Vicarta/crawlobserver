@@ -590,6 +590,7 @@
   "pages.response": "Response",
   "pages.redirects": "Redirects",
   "pages.search.label": "Search pages",
+  "pages.search.pending": "Searching…",
   "pages.search.placeholder": "URL, title, description, or page text",
   "pages.search.regex": "Regex",
   "pages.search.regexHelp": "Case-sensitive RE2 regular expression",

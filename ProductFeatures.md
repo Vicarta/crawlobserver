@@ -340,6 +340,7 @@ Views:
   HTML; literal query є case-insensitive substring, а regex mode підтримує
   case-sensitive RE2 expressions і повертає `400` для некоректного шаблону;
 - пошук у тексті доступний лише для сесій із збереженим HTML (`store_html`);
+- Pages показує «Searching…», поки очікує відповідь на запит пошуку;
 - `!value` syntax для exclusion у text filters;
 - persisted resizable columns;
 - overflow tooltips для довгих URL і titles;
