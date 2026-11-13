@@ -66,11 +66,19 @@
     return sv === 'all' ? 'overview' : sv;
   }
 
+  const initialPageFilters = { ...initialFilters };
   let subView = $state(initialSubView);
   let pages = $state([]);
   let pagesOffset = $state(initialOffset);
   let hasMorePages = $state(false);
-  let filters = $state({ ...initialFilters });
+  let filters = $state(initialPageFilters);
+  let appliedSearch = $state({
+    q: initialPageFilters.q || '',
+    regex: initialPageFilters.regex || '',
+  });
+  let searchError = $state('');
+  let searchPending = $state(false);
+  let pageLoadSequence = 0;
   let sortColumn = $state('');
   let sortOrder = $state('');
   let redirectPages = $state([]);
@@ -89,7 +97,7 @@
   function pushFilters(sv, f, offset) {
     const path = `${basePath()}/${sv || subView}`;
     const params = new URLSearchParams();
-    const activeFilters = f || filters;
+    const activeFilters = f || urlFilters();
     for (const [k, v] of Object.entries(activeFilters)) {
       if (v !== '' && v != null) params.set(k, v);
     }
@@ -100,8 +108,15 @@
 
   function pageFilters() {
     const active = { ...filters };
+    active.q = appliedSearch.q;
+    active.regex = appliedSearch.regex;
     if (subView === 'html') active.page_type = 'html';
     return active;
+  }
+
+  function urlFilters() {
+    if (subView === 'all' || subView === 'html') return pageFilters();
+    return filters;
   }
 
   function overviewFilterKeys() {
@@ -204,6 +219,7 @@
   }
 
   async function loadData() {
+    const sequence = ++pageLoadSequence;
     try {
       if (subView === 'redirects') {
         const result = await getRedirectPages(
@@ -214,10 +230,12 @@
           sortColumn,
           sortOrder,
         );
+        if (sequence !== pageLoadSequence) return;
         redirectPages = result || [];
         hasMoreRedirectPages = redirectPages.length === PAGE_SIZE;
       } else if (subView === 'issues') {
         const result = await getPageIssues(sessionId, PAGE_SIZE, pagesOffset, filters);
+        if (sequence !== pageLoadSequence) return;
         pages = result || [];
         hasMorePages = pages.length === PAGE_SIZE;
       } else {
@@ -229,17 +247,37 @@
           sortColumn,
           sortOrder,
         );
+        if (sequence !== pageLoadSequence) return;
         pages = result || [];
         hasMorePages = pages.length === PAGE_SIZE;
       }
+      searchError = '';
+      searchPending = false;
     } catch (e) {
-      onerror?.(e.message);
+      if (sequence !== pageLoadSequence) return;
+      const errorMessage = typeof e?.message === 'string' ? e.message : String(e);
+      if (
+        e?.status === 400 &&
+        (errorMessage === 'invalid RE2 regular expression' ||
+          errorMessage.startsWith('page search query too long'))
+      ) {
+        pages = [];
+        hasMorePages = false;
+        searchPending = false;
+        searchError = errorMessage;
+      } else {
+        searchPending = false;
+        onerror?.(errorMessage);
+      }
     }
   }
 
   function switchSubView(sv) {
     subView = sv;
     filters = {};
+    appliedSearch = { q: '', regex: '' };
+    searchError = '';
+    searchPending = false;
     pagesOffset = 0;
     redirectPagesOffset = 0;
     sortColumn = '';
@@ -281,6 +319,10 @@
   }
 
   function applyFilters() {
+    appliedSearch = { q: filters.q || '', regex: filters.regex || '' };
+    searchPending = true;
+    pages = [];
+    hasMorePages = false;
     pagesOffset = 0;
     pushFilters();
     loadData();
@@ -288,6 +330,11 @@
 
   function clearFilters() {
     filters = {};
+    appliedSearch = { q: '', regex: '' };
+    searchError = '';
+    searchPending = true;
+    pages = [];
+    hasMorePages = false;
     pagesOffset = 0;
     selectedPages = {};
     pushFilters(null, {}, 0);
@@ -469,38 +516,50 @@
   let exporting = $state(false);
 
   async function handleExportCSV() {
-    if (exporting) return;
+    if (exporting || searchPending || searchError) return;
     exporting = true;
     try {
       await exportCSV();
+    } catch (e) {
+      onerror?.(e.message || 'CSV export failed');
     } finally {
       exporting = false;
     }
   }
 
   async function exportCSV() {
-    const cfg = CSV_CONFIGS[subView];
+    const exportView = subView;
+    const exportFilters = { ...filters };
+    const exportSearch = { ...appliedSearch };
+    const exportPageFilters = {
+      ...exportFilters,
+      q: exportSearch.q,
+      regex: exportSearch.regex,
+      ...(exportView === 'html' ? { page_type: 'html' } : {}),
+    };
+    const cfg = CSV_CONFIGS[exportView];
     if (!cfg) return;
     const fetcher =
-      subView === 'redirects'
-        ? (limit, offset) => getRedirectPages(sessionId, limit, offset, filters)
-        : subView === 'issues'
-          ? (limit, offset) => getPageIssues(sessionId, limit, offset, filters)
-          : (limit, offset) => getPages(sessionId, limit, offset, pageFilters());
+      exportView === 'redirects'
+        ? (limit, offset) => getRedirectPages(sessionId, limit, offset, exportFilters)
+        : exportView === 'issues'
+          ? (limit, offset) => getPageIssues(sessionId, limit, offset, exportFilters)
+          : (limit, offset) => getPages(sessionId, limit, offset, exportPageFilters);
     const allData = await fetchAll(fetcher);
     const keys = cfg.customKeys || cfg.keys;
     let rows = allData;
     if (cfg.transform) rows = allData.map(cfg.transform);
     // For titles sub-view, H1 needs special handling
-    if (subView === 'titles') {
+    if (exportView === 'titles') {
       rows = allData.map((r) => ({ ...r, H1_first: r.H1?.[0] || '' }));
-      downloadCSV(`pages-${subView}.csv`, cfg.headers, [...cfg.keys, 'H1_first'], rows);
+      downloadCSV(`pages-${exportView}.csv`, cfg.headers, [...cfg.keys, 'H1_first'], rows);
       return;
     }
-    downloadCSV(`pages-${subView}.csv`, cfg.headers, keys, rows);
+    downloadCSV(`pages-${exportView}.csv`, cfg.headers, keys, rows);
   }
 
   function handleExportSelected() {
+    if (searchPending || searchError) return;
     const cfg = CSV_CONFIGS[subView];
     if (!cfg || selectedRows.length === 0) return;
     exportSelectedCSV(`pages-${subView}-selected.csv`, cfg, selectedRows);
@@ -618,11 +677,47 @@
       {/each}
     </div>
     {#if !DELEGATED_VIEWS.has(subView)}
-      <ExportDropdown onexportcsv={handleExportCSV} {exporting} {apiPath} />
+      <ExportDropdown
+        onexportcsv={handleExportCSV}
+        {exporting}
+        {apiPath}
+        disabled={searchPending || !!searchError}
+      />
     {/if}
   </div>
 
   {#if subView === 'all' || subView === 'html'}
+    <div class="pages-search-toolbar">
+      <form
+        class="pages-search-controls"
+        onsubmit={(event) => {
+          event.preventDefault();
+          applyFilters();
+        }}
+      >
+        <input
+          class="pages-search-input"
+          type="search"
+          aria-label={t('pages.search.label')}
+          placeholder={t('pages.search.placeholder')}
+          value={filters.q || ''}
+          oninput={(event) => setFilter('q', event.currentTarget.value)}
+        />
+        <label class="pages-search-regex" title={t('pages.search.regexHelp')}>
+          <input
+            type="checkbox"
+            checked={filters.regex === '1' || filters.regex === 'true'}
+            onchange={(event) => setFilter('regex', event.currentTarget.checked ? '1' : '')}
+          />
+          <span>{t('pages.search.regex')}</span>
+        </label>
+        <button class="btn btn-sm" type="submit">{t('common.search')}</button>
+      </form>
+      <p class="pages-search-note">{t('pages.search.storedHtmlNote')}</p>
+      {#if searchError}
+        <p class="pages-search-error" role="alert">{searchError}</p>
+      {/if}
+    </div>
     {#if isAdmin && selectedList.length > 0}
       <div class="bulk-action-bar">
         <span>{selectedList.length} selected</span>
@@ -643,7 +738,10 @@
         <button class="btn btn-sm" onclick={clearSelection} disabled={rescanning || deleting}
           >Clear</button
         >
-        <ExportSelectedButton onclick={handleExportSelected} disabled={rescanning || deleting} />
+        <ExportSelectedButton
+          onclick={handleExportSelected}
+          disabled={rescanning || deleting || searchPending || !!searchError}
+        />
       </div>
     {/if}
     <DataTable
@@ -1169,6 +1267,63 @@
   .pages-explorer {
     padding: 24px;
   }
+
+  .pages-search-toolbar {
+    margin: 0 0 12px;
+  }
+
+  .pages-search-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .pages-search-input {
+    flex: 1 1 280px;
+    width: min(100%, 520px);
+    min-width: 180px;
+    min-height: 34px;
+    padding: 6px 9px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+
+  .pages-search-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-light);
+  }
+
+  .pages-search-regex {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 34px;
+    color: var(--text-muted);
+    font-size: 13px;
+    white-space: nowrap;
+  }
+
+  .pages-search-regex input {
+    accent-color: var(--accent);
+  }
+
+  .pages-search-note {
+    margin: 5px 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .pages-search-error {
+    margin: 5px 0 0;
+    color: var(--error);
+    font-size: 13px;
+  }
+
   .pr-subview-sep {
     width: 1px;
     background: var(--border);

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,13 +10,38 @@ import (
 type FilterType int
 
 const (
-	FilterLike  FilterType = iota // String → ILIKE '%val%'
-	FilterUint                    // Numeric → =N, >N, <N, >=N, <=N
-	FilterBool                    // Bool → = true/false
-	FilterArray                   // Array(String) → arrayExists(x -> x ILIKE '%val%', col)
-	FilterFloat                   // Float → =N, >N, <N, >=N, <=N (decimal)
-	FilterExact                   // String → = val
+	FilterLike            FilterType = iota // String → ILIKE '%val%'
+	FilterUint                              // Numeric → =N, >N, <N, >=N, <=N
+	FilterBool                              // Bool → = true/false
+	FilterArray                             // Array(String) → arrayExists(x -> x ILIKE '%val%', col)
+	FilterFloat                             // Float → =N, >N, <N, >=N, <=N (decimal)
+	FilterExact                             // String → = val
+	FilterPageSearch                        // Case-insensitive substring over page search fields
+	FilterPageSearchRegex                   // RE2 search over page search fields
 )
+
+const maxPageSearchQueryLen = 500
+
+// NewPageSearchFilter validates and creates the optional unified Pages search.
+func NewPageSearchFilter(value string, regex bool) (ParsedFilter, bool, error) {
+	if !regex {
+		value = strings.TrimSpace(value)
+	}
+	if value == "" {
+		return ParsedFilter{}, false, nil
+	}
+	if len(value) > maxPageSearchQueryLen {
+		return ParsedFilter{}, false, fmt.Errorf("page search query too long (max %d bytes)", maxPageSearchQueryLen)
+	}
+	filterType := FilterPageSearch
+	if regex {
+		if err := validateRegex(value); err != nil {
+			return ParsedFilter{}, false, errors.New("invalid RE2 regular expression")
+		}
+		filterType = FilterPageSearchRegex
+	}
+	return ParsedFilter{Def: FilterDef{Type: filterType}, Value: value}, true, nil
+}
 
 type FilterDef struct {
 	Column string
@@ -343,7 +369,10 @@ func BuildWhereClause(filters []ParsedFilter) (string, []interface{}, error) {
 	var args []interface{}
 
 	for _, f := range filters {
-		val := strings.TrimSpace(f.Value)
+		val := f.Value
+		if f.Def.Type != FilterPageSearchRegex {
+			val = strings.TrimSpace(val)
+		}
 		if val == "" {
 			continue
 		}
@@ -420,6 +449,24 @@ func BuildWhereClause(filters []ParsedFilter) (string, []interface{}, error) {
 				clauses = append(clauses, fmt.Sprintf("%s = ?", f.Def.Column))
 			}
 			args = append(args, val)
+
+		case FilterPageSearch, FilterPageSearchRegex:
+			columns := []string{"p.url", "p.title", "p.meta_description", "decodeHTMLComponent(extractTextFromHTML(p.body_html))"}
+			matches := make([]string, 0, len(columns))
+			for i, column := range columns {
+				var match string
+				if f.Def.Type == FilterPageSearchRegex {
+					match = fmt.Sprintf("match(%s, ?)", column)
+				} else {
+					match = fmt.Sprintf("positionCaseInsensitiveUTF8(%s, ?) > 0", column)
+				}
+				if i == len(columns)-1 {
+					match = "(p.body_html != '' AND " + match + ")"
+				}
+				matches = append(matches, match)
+				args = append(args, val)
+			}
+			clauses = append(clauses, "("+strings.Join(matches, " OR ")+")")
 		}
 	}
 

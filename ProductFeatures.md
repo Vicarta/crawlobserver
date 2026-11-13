@@ -1,6 +1,6 @@
 # CrawlObserver: каталог функціональності
 
-Актуальність: 2026-09-29.
+Актуальність: 2026-11-13.
 
 Цей файл є канонічним каталогом фактично реалізованої функціональності
 CrawlObserver. Він описує можливості продукту на рівні користувацьких сценаріїв,
@@ -336,6 +336,10 @@ Views:
 Можливості таблиць:
 
 - server-side filtering, sorting і pagination;
+- unified literal search через URL, title, meta description і текст зі stored
+  HTML; literal query є case-insensitive substring, а regex mode підтримує
+  case-sensitive RE2 expressions і повертає `400` для некоректного шаблону;
+- пошук у тексті доступний лише для сесій із збереженим HTML (`store_html`);
 - `!value` syntax для exclusion у text filters;
 - persisted resizable columns;
 - overflow tooltips для довгих URL і titles;

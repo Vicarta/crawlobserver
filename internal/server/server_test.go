@@ -2901,6 +2901,61 @@ func TestIntegration_InvalidFiltersIgnored(t *testing.T) {
 	}
 }
 
+func TestPagesSearchInvalidRegexReturnsStableBadRequest(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	ms := srv.store.(*mockStore)
+	ms.getSessionByID = map[string]*storage.CrawlSession{
+		"sess-1": {ID: "sess-1", Status: "completed"},
+	}
+
+	req := authRequest(httptest.NewRequest("GET", "/api/sessions/sess-1/pages?q=%5B&regex=1", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"error":"invalid RE2 regular expression"}` {
+		t.Fatalf("error body = %s, want stable validation message", got)
+	}
+	if len(ms.listPagesCalls) != 0 {
+		t.Fatalf("invalid regex reached storage: %d calls", len(ms.listPagesCalls))
+	}
+}
+
+func TestPagesSearchFilterPreservesOtherFilters(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	ms := srv.store.(*mockStore)
+	ms.getSessionByID = map[string]*storage.CrawlSession{
+		"sess-1": {ID: "sess-1", Status: "completed"},
+	}
+
+	req := authRequest(httptest.NewRequest("GET", "/api/sessions/sess-1/pages?limit=5&offset=10&q=foo%5Cd%2B&regex=true&title=bar", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if len(ms.listPagesCalls) != 1 {
+		t.Fatalf("storage calls = %d, want one", len(ms.listPagesCalls))
+	}
+	call := ms.listPagesCalls[0]
+	if call.Limit != 5 || call.Offset != 10 {
+		t.Fatalf("pagination = (%d, %d), want (5, 10)", call.Limit, call.Offset)
+	}
+	var foundSearch, foundTitle bool
+	for _, filter := range call.Filters {
+		if filter.Def.Type == storage.FilterPageSearchRegex && filter.Value == `foo\d+` {
+			foundSearch = true
+		}
+		if filter.Def.Type == storage.FilterLike && filter.Def.Column == "title" && filter.Value == "bar" {
+			foundTitle = true
+		}
+	}
+	if !foundSearch || !foundTitle {
+		t.Fatalf("storage filters = %+v, want regex search and existing title filter", call.Filters)
+	}
+}
+
 // =========================================================================
 // 12. Integration: Storage error propagation
 // =========================================================================

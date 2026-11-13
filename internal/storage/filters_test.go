@@ -24,6 +24,92 @@ func TestPageRankEligiblePredicateV1(t *testing.T) {
 	}
 }
 
+func TestNewPageSearchFilter(t *testing.T) {
+	filter, include, err := NewPageSearchFilter("  cat'%  ", false)
+	if err != nil || !include {
+		t.Fatalf("NewPageSearchFilter() = (%+v, %v, %v), want included literal filter", filter, include, err)
+	}
+	if filter.Def.Type != FilterPageSearch || filter.Value != "cat'%" {
+		t.Fatalf("filter = %+v, want literal search value with trimmed surrounding whitespace", filter)
+	}
+
+	filter, include, err = NewPageSearchFilter(`\d+`, true)
+	if err != nil || !include || filter.Def.Type != FilterPageSearchRegex {
+		t.Fatalf("regex filter = (%+v, %v, %v), want included RE2 filter", filter, include, err)
+	}
+	filter, include, err = NewPageSearchFilter("  foo  ", true)
+	if err != nil || !include || filter.Value != "  foo  " {
+		t.Fatalf("regex filter = (%+v, %v, %v), want exact surrounding whitespace preserved", filter, include, err)
+	}
+
+	if _, _, err := NewPageSearchFilter("[", true); err == nil || err.Error() != "invalid RE2 regular expression" {
+		t.Fatalf("invalid regex error = %v, want stable validation error", err)
+	}
+	if _, _, err := NewPageSearchFilter(strings.Repeat("x", maxPageSearchQueryLen+1), false); err == nil {
+		t.Fatal("expected oversized search query to be rejected")
+	}
+	if _, include, err := NewPageSearchFilter(" ", false); err != nil || include {
+		t.Fatalf("blank search = (%v, %v), want not included without error", include, err)
+	}
+}
+
+func TestBuildWhereClausePageSearchORsBoundedFields(t *testing.T) {
+	query := "test' OR 1=1"
+	filter, _, err := NewPageSearchFilter(query, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql, args, err := BuildWhereClause([]ParsedFilter{filter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"positionCaseInsensitiveUTF8(p.url, ?) > 0",
+		"positionCaseInsensitiveUTF8(p.title, ?) > 0",
+		"positionCaseInsensitiveUTF8(p.meta_description, ?) > 0",
+		"positionCaseInsensitiveUTF8(decodeHTMLComponent(extractTextFromHTML(p.body_html)), ?) > 0",
+		"p.body_html != '' AND positionCaseInsensitiveUTF8",
+		" OR ",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("search SQL missing %q: %s", want, sql)
+		}
+	}
+	if len(args) != 4 {
+		t.Fatalf("got %d args, want one bound value per searchable field", len(args))
+	}
+	for _, arg := range args {
+		if arg != query {
+			t.Errorf("search argument = %#v, want bound user value", arg)
+		}
+	}
+}
+
+func TestBuildWhereClausePageSearchRegex(t *testing.T) {
+	filter, _, err := NewPageSearchFilter("  foo\\d+  ", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql, args, err := BuildWhereClause([]ParsedFilter{filter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sql, "match(p.url, ?)") || !strings.Contains(sql, "match(decodeHTMLComponent(extractTextFromHTML(p.body_html)), ?)") {
+		t.Fatalf("regex SQL = %s, want RE2 match over URL and stored page text", sql)
+	}
+	if !strings.Contains(sql, "(p.body_html != '' AND match(") {
+		t.Fatalf("regex SQL = %s, want empty stored HTML excluded from text matching", sql)
+	}
+	if len(args) != 4 || args[0] != "  foo\\d+  " {
+		t.Fatalf("regex args = %#v, want pattern bound four times", args)
+	}
+	for i, arg := range args {
+		if arg != "  foo\\d+  " {
+			t.Errorf("regex arg %d = %#v, want whitespace preserved", i, arg)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // parseUintRange
 // ---------------------------------------------------------------------------

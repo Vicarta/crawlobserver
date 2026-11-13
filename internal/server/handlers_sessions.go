@@ -218,6 +218,16 @@ func (s *Server) handlePages(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, offset := clampPagination(queryInt(r, "limit", 100), queryInt(r, "offset", 0))
 	filters := parseFilters(r, storage.PageFilters)
+	searchFilter, includeSearch, err := storage.NewPageSearchFilter(
+		r.URL.Query().Get("q"), r.URL.Query().Get("regex") == "1" || r.URL.Query().Get("regex") == "true",
+	)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if includeSearch {
+		filters = append(filters, searchFilter)
+	}
 	sort := parseSort(r, storage.PageSortColumns)
 
 	pages, err := s.store.ListPages(r.Context(), sessionID, limit, offset, filters, sort)
