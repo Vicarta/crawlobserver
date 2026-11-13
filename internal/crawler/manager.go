@@ -51,10 +51,15 @@ func applySavedCrawlerConfig(cfg *config.Config, saved config.CrawlerConfig, new
 
 func restoreSavedCrawlerConfig(cfg *config.Config, serialized string, newSession bool) {
 	if serialized != "" {
-		var savedCfg config.Config
-		if err := json.Unmarshal([]byte(serialized), &savedCfg); err == nil {
-			applySavedCrawlerConfig(cfg, savedCfg.Crawler, newSession)
-			return
+		var savedFields struct {
+			Crawler map[string]json.RawMessage
+		}
+		if err := json.Unmarshal([]byte(serialized), &savedFields); err == nil && len(savedFields.Crawler) > 0 {
+			var savedCfg config.Config
+			if err := json.Unmarshal([]byte(serialized), &savedCfg); err == nil {
+				applySavedCrawlerConfig(cfg, savedCfg.Crawler, newSession)
+				return
+			}
 		}
 	}
 	if !newSession {

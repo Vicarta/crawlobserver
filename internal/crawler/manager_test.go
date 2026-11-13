@@ -57,6 +57,8 @@ func TestRestoreSavedCrawlerConfigLinkPositionOptIn(t *testing.T) {
 		wantStoreHTML    bool
 	}{
 		{name: "empty existing session config disables opt-in", wantLinkPosition: false, wantMaxPages: 77, wantStoreHTML: true},
+		{name: "empty object preserves process defaults", serialized: `{}`, wantLinkPosition: false, wantMaxPages: 77, wantStoreHTML: true},
+		{name: "null config preserves process defaults", serialized: `null`, wantLinkPosition: false, wantMaxPages: 77, wantStoreHTML: true},
 		{name: "malformed existing session config disables opt-in", serialized: `{"crawler":`, wantLinkPosition: false, wantMaxPages: 77, wantStoreHTML: true},
 		{name: "malformed full recrawl keeps process config", serialized: `{"crawler":`, newSession: true, wantLinkPosition: true, wantMaxPages: 77, wantStoreHTML: true},
 		{name: "legacy saved config without flag stays opt-out", serialized: `{"Crawler":{"MaxPages":23,"StoreHTML":false}}`, wantLinkPosition: false, wantMaxPages: 23, wantStoreHTML: false},
