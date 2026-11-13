@@ -30,6 +30,74 @@ afterEach(() => {
 });
 
 describe('PagesExplorer unified search', () => {
+  it('keeps page selection controls behind the admin gate', async () => {
+    pagesAPI.getPages.mockResolvedValue([{ URL: 'https://example.test/', StatusCode: 200 }]);
+    component = mount(PagesExplorer, {
+      target: document.body,
+      props: { sessionId: 'sess-1' },
+    });
+
+    await vi.waitFor(() => expect(pagesAPI.getPages).toHaveBeenCalled());
+    expect(document.querySelector('[aria-label="Select all displayed pages"]')).toBeNull();
+    expect(document.querySelector('.data-table-resizable thead tr th').textContent).toContain(
+      'URL',
+    );
+  });
+
+  it('selects only displayed pages, preserves selections across pages, and shows mixed state', async () => {
+    const makePages = (offset) =>
+      Array.from({ length: 100 }, (_, index) => ({
+        URL: `https://example.test/${offset + index}`,
+        StatusCode: 200,
+        PageType: 'html',
+      }));
+    pagesAPI.getPages.mockResolvedValueOnce(makePages(0)).mockResolvedValueOnce(makePages(100));
+    component = mount(PagesExplorer, {
+      target: document.body,
+      props: { sessionId: 'sess-1', isAdmin: true },
+    });
+
+    await vi.waitFor(() => expect(document.querySelectorAll('tbody tr')).toHaveLength(100));
+    const selectAll = document.querySelector('[aria-label="Select all displayed pages"]');
+    expect(selectAll).not.toBeNull();
+    expect(selectAll.indeterminate).toBe(false);
+
+    selectAll.checked = true;
+    selectAll.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll('tbody input[type="checkbox"]:checked')).toHaveLength(100),
+    );
+    expect(selectAll.checked).toBe(true);
+
+    document.querySelector('.pagination button:last-child').click();
+    await vi.waitFor(() => expect(pagesAPI.getPages).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(document.querySelector('tbody input[aria-label="Select https://example.test/100"]'))
+        .not.toBeNull(),
+    );
+    const secondPageHeader = document.querySelector('[aria-label="Select all displayed pages"]');
+    const firstPageRow = document.querySelector(
+      'tbody input[aria-label="Select https://example.test/100"]',
+    );
+    firstPageRow.checked = true;
+    firstPageRow.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(secondPageHeader.indeterminate).toBe(true));
+    expect(secondPageHeader.getAttribute('aria-checked')).toBe('mixed');
+
+    secondPageHeader.checked = true;
+    secondPageHeader.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll('tbody input[type="checkbox"]:checked')).toHaveLength(100),
+    );
+    secondPageHeader.checked = false;
+    secondPageHeader.dispatchEvent(new Event('change', { bubbles: true }));
+
+    await vi.waitFor(() =>
+      expect(document.querySelector('.bulk-action-bar span').textContent.trim()).toBe('100 selected'),
+    );
+    expect(document.querySelectorAll('tbody input[type="checkbox"]:checked')).toHaveLength(0);
+  });
+
   it('restores search state, sends it with page filters, and exposes the stored HTML limitation', async () => {
     pagesAPI.getPages.mockResolvedValue([]);
     component = mount(PagesExplorer, {

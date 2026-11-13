@@ -348,6 +348,8 @@ Views:
 - перегляд stored HTML;
 - CSV export відфільтрованого набору;
 - selection і export selected rows для selectable tables;
+- У Pages → All / HTML прапорець у заголовку обирає або знімає вибір усіх
+  рядків поточної сторінки результатів, не змінюючи вибір на інших сторінках;
 - admin rescan та delete selected pages;
 - ручний recompute depth, PageRank, near duplicates і hreflang validation.
 

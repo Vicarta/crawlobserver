@@ -85,10 +85,20 @@
   let redirectPagesOffset = $state(0);
   let hasMoreRedirectPages = $state(false);
   let selectedPages = $state({});
+  let selectAllPagesInput = $state(null);
   let rescanning = $state(false);
   let deleting = $state(false);
   let selectedList = $derived(Object.keys(selectedPages));
   let selectedRows = $derived(Object.values(selectedPages));
+  let selectedVisibleCount = $derived(pages.filter((page) => selectedPages[page.URL]).length);
+  let allVisibleSelected = $derived(pages.length > 0 && selectedVisibleCount === pages.length);
+  let someVisibleSelected = $derived(selectedVisibleCount > 0 && !allVisibleSelected);
+
+  $effect(() => {
+    if (selectAllPagesInput) {
+      selectAllPagesInput.indeterminate = someVisibleSelected;
+    }
+  });
 
   function basePath() {
     return `/sessions/${sessionId}/pages`;
@@ -600,6 +610,15 @@
     selectedPages = next;
   }
 
+  function toggleVisibleSelection(checked) {
+    const next = { ...selectedPages };
+    for (const page of pages) {
+      if (checked) next[page.URL] = page;
+      else delete next[page.URL];
+    }
+    selectedPages = next;
+  }
+
   function clearSelection() {
     selectedPages = {};
   }
@@ -806,6 +825,21 @@
       {sortOrder}
       onsort={handleSort}
     >
+      {#snippet selectionHeader(firstColumn)}
+        {#if isAdmin}
+          <input
+            bind:this={selectAllPagesInput}
+            type="checkbox"
+            checked={allVisibleSelected}
+            aria-label={t('pages.selectAllDisplayed')}
+            aria-checked={someVisibleSelected ? 'mixed' : allVisibleSelected}
+            disabled={pages.length === 0 || searchPending || !!searchError}
+            onchange={(event) => toggleVisibleSelection(event.currentTarget.checked)}
+          />
+        {:else}
+          {firstColumn.label}
+        {/if}
+      {/snippet}
       {#snippet row(p)}
         <tr>
           {#if isAdmin}

@@ -595,6 +595,7 @@
   "pages.search.regex": "Regex",
   "pages.search.regexHelp": "Case-sensitive RE2 regular expression",
   "pages.search.storedHtmlNote": "Page text search uses stored HTML only. Crawls without store_html match URL, title, and meta description.",
+  "pages.selectAllDisplayed": "Select all displayed pages",
   "links.internal": "Internal",
   "links.external": "External",
   "links.backlinks": "Backlinks",

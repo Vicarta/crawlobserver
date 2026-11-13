@@ -21,6 +21,7 @@
     sortColumn = '',
     sortOrder = '',
     onsort,
+    selectionHeader,
   } = $props();
 
   const FALLBACK_COLUMN_WIDTH = 140;
@@ -196,7 +197,11 @@
           </th>
         {:else}
           <th style={headerStyle(col, idx)} class={col.class || ''}>
-            {col.label}
+            {#if idx === 0 && selectionHeader}
+              {@render selectionHeader(col)}
+            {:else}
+              {col.label}
+            {/if}
             <button
               type="button"
               class="column-resize-handle"
