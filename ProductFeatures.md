@@ -386,6 +386,9 @@ shared rendered metadata shell diagnostics без site-specific правил.
 - Опційний пілот `crawler.store_link_position` зберігає XPath, семантичну
   область (landmark), глибину, порядок у документі та підпис блоку для перших
   1 000 посилань на сторінці. Ліміт не обрізає граф і не змінює PageRank.
+- API-запит на запуск сесії може передати `store_link_position` як per-run
+  перевизначення; відсутнє поле зберігає поточне значення конфігурації. Такий
+  override не змінює process default і не переноситься у згенерований Delta-запит.
 - Links → Internal показує landmark і XPath; URL Detail показує landmark
   із XPath у підказці. Метадані зберігаються в Daily Delta та Current Snapshot.
   Пілот вимкнено за замовчуванням; історичні сесії не перераховуються.

@@ -84,6 +84,29 @@ func TestRestoreSavedCrawlerConfigLinkPositionOptIn(t *testing.T) {
 	}
 }
 
+func TestApplyStoreLinkPositionRequestOverride(t *testing.T) {
+	tests := []struct {
+		name     string
+		current  bool
+		override *bool
+		want     bool
+	}{
+		{name: "omitted request keeps default off", want: false},
+		{name: "omitted request keeps default on", current: true, want: true},
+		{name: "explicit true", override: boolPtr(true), want: true},
+		{name: "explicit false", current: true, override: boolPtr(false), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.CrawlerConfig{StoreLinkPosition: tt.current}
+			applyStoreLinkPositionOverride(&cfg, tt.override)
+			if cfg.StoreLinkPosition != tt.want {
+				t.Errorf("StoreLinkPosition = %t, want %t", cfg.StoreLinkPosition, tt.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // NewManager
 // ---------------------------------------------------------------------------

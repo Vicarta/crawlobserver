@@ -1588,10 +1588,11 @@ func TestCRUD_StartCrawl(t *testing.T) {
 	}
 
 	body := jsonBody(t, map[string]interface{}{
-		"seeds":      []string{"https://example.com"},
-		"max_pages":  100,
-		"workers":    5,
-		"project_id": project.ID,
+		"seeds":               []string{"https://example.com"},
+		"max_pages":           100,
+		"workers":             5,
+		"project_id":          project.ID,
+		"store_link_position": true,
 	})
 	req := authRequest(httptest.NewRequest("POST", "/api/crawl", body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1612,6 +1613,9 @@ func TestCRUD_StartCrawl(t *testing.T) {
 	}
 	if mm.startCalls[0].ProjectID == nil || *mm.startCalls[0].ProjectID != project.ID {
 		t.Fatalf("StartCrawl project_id = %v, want %s", mm.startCalls[0].ProjectID, project.ID)
+	}
+	if mm.startCalls[0].StoreLinkPosition == nil || !*mm.startCalls[0].StoreLinkPosition {
+		t.Fatalf("StartCrawl store_link_position = %v, want true", mm.startCalls[0].StoreLinkPosition)
 	}
 }
 

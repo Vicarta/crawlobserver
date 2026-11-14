@@ -1227,7 +1227,7 @@ func TestDeltaPlanLineageCapturesD1WatermarkAndRawF1Source(t *testing.T) {
 	settings := apikeys.DefaultProjectDeltaSettings(projectID)
 	req, err := srv.deltaCrawlRequest(&deltaCandidateResult{
 		settings:                 &settings,
-		baseline:                 &storage.CrawlSession{ID: materializedID},
+		baseline:                 &storage.CrawlSession{ID: materializedID, Config: `{"Crawler":{"StoreLinkPosition":true}}`},
 		baselineSourceID:         lineage.SourceSessionID,
 		baselineEvaluation:       lineage.QualityEvaluationRevision,
 		baselineSourceEvaluation: lineage.BaselineQualityEvaluationRevision,
@@ -1244,6 +1244,9 @@ func TestDeltaPlanLineageCapturesD1WatermarkAndRawF1Source(t *testing.T) {
 		req.DeltaPlan.BaselineSourceEvaluationRevision != fullEval ||
 		req.DeltaPlan.BaselineSnapshotRevision != 8 {
 		t.Fatalf("D1 -> D2 persisted DeltaPlan = %#v", req.DeltaPlan)
+	}
+	if req.StoreLinkPosition != nil {
+		t.Fatalf("Delta request StoreLinkPosition = %t, want unset so per-run API opt-in is not inherited", *req.StoreLinkPosition)
 	}
 }
 

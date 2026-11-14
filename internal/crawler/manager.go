@@ -82,6 +82,12 @@ func boolValue(v *bool, fallback bool) bool {
 	return *v
 }
 
+func applyStoreLinkPositionOverride(cfg *config.CrawlerConfig, override *bool) {
+	if override != nil {
+		cfg.StoreLinkPosition = *override
+	}
+}
+
 // queuedCrawl holds a crawl waiting for a semaphore slot.
 type queuedCrawl struct {
 	sessionID string
@@ -146,6 +152,7 @@ type CrawlRequest struct {
 	Workers                      int                     `json:"workers"`
 	Delay                        string                  `json:"delay"`
 	StoreHTML                    bool                    `json:"store_html"`
+	StoreLinkPosition            *bool                   `json:"store_link_position,omitempty"`
 	CrawlScope                   string                  `json:"crawl_scope"`
 	ProjectID                    *string                 `json:"project_id"`
 	CheckExternalLinks           *bool                   `json:"check_external_links"`
@@ -219,6 +226,7 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 		}
 	}
 	crawlerCfg.StoreHTML = req.StoreHTML
+	applyStoreLinkPositionOverride(&crawlerCfg, req.StoreLinkPosition)
 	if req.CrawlScope != "" {
 		crawlerCfg.CrawlScope = req.CrawlScope
 	}
