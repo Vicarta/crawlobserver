@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"github.com/SEObserver/crawlobserver/internal/crawler"
 	"github.com/SEObserver/crawlobserver/internal/normalizer"
 	"github.com/SEObserver/crawlobserver/internal/storage"
+	"github.com/google/uuid"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -537,14 +540,14 @@ func (s *Server) launchProjectDelta(ctx context.Context, projectID string, mode 
 	if err != nil {
 		return nil, "", err
 	}
-	return s.launchDeltaCandidateLocked(ctx, projectID, result)
+	return s.launchDeltaCandidateLocked(ctx, projectID, result, mode)
 }
 
 // launchDeltaCandidateLocked consumes one already-planned candidate set while
 // the caller owns qualityPromotionLock(projectID). Keeping this narrow helper
 // separate makes it impossible for manual and scheduler launches to leave a
 // gap between evidence validation and the durable run reservation.
-func (s *Server) launchDeltaCandidateLocked(ctx context.Context, projectID string, result *deltaCandidateResult) (*deltaCandidateResult, string, error) {
+func (s *Server) launchDeltaCandidateLocked(ctx context.Context, projectID string, result *deltaCandidateResult, mode deltaLaunchMode) (*deltaCandidateResult, string, error) {
 	if result == nil || result.settings == nil || result.baseline == nil || result.preview.WillLaunch == 0 || len(result.urls) == 0 {
 		return result, "", errDeltaLaunchNoCandidates
 	}
@@ -559,8 +562,24 @@ func (s *Server) launchDeltaCandidateLocked(ctx context.Context, projectID strin
 	if err != nil {
 		return result, "", err
 	}
+	claimedMarker, reservedSessionID := "", ""
+	if mode == deltaLaunchScheduled {
+		claimedMarker, reservedSessionID, err = s.claimScheduledDeltaXPath(ctx, projectID, result.settings)
+		if err != nil {
+			return result, "", err
+		}
+		if claimedMarker != "" {
+			req.StoreLinkPosition = boolPtr(true)
+			req.ReservedSessionID = reservedSessionID
+		}
+	}
 	sessionID, err := s.manager.StartCrawl(req)
 	if err != nil {
+		if claimedMarker != "" {
+			if restoreErr := os.Rename(claimedMarker, strings.TrimSuffix(claimedMarker, ".claimed-"+reservedSessionID)+".pending"); restoreErr != nil {
+				return result, "", fmt.Errorf("starting delta crawl: %w; restoring XPath marker: %v", err, restoreErr)
+			}
+		}
 		return result, "", err
 	}
 	// A started session must be visible to every local launch path before the
@@ -582,10 +601,115 @@ func (s *Server) launchDeltaCandidateLocked(ctx context.Context, projectID strin
 		return result, sessionID, fmt.Errorf("marking started delta crawl: %w; rollback of session %s is not yet terminal; reservation retained", err, sessionID)
 	}
 	s.deltaLaunchReservations.Delete(projectID)
+	if claimedMarker != "" {
+		if err := os.Rename(claimedMarker, strings.TrimSuffix(claimedMarker, ".claimed-"+reservedSessionID)+".done-"+reservedSessionID); err != nil {
+			applog.Warnf("server", "delta crawl %s started but XPath marker tombstone was not written: %v", sessionID, err)
+		}
+	}
 	if len(result.manual) > 0 {
 		_ = s.keyStore.MarkProjectDeltaManualURLsConsumed(projectID, result.manual, now)
 	}
 	return result, sessionID, nil
+}
+
+// claimScheduledDeltaXPath binds an armed marker to the session that will start.
+// Recovery retries only when neither the run receipt nor session exists.
+func (s *Server) claimScheduledDeltaXPath(ctx context.Context, projectID string, settings *apikeys.ProjectDeltaSettings) (string, string, error) {
+	parsed, err := uuid.Parse(projectID)
+	if err != nil || parsed.String() != projectID {
+		return "", "", nil
+	}
+	base, err := deltaXPathMarkerBase(s.cfg, projectID)
+	if err != nil {
+		return "", "", err
+	}
+	pending := base + ".pending"
+	entries, err := os.ReadDir(filepath.Dir(base))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("listing scheduled delta XPath claims: %w", err)
+	}
+	donePrefix := filepath.Base(base) + ".done-"
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), donePrefix) {
+			return "", "", nil
+		}
+	}
+	claimPrefix := filepath.Base(base) + ".claimed-"
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), claimPrefix) {
+			continue
+		}
+		claimID := strings.TrimPrefix(entry.Name(), claimPrefix)
+		parsed, parseErr := uuid.Parse(claimID)
+		if parseErr != nil || parsed.String() != claimID || !entry.Type().IsRegular() {
+			return "", "", fmt.Errorf("invalid scheduled delta XPath claim")
+		}
+		claimed := filepath.Join(filepath.Dir(base), entry.Name())
+		done := base + ".done-" + claimID
+		if settings != nil && settings.LastSessionID == claimID {
+			if err := os.Rename(claimed, done); err != nil {
+				return "", "", fmt.Errorf("finalizing scheduled delta XPath claim: %w", err)
+			}
+			return "", "", errDeltaLaunchNotDue
+		}
+		session, lookupErr := s.store.GetSession(ctx, claimID)
+		if errors.Is(lookupErr, sql.ErrNoRows) {
+			if _, pendingErr := os.Lstat(pending); pendingErr == nil {
+				return "", "", fmt.Errorf("pending scheduled delta XPath marker already exists during recovery")
+			} else if !errors.Is(pendingErr, os.ErrNotExist) {
+				return "", "", fmt.Errorf("checking pending scheduled delta XPath marker during recovery: %w", pendingErr)
+			}
+			if err := os.Rename(claimed, pending); err != nil {
+				return "", "", fmt.Errorf("restoring uncommitted scheduled delta XPath claim: %w", err)
+			}
+			continue
+		}
+		if lookupErr != nil || session == nil || session.ProjectID == nil || *session.ProjectID != projectID {
+			return "", "", fmt.Errorf("cannot resolve scheduled delta XPath claim: %v", lookupErr)
+		}
+		if settings == nil || settings.LastRunAt == nil || settings.LastRunAt.Before(session.StartedAt) {
+			if err := s.markDeltaRun(projectID, claimID, session.StartedAt); err != nil {
+				return "", "", fmt.Errorf("recording recovered scheduled delta run: %w", err)
+			}
+		}
+		if err := os.Rename(claimed, done); err != nil {
+			return "", "", fmt.Errorf("finalizing scheduled delta XPath claim: %w", err)
+		}
+		return "", "", errDeltaLaunchNotDue
+	}
+	info, err := os.Lstat(pending)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("checking scheduled delta XPath marker: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", "", fmt.Errorf("scheduled delta XPath marker is not a regular file")
+	}
+	claimID := uuid.NewString()
+	claimed := base + ".claimed-" + claimID
+	if err := os.Rename(pending, claimed); err != nil {
+		return "", "", fmt.Errorf("claiming scheduled delta XPath marker: %w", err)
+	}
+	return claimed, claimID, nil
+}
+
+func deltaXPathMarkerBase(cfg *config.Config, projectID string) (string, error) {
+	var stateDir string
+	var err error
+	if cfg != nil && filepath.IsAbs(cfg.Server.SQLitePath) {
+		stateDir = filepath.Dir(cfg.Server.SQLitePath)
+	} else {
+		stateDir, err = config.WriterStateDir()
+	}
+	if err != nil {
+		return "", fmt.Errorf("locating scheduled delta XPath marker: %w", err)
+	}
+	return filepath.Join(stateDir, "daily-delta-xpath-"+projectID), nil
 }
 
 // validateDeltaLaunchReservation re-reads only durable Current Snapshot and

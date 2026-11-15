@@ -153,6 +153,7 @@ type CrawlRequest struct {
 	Delay                        string                  `json:"delay"`
 	StoreHTML                    bool                    `json:"store_html"`
 	StoreLinkPosition            *bool                   `json:"store_link_position,omitempty"`
+	ReservedSessionID            string                  `json:"-"`
 	CrawlScope                   string                  `json:"crawl_scope"`
 	ProjectID                    *string                 `json:"project_id"`
 	CheckExternalLinks           *bool                   `json:"check_external_links"`
@@ -321,6 +322,10 @@ func (m *Manager) StartCrawl(req CrawlRequest) (string, error) {
 		engine.SetHTTPValidators(validators)
 	}
 	sessionID := engine.SessionID(sessionSeeds)
+	if req.ReservedSessionID != "" {
+		engine.SetSessionID(req.ReservedSessionID)
+		sessionID = req.ReservedSessionID
+	}
 	engine.session.ProjectID = req.ProjectID
 	engine.session.Label = req.Label
 	engine.SetInitialSitemapObservation(req.InitialSitemaps, req.InitialSitemapURLs)

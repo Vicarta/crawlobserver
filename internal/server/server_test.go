@@ -936,6 +936,9 @@ func (m *mockManager) StartCrawl(req crawler.CrawlRequest) (string, error) {
 	if m.startErr != nil {
 		return "", m.startErr
 	}
+	if req.ReservedSessionID != "" {
+		return req.ReservedSessionID, nil
+	}
 	if m.shouldQueue && m.queued != nil {
 		m.queued[m.startResult] = true
 		m.queueOrder = append(m.queueOrder, m.startResult)

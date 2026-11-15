@@ -490,6 +490,14 @@ shared rendered metadata shell diagnostics без site-specific правил.
 
 - Scheduled daily crawl у configurable time і timezone.
 - Manual Run now і non-mutating Preview.
+- Одноразовий operator opt-in для XPath позицій посилань: файл
+  `daily-delta-xpath-<project-uuid>.pending` у каталозі SQLite state вмикає
+  `store_link_position` лише для наступного scheduled Daily Delta цього проєкту.
+  Перед стартом файл атомарно стає `.claimed-<session-uuid>`; після durable
+  run receipt він стає постійним `.done-<session-uuid>`. Після restart claim
+  без session row і receipt повертається у `.pending`, а підтверджений старт
+  стає `.done`, тому opt-in не повторюється. Manual Run та інші проєкти не
+  споживають маркер; однозначна помилка `StartCrawl` повертає `.pending`.
 - Candidate sources: fresh sitemap, GSC, problem pages, stale pages і manual
   queue.
 - Fresh sitemap refresh перед preview/run/scheduled plan.

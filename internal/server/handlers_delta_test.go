@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -15,6 +18,7 @@ import (
 	"github.com/SEObserver/crawlobserver/internal/config"
 	"github.com/SEObserver/crawlobserver/internal/crawler"
 	"github.com/SEObserver/crawlobserver/internal/storage"
+	"github.com/google/uuid"
 )
 
 func TestRefreshDeltaSitemapUsesConfiguredRootAndExcludesHistoricalURL(t *testing.T) {
@@ -195,7 +199,7 @@ func TestBuildDeltaCandidatesFiltersRobotsBeforeBudgetAndKeepsManualQueuePending
 	if allBlocked.preview.WillLaunch != 0 || len(allBlocked.urls) != 0 || allBlocked.preview.Deferred != 0 {
 		t.Fatalf("all-blocked plan = %#v / %#v, want no launch and no deferred work", allBlocked.preview, allBlocked.urls)
 	}
-	if _, _, err := fixture.server.launchDeltaCandidateLocked(context.Background(), fixture.projectID, allBlocked); !errors.Is(err, errDeltaLaunchNoCandidates) {
+	if _, _, err := fixture.server.launchDeltaCandidateLocked(context.Background(), fixture.projectID, allBlocked, deltaLaunchManual); !errors.Is(err, errDeltaLaunchNoCandidates) {
 		t.Fatalf("all-blocked launch error = %v, want no candidates", err)
 	}
 }
@@ -766,7 +770,7 @@ func TestDeltaLaunchReservationRejectsStaleSnapshotAndProof(t *testing.T) {
 
 			lock := qualityPromotionLock(fixture.projectID)
 			lock.Lock()
-			_, _, err := fixture.server.launchDeltaCandidateLocked(context.Background(), fixture.projectID, result)
+			_, _, err := fixture.server.launchDeltaCandidateLocked(context.Background(), fixture.projectID, result, deltaLaunchManual)
 			lock.Unlock()
 			if !errors.Is(err, errDeltaLaunchEvidenceStale) {
 				t.Fatalf("launch error = %v, want stale launch evidence", err)
@@ -989,6 +993,193 @@ func TestDeltaLaunchReservationMarkFailureBlocksRetryWhenRollbackIsUnconfirmed(t
 	if len(fixture.manager.startCalls) != 1 {
 		t.Fatalf("StartCrawl calls = %d, want no duplicate retry", len(fixture.manager.startCalls))
 	}
+}
+
+func armScheduledDeltaXPath(t *testing.T, fixture *deltaLaunchFixture) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	fixture.server.cfg.Server.SQLitePath = filepath.Join(dir, "crawlobserver.db")
+	fixture.settings.Enabled = true
+	fixture.settings.ScheduleTime = "00:00"
+	fixture.settings.Timezone = "UTC"
+	if _, err := fixture.keyStore.SaveProjectDeltaSettings(*fixture.settings); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(dir, "daily-delta-xpath-"+fixture.projectID)
+	pending := base + ".pending"
+	if err := os.WriteFile(pending, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return pending, base
+}
+
+func TestScheduledDeltaXPathMarkerOnlyAppliesToArmedProject(t *testing.T) {
+	fixture := newDeltaLaunchFixture(t)
+	pending, base := armScheduledDeltaXPath(t, fixture)
+	otherPending := filepath.Join(filepath.Dir(pending), "daily-delta-xpath-"+uuid.NewString()+".pending")
+	if err := os.WriteFile(otherPending, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.manager.startResult = "manual-before-scheduled"
+	if _, _, err := fixture.server.launchProjectDelta(context.Background(), fixture.projectID, deltaLaunchManual); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.manager.startCalls[0].StoreLinkPosition != nil {
+		t.Fatal("manual crawl enabled XPath")
+	}
+	if _, err := os.Stat(pending); err != nil {
+		t.Fatalf("manual crawl changed pending marker: %v", err)
+	}
+	if claims, err := filepath.Glob(base + ".claimed-*"); err != nil || len(claims) != 0 {
+		t.Fatalf("manual crawl created claims: %v, %v", claims, err)
+	}
+
+	fixture = newDeltaLaunchFixture(t)
+	pending, base = armScheduledDeltaXPath(t, fixture)
+	otherPending = filepath.Join(filepath.Dir(pending), "daily-delta-xpath-"+uuid.NewString()+".pending")
+	if err := os.WriteFile(otherPending, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.manager.startResult = "xpath-scheduled"
+	_, sessionID, err := fixture.server.launchProjectDelta(context.Background(), fixture.projectID, deltaLaunchScheduled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fixture.manager.startCalls[0].StoreLinkPosition; got == nil || !*got {
+		t.Fatalf("scheduled crawl XPath = %v, want true", got)
+	}
+	reservedID := fixture.manager.startCalls[0].ReservedSessionID
+	if _, err := uuid.Parse(reservedID); err != nil {
+		t.Fatalf("reserved session ID = %q: %v", reservedID, err)
+	}
+	if sessionID != reservedID {
+		t.Fatalf("started session %q differs from reserved session %q", sessionID, reservedID)
+	}
+	if _, err := os.Stat(pending); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scheduled crawl retained pending marker: %v", err)
+	}
+	if _, err := os.Stat(base + ".done-" + reservedID); err != nil {
+		t.Fatalf("scheduled crawl did not write session tombstone: %v", err)
+	}
+	if _, err := os.Stat(otherPending); err != nil {
+		t.Fatalf("scheduled crawl changed another project marker: %v", err)
+	}
+	if secondClaim, _, err := fixture.server.claimScheduledDeltaXPath(context.Background(), fixture.projectID, fixture.settings); err != nil || secondClaim != "" {
+		t.Fatalf("claim after committed start = (%q, %v), want no repeat", secondClaim, err)
+	}
+}
+
+func TestScheduledDeltaXPathMarkerRestoredAfterStartError(t *testing.T) {
+	fixture := newDeltaLaunchFixture(t)
+	pending, base := armScheduledDeltaXPath(t, fixture)
+	fixture.manager.startErr = errors.New("forced start failure")
+	if _, _, err := fixture.server.launchProjectDelta(context.Background(), fixture.projectID, deltaLaunchScheduled); err == nil {
+		t.Fatal("scheduled start unexpectedly succeeded")
+	}
+	if _, err := os.Stat(pending); err != nil {
+		t.Fatalf("failed start did not restore marker: %v", err)
+	}
+	if claims, err := filepath.Glob(base + ".claimed-*"); err != nil || len(claims) != 0 {
+		t.Fatalf("failed start retained claims: %v, %v", claims, err)
+	}
+}
+
+func TestScheduledDeltaXPathMarkerRejectsSymlink(t *testing.T) {
+	fixture := newDeltaLaunchFixture(t)
+	pending, _ := armScheduledDeltaXPath(t, fixture)
+	if err := os.Remove(pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing", pending); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.server.launchProjectDelta(context.Background(), fixture.projectID, deltaLaunchScheduled); err == nil {
+		t.Fatal("symlink marker unexpectedly allowed a crawl")
+	}
+	if len(fixture.manager.startCalls) != 0 {
+		t.Fatal("StartCrawl called after invalid marker")
+	}
+}
+
+func TestScheduledDeltaXPathClaimRecovery(t *testing.T) {
+	t.Run("uncommitted start restores marker", func(t *testing.T) {
+		fixture := newDeltaLaunchFixture(t)
+		pending, base := armScheduledDeltaXPath(t, fixture)
+		oldID := uuid.NewString()
+		if err := os.Rename(pending, base+".claimed-"+oldID); err != nil {
+			t.Fatal(err)
+		}
+		fixture.server.store.(qualitySnapshotServerStore).mockStore.getSessionErr = sql.ErrNoRows
+		claim, newID, err := fixture.server.claimScheduledDeltaXPath(context.Background(), fixture.projectID, fixture.settings)
+		if err != nil || newID == oldID || claim != base+".claimed-"+newID {
+			t.Fatalf("recovered claim = (%q, %q, %v)", claim, newID, err)
+		}
+		if _, err := os.Stat(base + ".claimed-" + oldID); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("old uncommitted claim remains: %v", err)
+		}
+	})
+	t.Run("durable session finalizes marker and receipt", func(t *testing.T) {
+		fixture := newDeltaLaunchFixture(t)
+		pending, base := armScheduledDeltaXPath(t, fixture)
+		claimID := uuid.NewString()
+		if err := os.Rename(pending, base+".claimed-"+claimID); err != nil {
+			t.Fatal(err)
+		}
+		fixture.server.store.(qualitySnapshotServerStore).mockStore.getSessionByID[claimID] = &storage.CrawlSession{
+			ID: claimID, ProjectID: &fixture.projectID, StartedAt: time.Now().UTC().Add(-time.Minute),
+		}
+		if _, _, err := fixture.server.claimScheduledDeltaXPath(context.Background(), fixture.projectID, fixture.settings); !errors.Is(err, errDeltaLaunchNotDue) {
+			t.Fatalf("durable recovery error = %v", err)
+		}
+		if _, err := os.Stat(base + ".done-" + claimID); err != nil {
+			t.Fatalf("durable claim tombstone missing: %v", err)
+		}
+		settings, err := fixture.keyStore.GetProjectDeltaSettings(fixture.projectID)
+		if err != nil || settings.LastSessionID != claimID {
+			t.Fatalf("recovered run receipt = (%v, %v)", settings, err)
+		}
+	})
+	t.Run("storage error keeps claim and blocks launch", func(t *testing.T) {
+		fixture := newDeltaLaunchFixture(t)
+		pending, base := armScheduledDeltaXPath(t, fixture)
+		claimID := uuid.NewString()
+		claimed := base + ".claimed-" + claimID
+		if err := os.Rename(pending, claimed); err != nil {
+			t.Fatal(err)
+		}
+		fixture.server.store.(qualitySnapshotServerStore).mockStore.getSessionErr = errors.New("temporary storage error")
+		if _, _, err := fixture.server.claimScheduledDeltaXPath(context.Background(), fixture.projectID, fixture.settings); err == nil {
+			t.Fatal("ambiguous claim unexpectedly recovered")
+		}
+		if _, err := os.Stat(claimed); err != nil {
+			t.Fatalf("ambiguous claim removed: %v", err)
+		}
+	})
+	t.Run("newer manual receipt is not overwritten", func(t *testing.T) {
+		fixture := newDeltaLaunchFixture(t)
+		pending, base := armScheduledDeltaXPath(t, fixture)
+		claimID := uuid.NewString()
+		if err := os.Rename(pending, base+".claimed-"+claimID); err != nil {
+			t.Fatal(err)
+		}
+		fixture.server.store.(qualitySnapshotServerStore).mockStore.getSessionByID[claimID] = &storage.CrawlSession{
+			ID: claimID, ProjectID: &fixture.projectID, StartedAt: time.Now().UTC().Add(-time.Hour),
+		}
+		if err := fixture.keyStore.MarkProjectDeltaRun(fixture.projectID, "newer-manual-run", time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := fixture.keyStore.GetProjectDeltaSettings(fixture.projectID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := fixture.server.claimScheduledDeltaXPath(context.Background(), fixture.projectID, settings); !errors.Is(err, errDeltaLaunchNotDue) {
+			t.Fatalf("recovery with newer receipt error = %v", err)
+		}
+		settings, err = fixture.keyStore.GetProjectDeltaSettings(fixture.projectID)
+		if err != nil || settings.LastSessionID != "newer-manual-run" {
+			t.Fatalf("newer manual receipt changed = (%v, %v)", settings, err)
+		}
+	})
 }
 
 type blockingDeltaLaunchManager struct {
