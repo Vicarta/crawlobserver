@@ -47,11 +47,15 @@ func (s *Store) GetExternalLinkChecks(ctx context.Context, sessionID string, lim
 		INNER JOIN crawlobserver.links AS l
 			ON l.crawl_session_id = ec.crawl_session_id
 			AND l.target_url = ec.url AND l.is_internal = false
-		LEFT JOIN crawlobserver.pages AS p
+		LEFT JOIN (
+			SELECT crawl_session_id, url, pagerank, depth
+			FROM crawlobserver.pages FINAL
+			WHERE crawl_session_id = ?
+		) AS p
 			ON p.crawl_session_id = ec.crawl_session_id
 			AND p.url = l.source_url
 		WHERE ec.crawl_session_id = ?`
-	queryArgs := []interface{}{sessionID}
+	queryArgs := []interface{}{sessionID, sessionID}
 
 	if where != "" {
 		query += " AND " + where

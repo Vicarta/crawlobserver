@@ -120,10 +120,10 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
 - Terminal session status публікується після recompute depth, Internal PageRank
   і near-duplicate analytics, щоб downstream quality gates читали завершені
   derived metrics.
-- Depth mutation обмежена партицією своєї сесії та синхронно очікує її
-  завершення. PageRank записує session-scoped `FINAL` rows через
-  `INSERT ... SELECT`, не очікуючи сторонні queued mutations у `pages`, і
-  зберігає початковий `crawled_at`. Він отримує окремий обмежений context
+- Depth і PageRank записують session-scoped `FINAL` rows через синхронний
+  `INSERT ... SELECT * REPLACE`, не створюючи й не очікуючи сторонні queued
+  mutations у `pages`; глибина змінює лише `depth`/`found_on`, а PageRank
+  зберігає початковий `crawled_at`. PageRank отримує окремий обмежений context
   після count/depth; їхній таймаут не витрачає його бюджет. Durable finalized
   evidence залишається обов'язковим для успішної фіналізації; помилки
   фіналізації PageRank для незупинених crawl завершуються як
@@ -419,6 +419,7 @@ shared rendered metadata shell diagnostics без site-specific правил.
 - Raw outbound links із source URL, external target, anchor, rel, tag та
   location.
 - Окремі URL checks і domain summaries.
+- URL check rows include source-page depth і PageRank із поточного стану сторінки.
 - Status, redirect та expired-domain diagnostics.
 - Current Snapshot використовує фактичні materialized raw graph edges.
 

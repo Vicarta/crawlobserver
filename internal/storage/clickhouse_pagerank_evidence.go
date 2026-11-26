@@ -24,7 +24,7 @@ var (
 	// the newest finalized PageRank evidence revision.
 	ErrPageRankReportUnavailable = errors.New("pagerank report unavailable")
 
-	pageRankAttemptLocks sync.Map // map[string]*sync.Mutex, keyed by session ID
+	pageRankAttemptLocks sync.Map // map[string]*pageRankSessionLock, keyed by session ID
 )
 
 const pageRankEvidenceQueryIdentity = "pagerank-final-readback-v1"
@@ -38,9 +38,49 @@ var sensitiveFailurePatterns = []struct {
 	{regexp.MustCompile(`(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|passwd|client[_-]?secret|secret)\b["']?\s*[:=]\s*["']?[^\s,"';&}\]]+["']?`), "${1}=[REDACTED]"},
 }
 
-func pageRankAttemptLock(sessionID string) *sync.Mutex {
-	lock, _ := pageRankAttemptLocks.LoadOrStore(sessionID, &sync.Mutex{})
-	return lock.(*sync.Mutex)
+type pageRankSessionLock struct {
+	occupied chan struct{}
+}
+
+func newPageRankSessionLock() *pageRankSessionLock {
+	return &pageRankSessionLock{occupied: make(chan struct{}, 1)}
+}
+
+func (l *pageRankSessionLock) Lock() {
+	l.occupied <- struct{}{}
+}
+
+func (l *pageRankSessionLock) Unlock() {
+	select {
+	case <-l.occupied:
+	default:
+		panic("sync: unlock of unlocked pageRankSessionLock")
+	}
+}
+
+func (l *pageRankSessionLock) LockContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case l.occupied <- struct{}{}:
+	}
+	if err := ctx.Err(); err != nil {
+		<-l.occupied
+		return err
+	}
+	return nil
+}
+
+func pageRankAttemptLock(sessionID string) *pageRankSessionLock {
+	lockKey := strings.ToLower(sessionID)
+	if parsedSessionID, err := uuid.Parse(sessionID); err == nil {
+		lockKey = parsedSessionID.String()
+	}
+	lock, _ := pageRankAttemptLocks.LoadOrStore(lockKey, newPageRankSessionLock())
+	return lock.(*pageRankSessionLock)
 }
 
 // PageRankOptionsSignature is stable across selector ordering and duplication.

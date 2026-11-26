@@ -2273,7 +2273,8 @@ func ComputeBFSDepths(seedURLs []string, crawledSet map[string]bool, adj map[str
 }
 
 func (s *Store) RecomputeDepths(ctx context.Context, sessionID string, seedURLs []string) error {
-	if !isValidUUID(sessionID) {
+	parsedSessionID, err := uuid.Parse(sessionID)
+	if err != nil {
 		return fmt.Errorf("invalid session ID: %s", sessionID)
 	}
 
@@ -2332,16 +2333,16 @@ func (s *Store) RecomputeDepths(ctx context.Context, sessionID string, seedURLs 
 	depths := bfsResult.Depths
 	foundOn := bfsResult.FoundOn
 
-	// 4. Write back depths via temp table (avoids SQL injection from crawled URLs)
-	tmpTable := fmt.Sprintf("crawlobserver.tmp_depths_%s", strings.ReplaceAll(sessionID, "-", ""))
-	if err := s.conn.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)); err != nil {
-		return fmt.Errorf("dropping old temp depths table: %w", err)
-	}
+	// 4. Write back depths via a unique Join table; crawled URLs stay data, not SQL.
+	tmpTable := fmt.Sprintf("crawlobserver.tmp_depths_%s_%s",
+		strings.ReplaceAll(parsedSessionID.String(), "-", ""), strings.ReplaceAll(uuid.NewString(), "-", ""))
 	if err := s.conn.Exec(ctx, fmt.Sprintf("CREATE TABLE %s (page_url String, new_depth UInt16, new_found_on String) ENGINE = Join(ANY, LEFT, page_url)", tmpTable)); err != nil {
 		return fmt.Errorf("creating temp depths table: %w", err)
 	}
 	defer func() {
-		if err := s.conn.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.conn.Exec(cleanupCtx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tmpTable)); err != nil {
 			applog.Warnf("storage", "cleanup temp table %s: %v", tmpTable, err)
 		}
 	}()
@@ -2372,18 +2373,26 @@ func (s *Store) RecomputeDepths(ctx context.Context, sessionID string, seedURLs 
 		}
 	}
 
-	// Use joinGet to look up depth/found_on from the Join-engine temp table.
-	// Single mutation, no data copy, no correlated subquery.
-	query := fmt.Sprintf(`ALTER TABLE crawlobserver.pages UPDATE
-		depth = joinGet('%s', 'new_depth', url),
-		found_on = joinGet('%s', 'new_found_on', url)
-		IN PARTITION tuple(toUUID(?))
+	// Copy the current session rows with only the derived depth fields changed.
+	query := fmt.Sprintf(`INSERT INTO crawlobserver.pages
+		SELECT * REPLACE (
+			joinGet('%s', 'new_depth', url) AS depth,
+			joinGet('%s', 'new_found_on', url) AS found_on
+		)
+		FROM crawlobserver.pages FINAL
 		WHERE crawl_session_id = ?
-		SETTINGS mutations_sync = 1`,
+		SETTINGS async_insert = 0`,
 		tmpTable, tmpTable)
-
-	if err := s.conn.Exec(ctx, query, sessionID, sessionID); err != nil {
-		return fmt.Errorf("updating depths via joinGet: %w", err)
+	writeErr := func() error {
+		lock := pageRankAttemptLock(sessionID)
+		if err := lock.LockContext(ctx); err != nil {
+			return err
+		}
+		defer lock.Unlock()
+		return s.conn.Exec(ctx, query, sessionID)
+	}()
+	if writeErr != nil {
+		return fmt.Errorf("writing depths via joinGet: %w", writeErr)
 	}
 
 	applog.Infof("storage", "RecomputeDepths: updated %d URLs for session %s", len(depths), sessionID)

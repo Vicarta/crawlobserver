@@ -15,6 +15,10 @@ func TestFinalizationMutationsStayInSessionPartition(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	targetSessionID, unrelatedSessionID := uuid.NewString(), uuid.NewString()
+	compactUppercaseSessionID := strings.ToUpper(strings.ReplaceAll(targetSessionID, "-", ""))
+	if pageRankAttemptLock(compactUppercaseSessionID) != pageRankAttemptLock(targetSessionID) {
+		t.Fatal("PageRank write lock does not normalize UUID aliases")
+	}
 	cleanupPageRankEvidenceSession(t, s, targetSessionID)
 	cleanupPageRankEvidenceSession(t, s, unrelatedSessionID)
 	t.Cleanup(func() {
@@ -105,17 +109,16 @@ func TestFinalizationMutationsStayInSessionPartition(t *testing.T) {
 			beforeDepth, beforeFoundOn, beforeRank, beforeRevision, afterDepth, afterFoundOn, afterRank, afterRevision)
 	}
 
-	depthTable := "tmp_depths_" + strings.ReplaceAll(targetSessionID, "-", "")
-	var depthMutation string
+	depthTablePrefix := "tmp_depths_" + strings.ReplaceAll(targetSessionID, "-", "")
+	var depthMutationCount uint64
 	if err := s.conn.QueryRow(ctx, `
-		SELECT command FROM system.mutations
-		WHERE database = 'crawlobserver' AND table = 'pages' AND position(command, ?) > 0
-		ORDER BY create_time DESC LIMIT 1`, depthTable,
-	).Scan(&depthMutation); err != nil {
-		t.Fatalf("read depth mutation command: %v", err)
+		SELECT count() FROM system.mutations
+		WHERE database = 'crawlobserver' AND table = 'pages' AND position(command, ?) > 0`, depthTablePrefix,
+	).Scan(&depthMutationCount); err != nil {
+		t.Fatalf("count depth mutations: %v", err)
 	}
-	if !strings.Contains(strings.ToUpper(depthMutation), "IN PARTITION") || !strings.Contains(depthMutation, "crawl_session_id") {
-		t.Errorf("depth mutation is not partition- and session-scoped: %s", depthMutation)
+	if depthMutationCount != 0 {
+		t.Errorf("depth writeback unexpectedly created %d mutations", depthMutationCount)
 	}
 
 	rankTable := "tmp_pagerank_" + strings.ReplaceAll(targetSessionID, "-", "")
@@ -140,12 +143,18 @@ func TestPageRankInsertWritebackIgnoresUnrelatedPendingMutation(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupPageRankEvidenceSession(t, s, targetSessionID)
 		cleanupPageRankEvidenceSession(t, s, unrelatedSessionID)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.conn.Exec(cleanupCtx, "ALTER TABLE crawlobserver.external_link_checks DROP PARTITION ?", targetSessionID); err != nil {
+			t.Logf("cleanup external_link_checks partition: %v", err)
+		}
 	})
 
 	targetURL := "https://rank-writeback.test/"
 	childURL := "https://rank-writeback.test/child"
 	missingURL := "https://rank-writeback.test/missing"
 	assetURL := "https://rank-writeback.test/style.css"
+	externalURL := "https://rank-writeback-external.test/"
 	unrelatedURL := "https://rank-writeback-unrelated.test/"
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	if err := s.InsertPages(ctx, []PageRow{
@@ -161,8 +170,14 @@ func TestPageRankInsertWritebackIgnoresUnrelatedPendingMutation(t *testing.T) {
 	if err := s.InsertLinks(ctx, []LinkRow{
 		{CrawlSessionID: targetSessionID, SourceURL: targetURL, TargetURL: childURL, IsInternal: true, CrawledAt: now},
 		{CrawlSessionID: targetSessionID, SourceURL: childURL, TargetURL: targetURL, IsInternal: true, CrawledAt: now},
+		{CrawlSessionID: targetSessionID, SourceURL: childURL, TargetURL: externalURL, IsInternal: false, CrawledAt: now},
 	}); err != nil {
 		t.Fatalf("InsertLinks: %v", err)
+	}
+	if err := s.InsertExternalLinkChecks(ctx, []ExternalLinkCheck{{
+		CrawlSessionID: targetSessionID, URL: externalURL, StatusCode: 200, CheckedAt: now,
+	}}); err != nil {
+		t.Fatalf("InsertExternalLinkChecks: %v", err)
 	}
 
 	oldRankTable := "tmp_pagerank_" + strings.ReplaceAll(targetSessionID, "-", "")
@@ -259,6 +274,62 @@ func TestPageRankInsertWritebackIgnoresUnrelatedPendingMutation(t *testing.T) {
 	}
 	cancelMutationWait()
 
+	if err := s.conn.Exec(ctx, "SYSTEM STOP MERGES crawlobserver.pages"); err != nil {
+		t.Fatalf("stop page merges for physical-version fixture: %v", err)
+	}
+	mergesStopped = true
+	for attempt := 0; attempt < 2; attempt++ {
+		depthCtx, cancelDepth := context.WithTimeout(ctx, 15*time.Second)
+		err := s.RecomputeDepths(depthCtx, targetSessionID, []string{targetURL})
+		cancelDepth()
+		if err != nil {
+			t.Fatalf("RecomputeDepths with unrelated pending mutation (attempt %d): %v", attempt+1, err)
+		}
+	}
+	assertDepthWritebackRows(t, s, targetSessionID, targetURL, childURL, missingURL, assetURL, now)
+	assertDepthTempTablesDropped(t, s, targetSessionID)
+
+	var physicalChildVersions uint64
+	if err := s.conn.QueryRow(ctx, `SELECT count() FROM crawlobserver.pages
+		WHERE crawl_session_id = ? AND url = ?`, targetSessionID, childURL).Scan(&physicalChildVersions); err != nil {
+		t.Fatalf("count physical child page versions: %v", err)
+	}
+	if physicalChildVersions < 2 {
+		t.Fatalf("physical child page versions = %d, want duplicate versions before merge", physicalChildVersions)
+	}
+	externalChecks, err := s.GetExternalLinkChecks(ctx, targetSessionID, 100, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("GetExternalLinkChecks after depth writeback: %v", err)
+	}
+	if len(externalChecks) != 1 {
+		t.Fatalf("external-link checks with duplicate source versions = %d rows, want 1", len(externalChecks))
+	}
+	if externalChecks[0].URL != externalURL || externalChecks[0].SourceURL != childURL || externalChecks[0].SourceDepth != 1 || externalChecks[0].SourcePageRank != 93 {
+		t.Fatalf("external-link source = %#v, want URL %q from child at depth 1 with PageRank 93", externalChecks[0], externalURL)
+	}
+
+	depthTablePrefix := "tmp_depths_" + strings.ReplaceAll(targetSessionID, "-", "")
+	var depthMutationCount uint64
+	if err := s.conn.QueryRow(ctx, `SELECT count() FROM system.mutations
+		WHERE database = 'crawlobserver' AND table = 'pages' AND position(command, ?) > 0`, depthTablePrefix).Scan(&depthMutationCount); err != nil {
+		t.Fatalf("count depth writeback mutations: %v", err)
+	}
+	if depthMutationCount != 0 {
+		t.Fatalf("depth writeback created %d mutations", depthMutationCount)
+	}
+	var depthMutationStillPending uint64
+	if err := s.conn.QueryRow(ctx, `SELECT count() FROM system.mutations
+		WHERE database = 'crawlobserver' AND table = 'pages' AND mutation_id = ? AND is_done = 0`, poisonMutationID).Scan(&depthMutationStillPending); err != nil {
+		t.Fatalf("check unrelated mutation after depth recompute: %v", err)
+	}
+	if depthMutationStillPending != 1 {
+		t.Fatalf("unrelated failed mutation count after depth recompute = %d, want 1 pending", depthMutationStillPending)
+	}
+	if err := s.conn.Exec(ctx, "SYSTEM START MERGES crawlobserver.pages"); err != nil {
+		t.Fatalf("start page merges after physical-version fixture: %v", err)
+	}
+	mergesStopped = false
+
 	computeCtx, cancelCompute := context.WithTimeout(ctx, 30*time.Second)
 	if err := s.ComputePageRankWithOptions(computeCtx, targetSessionID, PageRankOptions{IncludeFooterLinks: true}); err != nil {
 		cancelCompute()
@@ -271,6 +342,12 @@ func TestPageRankInsertWritebackIgnoresUnrelatedPendingMutation(t *testing.T) {
 	}
 	if firstEvidence.State != PageRankEvidenceFinalized {
 		t.Fatalf("PageRank evidence state = %s, want finalized", firstEvidence.State)
+	}
+	depthCtx, cancelDepth := context.WithTimeout(ctx, 15*time.Second)
+	err = s.RecomputeDepths(depthCtx, targetSessionID, []string{targetURL})
+	cancelDepth()
+	if err != nil {
+		t.Fatalf("RecomputeDepths after PageRank with unrelated pending mutation: %v", err)
 	}
 	assertPageRankWritebackRows(t, s, targetSessionID, firstEvidence.AttemptID, targetURL, childURL, missingURL, assetURL, unrelatedSessionID, unrelatedURL, now)
 	assertPageRankTempTableDropped(t, s, targetSessionID, firstEvidence.AttemptID)
@@ -330,28 +407,29 @@ func assertPageRankWritebackRows(t *testing.T, s *Store, sessionID, attemptID, t
 		title     string
 		bodyHTML  string
 		depth     uint16
+		foundOn   string
 		status    uint16
 		content   string
 		positive  bool
 		oldRank   float64
 		crawledAt time.Time
 	}{
-		{targetURL, "retained title", "<main>retained</main>", 4, 200, "text/html", true, 92, expectedCrawledAt},
-		{childURL, "child", "", 0, 200, "text/html", true, 93, expectedCrawledAt.Add(time.Second)},
-		{missingURL, "missing", "", 0, 404, "text/html", false, 94, expectedCrawledAt.Add(2 * time.Second)},
-		{assetURL, "asset", "", 0, 200, "text/css", false, 95, expectedCrawledAt.Add(3 * time.Second)},
+		{targetURL, "retained title", "<main>retained</main>", 0, "", 200, "text/html", true, 92, expectedCrawledAt},
+		{childURL, "child", "", 1, targetURL, 200, "text/html", true, 93, expectedCrawledAt.Add(time.Second)},
+		{missingURL, "missing", "", 2, "", 404, "text/html", false, 94, expectedCrawledAt.Add(2 * time.Second)},
+		{assetURL, "asset", "", 2, "", 200, "text/css", false, 95, expectedCrawledAt.Add(3 * time.Second)},
 	} {
-		var title, bodyHTML, contentType, revision string
+		var title, bodyHTML, foundOn, contentType, revision string
 		var depth, status uint16
 		var rank float64
 		var crawledAt time.Time
-		if err := s.conn.QueryRow(ctx, `SELECT title, body_html, depth, status_code, content_type, pagerank, toString(pagerank_revision), crawled_at
+		if err := s.conn.QueryRow(ctx, `SELECT title, body_html, depth, found_on, status_code, content_type, pagerank, toString(pagerank_revision), crawled_at
 			FROM crawlobserver.pages FINAL WHERE crawl_session_id = ? AND url = ?`, sessionID, want.url,
-		).Scan(&title, &bodyHTML, &depth, &status, &contentType, &rank, &revision, &crawledAt); err != nil {
+		).Scan(&title, &bodyHTML, &depth, &foundOn, &status, &contentType, &rank, &revision, &crawledAt); err != nil {
 			t.Fatalf("read PageRank writeback row %s: %v", want.url, err)
 		}
-		if title != want.title || bodyHTML != want.bodyHTML || depth != want.depth || status != want.status || contentType != want.content || !crawledAt.Equal(want.crawledAt) || revision != attemptID {
-			t.Errorf("page %s fields changed: title=%q html=%q depth=%d status=%d type=%q crawled_at=%s revision=%s", want.url, title, bodyHTML, depth, status, contentType, crawledAt, revision)
+		if title != want.title || bodyHTML != want.bodyHTML || depth != want.depth || foundOn != want.foundOn || status != want.status || contentType != want.content || !crawledAt.Equal(want.crawledAt) || revision != attemptID {
+			t.Errorf("page %s fields changed: title=%q html=%q depth=%d found_on=%q status=%d type=%q crawled_at=%s revision=%s", want.url, title, bodyHTML, depth, foundOn, status, contentType, crawledAt, revision)
 		}
 		if (rank > 0) != want.positive {
 			t.Errorf("page %s rank = %g, positive=%t; want positive=%t", want.url, rank, rank > 0, want.positive)
@@ -382,6 +460,53 @@ func assertPageRankWritebackRows(t *testing.T, s *Store, sessionID, attemptID, t
 	}
 	if unrelatedTitle != "unrelated" || unrelatedDepth != 7 || unrelatedRank != 42 || unrelatedRevision != "00000000-0000-0000-0000-000000000000" {
 		t.Errorf("unrelated page changed: title=%q depth=%d rank=%g revision=%s", unrelatedTitle, unrelatedDepth, unrelatedRank, unrelatedRevision)
+	}
+}
+
+func assertDepthWritebackRows(t *testing.T, s *Store, sessionID, targetURL, childURL, missingURL, assetURL string, expectedCrawledAt time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	for _, want := range []struct {
+		url       string
+		title     string
+		bodyHTML  string
+		depth     uint16
+		foundOn   string
+		status    uint16
+		content   string
+		rank      float64
+		crawledAt time.Time
+	}{
+		{targetURL, "retained title", "<main>retained</main>", 0, "", 200, "text/html", 92, expectedCrawledAt},
+		{childURL, "child", "", 1, targetURL, 200, "text/html", 93, expectedCrawledAt.Add(time.Second)},
+		{missingURL, "missing", "", 2, "", 404, "text/html", 94, expectedCrawledAt.Add(2 * time.Second)},
+		{assetURL, "asset", "", 2, "", 200, "text/css", 95, expectedCrawledAt.Add(3 * time.Second)},
+	} {
+		var title, bodyHTML, foundOn, contentType string
+		var depth, status uint16
+		var rank float64
+		var crawledAt time.Time
+		if err := s.conn.QueryRow(ctx, `SELECT title, body_html, depth, found_on, status_code, content_type, pagerank, crawled_at
+			FROM crawlobserver.pages FINAL WHERE crawl_session_id = ? AND url = ?`, sessionID, want.url,
+		).Scan(&title, &bodyHTML, &depth, &foundOn, &status, &contentType, &rank, &crawledAt); err != nil {
+			t.Fatalf("read depth writeback row %s: %v", want.url, err)
+		}
+		if title != want.title || bodyHTML != want.bodyHTML || depth != want.depth || foundOn != want.foundOn || status != want.status || contentType != want.content || rank != want.rank || !crawledAt.Equal(want.crawledAt) {
+			t.Errorf("page %s fields changed: title=%q html=%q depth=%d found_on=%q status=%d type=%q rank=%g crawled_at=%s", want.url, title, bodyHTML, depth, foundOn, status, contentType, rank, crawledAt)
+		}
+	}
+}
+
+func assertDepthTempTablesDropped(t *testing.T, s *Store, sessionID string) {
+	t.Helper()
+	tablePrefix := "tmp_depths_" + strings.ReplaceAll(sessionID, "-", "") + "_"
+	var count uint64
+	if err := s.conn.QueryRow(context.Background(), `SELECT count() FROM system.tables
+		WHERE database = 'crawlobserver' AND startsWith(name, ?)`, tablePrefix).Scan(&count); err != nil {
+		t.Fatalf("check depth temp table cleanup: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("depth temp tables remain after writeback: prefix=%s count=%d", tablePrefix, count)
 	}
 }
 
