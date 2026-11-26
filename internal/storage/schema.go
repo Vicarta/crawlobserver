@@ -801,6 +801,7 @@ var Migrations = []Migration{
 	{Name: "alter sessions v3 add label", DDL: AlterSessionsV3},
 	{Name: "create structured_data_items", DDL: CreateStructuredDataItems},
 	{Name: "alter pages v7 structured data", DDL: AlterPagesV7StructuredData},
+	{Name: "alter pages technical structured data report", DDL: AlterPagesTechnicalStructuredDataReport},
 	{Name: "alter pages v8 cwv", DDL: AlterPagesV8CWV},
 	{Name: "create hreflang_issues", DDL: CreateHreflangIssues},
 	{Name: "create crawl_quality_results", DDL: CreateCrawlQualityResults},
@@ -864,6 +865,14 @@ ALTER TABLE crawlobserver.pages
     ADD COLUMN IF NOT EXISTS schema_valid_count UInt16 DEFAULT 0,
     ADD COLUMN IF NOT EXISTS schema_error_count UInt16 DEFAULT 0,
     ADD COLUMN IF NOT EXISTS schema_warning_count UInt16 DEFAULT 0
+`
+
+const AlterPagesTechnicalStructuredDataReport = `
+ALTER TABLE crawlobserver.pages
+    ADD COLUMN IF NOT EXISTS structured_data_status LowCardinality(String) DEFAULT 'not_checked',
+    ADD COLUMN IF NOT EXISTS structured_data_formats Array(String) DEFAULT [],
+    ADD COLUMN IF NOT EXISTS structured_data_types Array(String) DEFAULT [],
+    ADD COLUMN IF NOT EXISTS structured_data_report String DEFAULT '{}' CODEC(ZSTD(3))
 `
 
 const AlterPagesV8CWV = `

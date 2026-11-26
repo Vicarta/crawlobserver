@@ -13,6 +13,7 @@ import (
 
 	"github.com/SEObserver/crawlobserver/internal/applog"
 	"github.com/SEObserver/crawlobserver/internal/parser"
+	"github.com/SEObserver/crawlobserver/internal/schema"
 	"github.com/google/uuid"
 )
 
@@ -51,6 +52,7 @@ func (s *Store) InsertPages(ctx context.Context, pages []PageRow) error {
 			js_changed_canonical, js_changed_content,
 			js_added_links, js_added_images, js_added_schema,
 			schema_valid_count, schema_error_count, schema_warning_count,
+			structured_data_status, structured_data_formats, structured_data_types, structured_data_report,
 			cwv_lcp_ms, cwv_cls, cwv_ttfb_ms, cwv_measured
 		)`)
 	if err != nil {
@@ -58,6 +60,36 @@ func (s *Store) InsertPages(ctx context.Context, pages []PageRow) error {
 	}
 
 	for _, p := range pages {
+		structuredDataReport := p.StructuredDataReport
+		if structuredDataReport.Status == "" {
+			structuredDataReport = emptyStructuredDataReport()
+		}
+		structuredDataStatus := p.StructuredDataStatus
+		if structuredDataStatus == "" {
+			structuredDataStatus = structuredDataReport.Status
+		}
+		if structuredDataStatus == "" {
+			structuredDataStatus = schema.StructuredDataNotChecked
+		}
+		structuredDataFormats := p.StructuredDataFormats
+		if structuredDataFormats == nil {
+			structuredDataFormats = structuredDataReport.Formats
+		}
+		if structuredDataFormats == nil {
+			structuredDataFormats = []string{}
+		}
+		structuredDataTypes := p.StructuredDataTypes
+		if structuredDataTypes == nil {
+			structuredDataTypes = structuredDataReport.Types
+		}
+		if structuredDataTypes == nil {
+			structuredDataTypes = []string{}
+		}
+		reportJSON, err := json.Marshal(structuredDataReport)
+		if err != nil {
+			return fmt.Errorf("marshalling structured-data report for %s: %w", p.URL, err)
+		}
+
 		// Convert redirect chain to ClickHouse tuple format
 		chain := make([][]interface{}, len(p.RedirectChain))
 		for i, hop := range p.RedirectChain {
@@ -94,6 +126,7 @@ func (s *Store) InsertPages(ctx context.Context, pages []PageRow) error {
 			p.JSChangedCanonical, p.JSChangedContent,
 			p.JSAddedLinks, p.JSAddedImages, p.JSAddedSchema,
 			p.SchemaValidCount, p.SchemaErrorCount, p.SchemaWarningCount,
+			structuredDataStatus, structuredDataFormats, structuredDataTypes, string(reportJSON),
 			p.CWVLCP, p.CWVCLS, p.CWVTTFB, p.CWVMeasured,
 		); err != nil {
 			return fmt.Errorf("appending page row: %w", err)
@@ -101,6 +134,15 @@ func (s *Store) InsertPages(ctx context.Context, pages []PageRow) error {
 	}
 
 	return batch.Send()
+}
+
+func emptyStructuredDataReport() schema.TechnicalStructuredDataReport {
+	return schema.TechnicalStructuredDataReport{
+		Status: schema.StructuredDataNotChecked, Coverage: "not_checked",
+		Formats: []string{}, Types: []string{}, Sources: []schema.TechnicalStructuredDataSource{},
+		Entities:    []schema.TechnicalStructuredDataEntity{},
+		Diagnostics: []schema.TechnicalStructuredDataDiagnostic{},
+	}
 }
 
 // CountPages returns the total number of pages for a session.
@@ -128,6 +170,7 @@ func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset i
 			internal_links_out, external_links_out,
 			images_count, images_no_alt,
 			lang, og_title, og_description, og_image, schema_types,
+			p.structured_data_types,
 			page_created_at, page_modified_at,
 			body_size, fetch_duration_ms, content_encoding, x_robots_tag,
 			error, depth, found_on,
@@ -231,6 +274,7 @@ func (s *Store) ListPages(ctx context.Context, sessionID string, limit, offset i
 			&p.InternalLinksOut, &p.ExternalLinksOut,
 			&p.ImagesCount, &p.ImagesNoAlt,
 			&p.Lang, &p.OGTitle, &p.OGDescription, &p.OGImage, &p.SchemaTypes,
+			&p.StructuredDataTypes,
 			&p.PageCreatedAt, &p.PageModifiedAt,
 			&p.BodySize, &p.FetchDurationMs, &p.ContentEncoding, &p.XRobotsTag,
 			&p.Error, &p.Depth, &p.FoundOn, &p.DiscoverySource, &p.DiscoveryDetail, &p.IsInSitemap,
@@ -793,6 +837,7 @@ func (s *Store) GetPage(ctx context.Context, sessionID, url string) (*PageRow, e
 	var redirectChain []map[string]interface{}
 	var hreflang []map[string]interface{}
 	var bodyHTMLForOutline string
+	var structuredDataReportJSON string
 
 	row := s.conn.QueryRow(ctx, `
 		SELECT crawl_session_id, url, final_url, status_code, content_type,
@@ -802,6 +847,7 @@ func (s *Store) GetPage(ctx context.Context, sessionID, url string) (*PageRow, e
 			word_count, internal_links_out, external_links_out,
 			images_count, images_no_alt, hreflang,
 			lang, og_title, og_description, og_image, schema_types,
+			structured_data_status, structured_data_formats, structured_data_types, structured_data_report,
 			page_created_at, page_modified_at,
 			headers, redirect_chain, body_size, fetch_duration_ms,
 			content_encoding, x_robots_tag,
@@ -831,6 +877,7 @@ func (s *Store) GetPage(ctx context.Context, sessionID, url string) (*PageRow, e
 		&p.WordCount, &p.InternalLinksOut, &p.ExternalLinksOut,
 		&p.ImagesCount, &p.ImagesNoAlt, &hreflang,
 		&p.Lang, &p.OGTitle, &p.OGDescription, &p.OGImage, &p.SchemaTypes,
+		&p.StructuredDataStatus, &p.StructuredDataFormats, &p.StructuredDataTypes, &structuredDataReportJSON,
 		&p.PageCreatedAt, &p.PageModifiedAt,
 		&p.Headers, &redirectChain, &p.BodySize, &p.FetchDurationMs,
 		&p.ContentEncoding, &p.XRobotsTag,
@@ -850,6 +897,12 @@ func (s *Store) GetPage(ctx context.Context, sessionID, url string) (*PageRow, e
 		&bodyHTMLForOutline,
 	); err != nil {
 		return nil, fmt.Errorf("querying page detail: %w", err)
+	}
+	if err := json.Unmarshal([]byte(structuredDataReportJSON), &p.StructuredDataReport); err != nil {
+		return nil, fmt.Errorf("decoding structured-data report: %w", err)
+	}
+	if p.StructuredDataReport.Status == "" {
+		p.StructuredDataReport = emptyStructuredDataReport()
 	}
 
 	for _, m := range redirectChain {

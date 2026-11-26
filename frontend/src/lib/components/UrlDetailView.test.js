@@ -8,6 +8,7 @@ vi.mock('../api.js', () => ({
       FinalURL: 'https://example.com/final/',
       StatusCode: 404,
       ContentType: 'text/html',
+      StructuredDataStatus: 'no_markup',
       BodySize: 12000,
       FetchDurationMs: 120,
       Depth: 6,
@@ -54,6 +55,7 @@ vi.mock('../api.js', () => ({
   })),
   getBacklinksTop: vi.fn(),
   getStructuredData: vi.fn(),
+  getStructuredDataReport: vi.fn(async () => ({ pages: [] })),
   getHreflangValidation: vi.fn(),
   computeHreflangValidation: vi.fn(),
   getGSCPageQueries: vi.fn(async () => ({ rows: [], total: 0 })),
@@ -90,5 +92,26 @@ describe('UrlDetailView discovery evidence', () => {
     expect(text).toContain('Old article');
     expect(text).toContain('https://example.com/old');
     expect(text.indexOf('URL discovered from')).toBeLessThan(text.indexOf('GSC Ranking Keywords'));
+  });
+
+  it('shows an explicit empty state when a successful report has no page row', async () => {
+    component = mount(UrlDetailView, {
+      target: document.body,
+      props: {
+        sessionId: 'session-1',
+        projectId: 'project-1',
+        url: 'https://example.com/final/',
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain('Structured Data');
+    });
+    [...document.querySelectorAll('button')]
+      .find((button) => button.textContent.includes('Show validation details'))
+      .click();
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain('No technical report row is available for this URL in this session.');
+    });
   });
 });

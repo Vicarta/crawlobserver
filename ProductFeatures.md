@@ -231,6 +231,7 @@ URL Detail містить:
 - status, content type, size, response time, depth, PageRank і crawl time;
 - response headers;
 - SEO, Open Graph, headings hierarchy та structured data;
+- технічне спостереження JSON-LD/Microdata окремо від наявних field checks;
 - content і link metrics;
 - JS Rendering та Static vs Rendered comparison;
 - Core Web Vitals Lab data;
@@ -319,6 +320,23 @@ Pages і URL Detail використовують спільну source classific
 - Rating filter, sorting, pagination та URL Detail navigation.
 - Це lab data конкретного crawl, а не Chrome UX Report field data.
 
+### Structured Data
+
+- Report після Core Web Vitals із session-wide summary та фільтрами за status,
+  форматом і фактично виявленим vocabulary type.
+- URL rows переходять у URL Detail; список показує origin спостереження,
+  format, типи, кількість JSON-LD entities і обмежений preview diagnostics.
+- JSON-LD перевіряється на синтаксис; Microdata показується як detection-only.
+  Coverage позначає, що саме було перевірено, а status не означає Schema.org
+  conformance чи eligibility у пошукових системах. `no_markup` означає, що не
+  виявлено JSON-LD або Microdata; RDFa не перевіряється.
+- Нерозпізнаний format залишається `not_checked`, а не `clean`.
+- Історичні сторінки без нового технічного спостереження лишаються
+  `not_checked`; legacy heuristic types не переходять у технічний звіт чи нову
+  колонку. Обрізаний HTML позначається як неповне спостереження.
+- JSON-LD entities є typed detections без розгортання `@context` чи resolution
+  графа за `@id`; лічильник не включає Microdata detections.
+
 ## 10. Pages explorer
 
 Views:
@@ -344,6 +362,8 @@ Views:
 - `!value` syntax для exclusion у text filters;
 - persisted resizable columns;
 - overflow tooltips для довгих URL і titles;
+- Schema Type у Pages → All / HTML показує фактично виявлені vocabulary types;
+  історичні legacy heuristic values зберігаються лише в legacy field/endpoint.
 - перехід у URL Detail та відкриття URL у браузері;
 - перегляд stored HTML;
 - CSV export відфільтрованого набору;
@@ -691,6 +711,9 @@ shared rendered metadata shell diagnostics без site-specific правил.
 
 - REST API для проєктів, сесій, pages, links, reports, directives, resources,
   PageRank, GSC, providers, quality, Delta, custom tests, extractions і admin.
+- Session-scoped `GET /api/sessions/{id}/structured-data/report` із summary,
+  pagination, status/format/type filters та URL detail observation; legacy
+  `GET /api/sessions/{id}/structured-data` зберігає попередній контракт.
 - Readback API для current/immutable quality history і PageRank evidence, а
   також admin-only idempotent quality re-evaluation із typed conflict response.
 - Health і server-info endpoints.

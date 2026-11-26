@@ -3,6 +3,7 @@
     getPageDetail,
     getBacklinksTop,
     getStructuredData,
+    getStructuredDataReport,
     getHreflangValidation,
     computeHreflangValidation,
     getGSCPageQueries,
@@ -26,19 +27,57 @@
 
   // Structured data
   let sdItems = $state(null);
+  let sdReport = $state(null);
+  let sdReportEmpty = $state(false);
+  let sdReportError = $state('');
   let sdLoading = $state(false);
   let sdExpanded = $state(false);
 
   async function loadStructuredData() {
-    if (sdLoading || sdItems) return;
+    if (sdLoading || (sdItems && sdReport)) return;
     sdLoading = true;
-    try {
-      sdItems = await getStructuredData(sessionId, url);
-    } catch (e) {
-      sdItems = [];
+    sdReportEmpty = false;
+    sdReportError = '';
+    const [legacyResult, reportResult] = await Promise.allSettled([
+      getStructuredData(sessionId, url),
+      getStructuredDataReport(sessionId, { url }),
+    ]);
+    sdItems = legacyResult.status === 'fulfilled' ? legacyResult.value : [];
+    if (reportResult.status === 'fulfilled') {
+      sdReport = reportResult.value?.pages?.[0] || null;
+      sdReportEmpty = !sdReport;
+    } else {
+      sdReportError = reportResult.reason?.message || String(reportResult.reason);
+      onerror?.(sdReportError);
     }
     sdLoading = false;
     sdExpanded = true;
+  }
+
+  function sdStatusLabel(value) {
+    return t(`report.structuredData.status.${value || 'not_checked'}`);
+  }
+
+  function sdCoverageLabel(value) {
+    return t(`report.structuredData.coverage.${value || 'not_checked'}`);
+  }
+
+  function sdDiagnosticLabel(diagnostic) {
+    const location = [t(`report.structuredData.source.${diagnostic.source}`)];
+    if (diagnostic.block_index) location.push(t('report.structuredData.block', { index: diagnostic.block_index }));
+    if (diagnostic.byte_end > diagnostic.byte_start) {
+      location.push(t('report.structuredData.bytes', { start: diagnostic.byte_start, end: diagnostic.byte_end }));
+    } else if (diagnostic.code === 'json_ld_invalid_json') {
+      location.push(t('report.structuredData.eofByte', { offset: diagnostic.byte_start }));
+    }
+    return `${diagnostic.code} · ${location.join(' · ')}`;
+  }
+
+  function sdStatusClass(value) {
+    if (value === 'issues') return 'badge-error';
+    if (value === 'clean') return 'badge-success';
+    if (value === 'no_markup') return 'badge-info';
+    return 'badge-warning';
   }
 
   // Final URL status for redirect chain display
@@ -829,16 +868,26 @@
   {/if}
 
   <!-- Structured Data -->
-  {#if pg.SchemaTypes?.length}
+  {#if pg.ContentType?.toLowerCase().includes('html') && (pg.StructuredDataStatus || pg.SchemaTypes?.length)}
     <div class="card card-section">
       <h3 class="section-title">{t('urlDetail.structuredData')}</h3>
       <div class="schema-badges">
-        {#each pg.SchemaTypes as st}
+        {#each (pg.StructuredDataTypes || []) as st}
           <span class="badge badge-info">{st}</span>
         {/each}
       </div>
+      <div class="sd-technical-summary">
+        <span class="badge {sdStatusClass(sdReport?.status || pg.StructuredDataStatus)}">
+          {sdStatusLabel(sdReport?.status || pg.StructuredDataStatus)}
+        </span>
+        <span class="sd-coverage">{sdCoverageLabel(sdReport?.coverage || pg.StructuredDataReport?.coverage)}</span>
+        {#if sdReport?.truncated || pg.StructuredDataReport?.truncated}
+          <span class="badge badge-warning">{t('urlDetail.sdObservationIncomplete')}</span>
+        {/if}
+      </div>
       {#if pg.SchemaErrorCount > 0 || pg.SchemaWarningCount > 0 || pg.SchemaValidCount > 0}
         <div class="sd-summary">
+          <span class="sd-check-label">{t('urlDetail.sdLegacyChecks')}</span>
           {#if pg.SchemaValidCount > 0}
             <span class="badge badge-success">{pg.SchemaValidCount} {t('urlDetail.sdValid')}</span>
           {/if}
@@ -894,6 +943,43 @@
               {/if}
             </div>
           {/each}
+        </div>
+      {/if}
+      {#if sdExpanded && sdReport}
+        <div class="sd-technical-details">
+          <h4>{t('urlDetail.sdTechnicalObservation')}</h4>
+          <div class="sd-evidence-line">
+            <span>{t('report.structuredData.origin')}: {sdReport.sources?.map((source) => t(`report.structuredData.source.${source}`)).join(', ') || t('common.none')}</span>
+            <span>{t('common.format')}: {sdReport.formats?.map((value) => value === 'json-ld' ? 'JSON-LD' : value).join(', ') || t('common.none')}</span>
+          </div>
+          {#if sdReport.entities?.length}
+            <ul class="sd-technical-entities">
+              {#each sdReport.entities as entity}
+                <li>
+                  <span class="badge badge-info">{entity.type}</span>
+                  <span>{t(`report.structuredData.source.${entity.source}`)} · {entity.format}</span>
+                  {#if entity.block_index}<span>{t('report.structuredData.block', { index: entity.block_index })}</span>{/if}
+                </li>
+              {/each}
+            </ul>
+          {:else if sdReport.status === 'no_markup'}
+            <p>{t('urlDetail.sdNoMarkup')}</p>
+          {:else if !sdReport.entities?.length && !sdReport.diagnostics?.length}
+            <p>{t('urlDetail.sdNoEntities')}</p>
+          {/if}
+          {#if sdReport.diagnostics?.length}
+            <ul class="sd-technical-diagnostics">
+              {#each sdReport.diagnostics as diagnostic}
+                <li>{sdDiagnosticLabel(diagnostic)}</li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+      {:else if sdExpanded && sdReportEmpty}
+        <div class="sd-technical-details">{t('urlDetail.sdNoObservationForPage')}</div>
+      {:else if sdExpanded && sdReportError}
+        <div class="sd-technical-details sd-technical-error" role="alert">
+          {t('report.structuredData.loadFailed', { error: sdReportError })}
         </div>
       {/if}
     </div>
@@ -1526,9 +1612,54 @@
   }
   .sd-summary {
     display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: 6px;
     margin-top: 8px;
   }
+  .sd-technical-summary {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .sd-coverage,
+  .sd-check-label {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+  }
+  .sd-technical-details {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-light);
+    font-size: 0.8rem;
+  }
+  .sd-technical-details h4 {
+    margin: 0 0 8px;
+    font-size: 0.85rem;
+  }
+  .sd-evidence-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    color: var(--text-muted);
+  }
+  .sd-technical-entities,
+  .sd-technical-diagnostics {
+    display: grid;
+    gap: 6px;
+    margin: 8px 0 0;
+    padding-left: 18px;
+  }
+  .sd-technical-entities li {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .sd-technical-diagnostics { overflow-wrap: anywhere; }
+  .sd-technical-error { color: var(--error); }
   .sd-details {
     margin-top: 10px;
     display: flex;

@@ -366,6 +366,7 @@
         'URL',
         'Status',
         'Type',
+        'Schema Type',
         'Title',
         'Modified',
         'Created',
@@ -384,6 +385,7 @@
         'URL',
         'StatusCode',
         'PageType',
+        'StructuredDataTypesText',
         'Title',
         'PageModifiedAt',
         'PageCreatedAt',
@@ -400,6 +402,7 @@
       ],
       transform: (row) => ({
         ...row,
+        StructuredDataTypesText: row.StructuredDataTypes?.join(' | ') || '',
         PageModifiedAt: formatPageDate(row.PageModifiedAt, ''),
         PageCreatedAt: formatPageDate(row.PageCreatedAt, ''),
       }),
@@ -409,6 +412,7 @@
         'URL',
         'Status',
         'Type',
+        'Schema Type',
         'Title',
         'Modified',
         'Created',
@@ -427,6 +431,7 @@
         'URL',
         'StatusCode',
         'PageType',
+        'StructuredDataTypesText',
         'Title',
         'PageModifiedAt',
         'PageCreatedAt',
@@ -443,6 +448,7 @@
       ],
       transform: (row) => ({
         ...row,
+        StructuredDataTypesText: row.StructuredDataTypes?.join(' | ') || '',
         PageModifiedAt: formatPageDate(row.PageModifiedAt, ''),
         PageCreatedAt: formatPageDate(row.PageCreatedAt, ''),
       }),
@@ -775,6 +781,7 @@
         { label: t('session.url'), sortKey: 'url', defaultWidth: 380, minWidth: 180 },
         { label: t('session.status'), sortKey: 'status_code', defaultWidth: 92, minWidth: 76 },
         { label: t('session.type'), sortKey: 'page_type', defaultWidth: 96, minWidth: 78 },
+        { label: t('pages.schemaType'), defaultWidth: 180, minWidth: 120 },
         { label: t('session.title'), sortKey: 'title', defaultWidth: 300, minWidth: 160 },
         {
           label: t('session.modified'),
@@ -867,6 +874,9 @@
           <td
             ><span class="type-badge type-{p.PageType || 'other'}">{pageTypeLabel(p.PageType)}</span
             ></td
+          >
+          <td class="cell-title"
+            ><OverflowText text={p.StructuredDataTypes?.join(', ') || '-'} /></td
           >
           <td class="cell-title"><OverflowText text={p.Title || '-'} /></td>
           <td title={p.PageModifiedAt || ''}>{formatPageDate(p.PageModifiedAt)}</td>

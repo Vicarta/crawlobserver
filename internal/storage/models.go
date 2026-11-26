@@ -2,6 +2,8 @@ package storage
 
 import (
 	"time"
+
+	"github.com/SEObserver/crawlobserver/internal/schema"
 )
 
 // CrawlSession represents a crawl session.
@@ -75,6 +77,8 @@ type PageRow struct {
 	OGDescription    string
 	OGImage          string
 	SchemaTypes      []string
+	StructuredDataFields
+
 	HeadingOutline   []HeadingRow
 	PageCreatedAt    *time.Time
 	PageModifiedAt   *time.Time
@@ -149,6 +153,13 @@ type PageRow struct {
 	CWVLCP      float64 // Largest Contentful Paint (ms)
 	CWVCLS      float64 // Cumulative Layout Shift
 	CWVTTFB     float64 // Time to First Byte (ms)
+}
+
+type StructuredDataFields struct {
+	StructuredDataStatus  string
+	StructuredDataFormats []string
+	StructuredDataTypes   []string
+	StructuredDataReport  schema.TechnicalStructuredDataReport
 }
 
 type Orphan404CleanupCandidate struct {

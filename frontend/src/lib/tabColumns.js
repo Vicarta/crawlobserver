@@ -79,7 +79,17 @@ export function getTabs() {
 }
 
 export const TAB_SUB_VIEWS = {
-  reports: ['overview', 'content', 'technical', 'links', 'structure', 'sitemaps', 'international'],
+  reports: [
+    'overview',
+    'content',
+    'technical',
+    'links',
+    'structure',
+    'sitemaps',
+    'international',
+    'core-web-vitals',
+    'structured-data',
+  ],
   pages: [
     'all',
     'html',

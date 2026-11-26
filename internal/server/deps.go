@@ -94,6 +94,7 @@ type ContentAnalysisStore interface {
 	GetPageResourceTypeSummary(ctx context.Context, sessionID string) ([]storage.ResourceTypeSummary, error)
 	InsertStructuredData(ctx context.Context, items []schema.StructuredDataItem) error
 	GetStructuredData(ctx context.Context, sessionID, url string) ([]schema.StructuredDataItem, error)
+	StructuredDataReport(ctx context.Context, sessionID string, options schema.StructuredDataReportOptions) (*schema.StructuredDataReportResponse, error)
 	ComputeHreflangValidation(ctx context.Context, sessionID string) error
 	HreflangValidation(ctx context.Context, sessionID string, issueType string, pageURL string, limit, offset int, filters []storage.ParsedFilter, sort *storage.SortParam) (*storage.HreflangValidationResult, error)
 }

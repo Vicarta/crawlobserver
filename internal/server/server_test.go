@@ -40,6 +40,8 @@ type mockStore struct {
 	pageIssues                []storage.PageIssue
 	coreWebVitalsReport       *storage.CoreWebVitalsReport
 	coreWebVitalsCalls        []coreWebVitalsCall
+	structuredDataReport      *schema.StructuredDataReportResponse
+	structuredDataReportCalls []schema.StructuredDataReportOptions
 	links                     []storage.LinkRow
 	stats                     *storage.SessionStats
 	pageHTML                  string
@@ -853,6 +855,10 @@ func (m *mockStore) InsertStructuredData(_ context.Context, _ []schema.Structure
 }
 func (m *mockStore) GetStructuredData(_ context.Context, _, _ string) ([]schema.StructuredDataItem, error) {
 	return nil, m.err
+}
+func (m *mockStore) StructuredDataReport(_ context.Context, _ string, options schema.StructuredDataReportOptions) (*schema.StructuredDataReportResponse, error) {
+	m.structuredDataReportCalls = append(m.structuredDataReportCalls, options)
+	return m.structuredDataReport, m.err
 }
 func (m *mockStore) ExportCriticalTables(_ context.Context, _ string, _ int) error {
 	return m.err
@@ -9464,6 +9470,70 @@ func TestCoreWebVitalsReport_Success(t *testing.T) {
 	call := ms.coreWebVitalsCalls[0]
 	if call.SessionID != "sess-1" || call.Rating != "poor" || call.Sort != "lcp" || call.Order != "desc" {
 		t.Fatalf("core web vitals call = %+v", call)
+	}
+}
+
+func TestStructuredDataReportRouteIsSessionScopedAndKeepsDetailSeparate(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	ms := srv.store.(*mockStore)
+	ms.getSessionByID = map[string]*storage.CrawlSession{
+		"sess-1": {ID: "sess-1", Status: "completed"},
+	}
+	ms.structuredDataReport = &schema.StructuredDataReportResponse{
+		Summary: schema.StructuredDataReportSummary{Total: 2, Issues: 1, Clean: 1},
+		Pages: []schema.StructuredDataReportPage{{
+			URL: "https://example.test/product", Status: schema.StructuredDataIssues,
+			Coverage: "json_ld_syntax", Formats: []string{"json-ld"}, Types: []string{"Product"},
+			Diagnostics: []schema.TechnicalStructuredDataDiagnostic{{
+				Source: "static", Format: "json-ld", Code: "json_ld_invalid_json", BlockIndex: 2,
+				ByteStart: 10, ByteEnd: 11,
+			}},
+		}},
+		Total: 1, Limit: 25, Offset: 10,
+	}
+
+	req := authRequest(httptest.NewRequest(http.MethodGet,
+		"/api/sessions/sess-1/structured-data/report?limit=25&offset=10&status=issues&format=json-ld&type=Product", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("report status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var report schema.StructuredDataReportResponse
+	decodeJSON(t, rec, &report)
+	if report.Summary.Total != 2 || report.Total != 1 || len(report.Pages) != 1 || report.Pages[0].Diagnostics[0].BlockIndex != 2 {
+		t.Fatalf("report = %#v", report)
+	}
+	if len(ms.structuredDataReportCalls) != 1 {
+		t.Fatalf("store calls = %d, want 1", len(ms.structuredDataReportCalls))
+	}
+	options := ms.structuredDataReportCalls[0]
+	if options.Limit != 25 || options.Offset != 10 || options.Status != "issues" || options.Format != "json-ld" || options.Type != "Product" || options.URL != "" {
+		t.Fatalf("list options = %#v", options)
+	}
+
+	req = authRequest(httptest.NewRequest(http.MethodGet,
+		"/api/sessions/sess-1/structured-data/report?url=https%3A%2F%2Fexample.test%2Fproduct", nil))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(ms.structuredDataReportCalls) != 2 || ms.structuredDataReportCalls[1].URL != "https://example.test/product" {
+		t.Fatalf("detail options = %#v", ms.structuredDataReportCalls)
+	}
+}
+
+func TestStructuredDataReportRejectsUnsupportedFilters(t *testing.T) {
+	srv, handler, _ := newTestServer(t)
+	srv.store.(*mockStore).getSessionByID = map[string]*storage.CrawlSession{
+		"sess-1": {ID: "sess-1", Status: "completed"},
+	}
+	req := authRequest(httptest.NewRequest(http.MethodGet, "/api/sessions/sess-1/structured-data/report?format=unknown", nil))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported format status = %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

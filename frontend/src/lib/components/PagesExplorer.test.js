@@ -30,6 +30,44 @@ afterEach(() => {
 });
 
 describe('PagesExplorer unified search', () => {
+  it('shows detected schema vocabulary types on All and HTML rows', async () => {
+    for (const subView of ['all', 'html']) {
+      pagesAPI.getPages.mockResolvedValueOnce([
+        {
+          URL: 'https://example.test/product',
+          StatusCode: 200,
+          PageType: 'html',
+          StructuredDataTypes: ['Product', 'Service'],
+          SchemaTypes: ['Product'],
+        },
+        {
+          URL: 'https://example.test/empty-observed-types',
+          StatusCode: 200,
+          PageType: 'html',
+          StructuredDataTypes: [],
+          SchemaTypes: ['LegacyFalseType'],
+        },
+      ]);
+      component = mount(PagesExplorer, {
+        target: document.body,
+        props: { sessionId: 'sess-1', initialSubView: subView },
+      });
+      await vi.waitFor(() => expect(document.querySelectorAll('.data-table-resizable tbody tr')).toHaveLength(2));
+      const header = [...document.querySelectorAll('.data-table-resizable thead th')].find((cell) =>
+        cell.textContent.includes('Schema Type'),
+      );
+      expect(header).not.toBeNull();
+      expect(document.querySelector('.data-table-resizable tbody tr').textContent).toContain('Product, Service');
+      const emptyObservedRow = [...document.querySelectorAll('.data-table-resizable tbody tr')].find((row) =>
+        row.textContent.includes('empty-observed-types'),
+      );
+      expect(emptyObservedRow.textContent).not.toContain('LegacyFalseType');
+      unmount(component);
+      component = undefined;
+      document.body.innerHTML = '';
+    }
+  });
+
   it('keeps page selection controls behind the admin gate', async () => {
     pagesAPI.getPages.mockResolvedValue([{ URL: 'https://example.test/', StatusCode: 200 }]);
     component = mount(PagesExplorer, {

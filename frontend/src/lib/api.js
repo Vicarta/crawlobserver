@@ -1558,6 +1558,18 @@ export async function getStructuredData(sessionId, url) {
   return fetchJSON(`/sessions/${sessionId}/structured-data?url=${encodeURIComponent(url)}`);
 }
 
+export async function getStructuredDataReport(sessionId, options = {}) {
+  const params = new URLSearchParams();
+  for (const key of ['limit', 'offset', 'status', 'format', 'type', 'url']) {
+    const value = options[key];
+    if (value !== '' && value != null) params.set(key, String(value));
+  }
+  const query = params.toString();
+  return fetchJSON(
+    `/sessions/${sessionId}/structured-data/report${query ? `?${query}` : ''}`,
+  );
+}
+
 // --- Interlinking ---
 
 export async function computeInterlinking(sessionId, options = {}) {

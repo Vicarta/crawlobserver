@@ -182,6 +182,29 @@ func TestParseCaseInsensitiveSEOAttributes(t *testing.T) {
 	}
 }
 
+func TestParseDetectsStructuredDataFormatsAndPreservesBlockOrder(t *testing.T) {
+	html := `<html><head>
+		<script type="application/ld+json"></script>
+		<script type="application/ld+json; charset=utf-8">{"@type":"Article"}</script>
+	</head><body>
+		<div itemscope itemtype="https://schema.org/Product"></div>
+		<div itemscope itemtype="https://schema.org/Service"></div>
+	</body></html>`
+	data, err := Parse([]byte(html), "https://example.test/page")
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(data.JSONLDBlocks) != 2 || data.JSONLDBlocks[0] != "" || !strings.Contains(data.JSONLDBlocks[1], "Article") {
+		t.Fatalf("JSON-LD blocks = %#v", data.JSONLDBlocks)
+	}
+	if len(data.StructuredDataFormats) != 2 || data.StructuredDataFormats[0] != "json-ld" || data.StructuredDataFormats[1] != "microdata" {
+		t.Fatalf("formats = %#v", data.StructuredDataFormats)
+	}
+	if len(data.MicrodataTypes) != 2 || data.MicrodataTypes[0] != "https://schema.org/Product" || data.MicrodataTypes[1] != "https://schema.org/Service" {
+		t.Fatalf("Microdata types = %#v", data.MicrodataTypes)
+	}
+}
+
 func TestParsePageDatesPrefersJSONLD(t *testing.T) {
 	html := `<html><head>
 		<meta property="article:published_time" content="2025-01-02T03:04:05Z">

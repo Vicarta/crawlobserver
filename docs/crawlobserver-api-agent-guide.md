@@ -141,6 +141,64 @@ curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
   --data-urlencode "url=https://example.com/page/"
 ```
 
+### Technical Structured Data Report
+
+Read the session-scoped technical observation report (the legacy
+`/structured-data` endpoint remains unchanged):
+
+```bash
+curl -H "X-API-Key: $CRAWLOBSERVER_API_KEY" \
+  "https://crawlobserver.example.com/api/sessions/{session_id}/structured-data/report?limit=50&offset=0"
+```
+
+Optional query parameters are `status` (`not_checked`, `no_markup` means no JSON-LD
+or Microdata detected, `issues`,
+`clean`), `format` (`json-ld`, `microdata`), `type` (a detected vocabulary
+type), and `url` (one page's detail). `limit` defaults to 50 and is capped at
+100; `offset` defaults to 0. The response summary covers all eligible HTML
+pages in the session, while `total` and `pages` reflect the row filters.
+Providing `url` returns that page's full bounded entity and diagnostic evidence;
+without it, rows include at most 10 diagnostics and never include HTML.
+
+JSON-LD is checked for JSON syntax only. Microdata types are detection-only;
+use each row's `coverage` to distinguish that from JSON-LD syntax coverage.
+RDFa is not checked.
+`clean` does not claim Schema.org conformance or search-engine eligibility.
+An unsupported observed format remains `not_checked` and is named in `coverage`.
+Historical rows without the new observation remain `not_checked`; their legacy
+heuristic `schema_types` are not returned as technical report types or filters.
+The legacy structured-data endpoint and page `SchemaTypes` field are unchanged.
+
+The response contains `summary` counts, filtered `total`, pagination metadata,
+and `pages` with URL, status, coverage, source names, formats, detected types,
+JSON-LD entity/diagnostic counts, and diagnostic previews.
+`json_ld_entity_count` counts distinct parsed JSON-LD objects with a detected
+`@type`; Microdata detections are excluded because Microdata is detection-only.
+The `entities` array contains typed detections, not a fully resolved JSON-LD
+graph; `@context` expansion and `@id` reference resolution are not performed.
+URL detail rows additionally contain `entities`; list rows set
+`diagnostics_truncated` when the preview is shorter than the available diagnostics.
+
+```json
+{
+  "summary": {"total": 12, "not_checked": 1, "no_markup": 3, "issues": 2, "clean": 6},
+  "pages": [{
+    "url": "https://example.com/product/",
+    "status": "issues",
+    "coverage": "json_ld_syntax",
+    "sources": ["static"],
+    "formats": ["json-ld"],
+    "types": ["Product"],
+    "json_ld_entity_count": 1,
+    "diagnostic_count": 1,
+    "diagnostics": [{"source": "static", "format": "json-ld", "code": "json_ld_invalid_json", "block_index": 1, "byte_start": 14, "byte_end": 15}]
+  }],
+  "total": 2,
+  "limit": 50,
+  "offset": 0
+}
+```
+
 Internal links:
 
 ```bash
@@ -767,6 +825,7 @@ https://crawlobserver.example.com/api
 | `GET` | `/sessions/{id}/pagerank-top` | Top internal PageRank pages. |
 | `GET` | `/sessions/{id}/near-duplicates` | Near duplicate page pairs. |
 | `GET` | `/sessions/{id}/structured-data` | Structured data findings. |
+| `GET` | `/sessions/{id}/structured-data/report` | Technical observations, filters, summary, and URL detail evidence. |
 | `GET` | `/projects/{id}/gsc/overview` | GSC overview. |
 | `GET` | `/projects/{id}/gsc/queries` | GSC queries. |
 | `GET` | `/projects/{id}/gsc/pages` | GSC page performance. |

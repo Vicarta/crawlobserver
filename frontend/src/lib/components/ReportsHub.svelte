@@ -9,6 +9,7 @@
   import SitemapReport from './reports/SitemapReport.svelte';
   import InternationalReport from './reports/InternationalReport.svelte';
   import CoreWebVitalsReport from './reports/CoreWebVitalsReport.svelte';
+  import StructuredDataReport from './reports/StructuredDataReport.svelte';
 
   let {
     sessionId,
@@ -35,6 +36,7 @@
     'sitemaps',
     'international',
     'core-web-vitals',
+    'structured-data',
   ];
   const SUB_VIEW_KEYS = {
     overview: 'reports.overview',
@@ -45,10 +47,11 @@
     sitemaps: 'reports.sitemaps',
     international: 'reports.international',
     'core-web-vitals': 'reports.coreWebVitals',
+    'structured-data': 'reports.structuredData',
   };
 
   function subViewNeedsAudit(id) {
-    return id !== 'overview' && id !== 'core-web-vitals';
+    return id !== 'overview' && id !== 'core-web-vitals' && id !== 'structured-data';
   }
 
   async function loadAudit() {
@@ -96,6 +99,8 @@
     <OverviewReport {stats} {sessionId} {isRunning} {onnavigate} {statsVersion} />
   {:else if subView === 'core-web-vitals'}
     <CoreWebVitalsReport {sessionId} {onnavigate} {onerror} />
+  {:else if subView === 'structured-data'}
+    <StructuredDataReport {sessionId} {onnavigate} {onerror} />
   {:else if auditLoading}
     <p class="reports-msg-muted">{t('reports.loadingAudit')}</p>
   {:else if auditError && !auditData}
@@ -126,6 +131,19 @@
 </div>
 
 <style>
+  .pr-container {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .pr-subview-bar {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+  .pr-subview-btn { flex: 0 0 auto; }
   .reports-msg-muted {
     color: var(--text-muted);
     padding: 32px 0;

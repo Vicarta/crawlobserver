@@ -14,32 +14,34 @@ import (
 
 // PageData holds all extracted SEO signals from a page.
 type PageData struct {
-	Title           string
-	Canonical       string
-	MetaRobots      string
-	MetaDescription string
-	MetaKeywords    string
-	H1              []string
-	H2              []string
-	H3              []string
-	H4              []string
-	H5              []string
-	H6              []string
-	HeadingOutline  []Heading
-	Links           []Link
-	Images          []Image
-	Hreflang        []HreflangEntry
-	Lang            string
-	OGTitle         string
-	OGDescription   string
-	OGImage         string
-	SchemaTypes     []string
-	JSONLDBlocks    []string // raw JSON-LD block contents
-	PublishedAt     *time.Time
-	ModifiedAt      *time.Time
-	WordCount       int
-	ContentHash     uint64 // SimHash fingerprint of visible body text
-	Resources       []PageResource
+	Title                 string
+	Canonical             string
+	MetaRobots            string
+	MetaDescription       string
+	MetaKeywords          string
+	H1                    []string
+	H2                    []string
+	H3                    []string
+	H4                    []string
+	H5                    []string
+	H6                    []string
+	HeadingOutline        []Heading
+	Links                 []Link
+	Images                []Image
+	Hreflang              []HreflangEntry
+	Lang                  string
+	OGTitle               string
+	OGDescription         string
+	OGImage               string
+	SchemaTypes           []string
+	JSONLDBlocks          []string // raw JSON-LD block contents
+	StructuredDataFormats []string
+	MicrodataTypes        []string
+	PublishedAt           *time.Time
+	ModifiedAt            *time.Time
+	WordCount             int
+	ContentHash           uint64 // SimHash fingerprint of visible body text
+	Resources             []PageResource
 }
 
 type ParseOptions struct {
@@ -108,6 +110,7 @@ func ParseWithOptions(body []byte, pageURL string, opts ParseOptions) (*PageData
 	data.OGImage = extractMetaProperty(doc, "og:image")
 	data.SchemaTypes = extractSchemaTypes(doc)
 	data.JSONLDBlocks = extractJSONLDBlocks(doc)
+	data.StructuredDataFormats, data.MicrodataTypes = extractStructuredDataFormats(doc)
 	data.PublishedAt, data.ModifiedAt = extractPageDates(doc, data.JSONLDBlocks)
 	data.WordCount = countWords(doc)
 	data.ContentHash = SimHash(ExtractMainContent(body, baseURL))
@@ -216,12 +219,37 @@ func extractJSONLDBlocks(doc *goquery.Document) []string {
 		if !htmlutil.AttrMediaTypeEqual(s, "type", "application/ld+json") {
 			return
 		}
-		text := strings.TrimSpace(s.Text())
-		if text != "" {
-			blocks = append(blocks, text)
-		}
+		blocks = append(blocks, s.Text())
 	})
 	return blocks
+}
+
+func extractStructuredDataFormats(doc *goquery.Document) ([]string, []string) {
+	formats := make([]string, 0, 2)
+	microdataTypes := make([]string, 0)
+	jsonLD, microdata := false, false
+	doc.Find("script").Each(func(_ int, s *goquery.Selection) {
+		if htmlutil.AttrMediaTypeEqual(s, "type", "application/ld+json") {
+			jsonLD = true
+		}
+	})
+	doc.Find("*").Each(func(_ int, s *goquery.Selection) {
+		itemtype, hasItemtype := htmlutil.Attr(s, "itemtype")
+		_, hasItemscope := htmlutil.Attr(s, "itemscope")
+		if hasItemtype || hasItemscope {
+			microdata = true
+		}
+		if hasItemtype {
+			microdataTypes = append(microdataTypes, strings.Fields(itemtype)...)
+		}
+	})
+	if jsonLD {
+		formats = append(formats, "json-ld")
+	}
+	if microdata {
+		formats = append(formats, "microdata")
+	}
+	return formats, microdataTypes
 }
 
 // extractSchemaTypes extracts schema.org types from JSON-LD.

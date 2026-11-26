@@ -1141,6 +1141,16 @@ func (e *Engine) parseWorker(id int, in <-chan *fetcher.FetchResult) {
 				pageRow.OGDescription = pageData.OGDescription
 				pageRow.OGImage = pageData.OGImage
 				pageRow.SchemaTypes = pageData.SchemaTypes
+				technicalReport := schema.ObserveTechnicalStructuredData(
+					pageData.JSONLDBlocks, pageData.StructuredDataFormats, pageData.MicrodataTypes, "static",
+				)
+				if result.BodyTruncated {
+					technicalReport = schema.MarkStructuredDataInputTruncated(technicalReport, "static")
+				}
+				pageRow.StructuredDataReport = technicalReport
+				pageRow.StructuredDataStatus = technicalReport.Status
+				pageRow.StructuredDataFormats = technicalReport.Formats
+				pageRow.StructuredDataTypes = technicalReport.Types
 				pageRow.PageCreatedAt = pageData.PublishedAt
 				pageRow.PageModifiedAt = pageData.ModifiedAt
 				if pageRow.PageModifiedAt == nil {
@@ -2044,6 +2054,15 @@ func (e *Engine) renderWorker(id int, in <-chan *renderItem) {
 				item.pageRow.RenderedCanonical = renderedData.Canonical
 				item.pageRow.RenderedMetaRobots = renderedData.MetaRobots
 				item.pageRow.RenderedSchemaTypes = renderedData.SchemaTypes
+				renderedObservation := schema.ObserveTechnicalStructuredData(
+					renderedData.JSONLDBlocks, renderedData.StructuredDataFormats, renderedData.MicrodataTypes, "rendered",
+				)
+				item.pageRow.StructuredDataReport = schema.AggregateTechnicalStructuredData(
+					item.pageRow.StructuredDataReport, renderedObservation,
+				)
+				item.pageRow.StructuredDataStatus = item.pageRow.StructuredDataReport.Status
+				item.pageRow.StructuredDataFormats = item.pageRow.StructuredDataReport.Formats
+				item.pageRow.StructuredDataTypes = item.pageRow.StructuredDataReport.Types
 				if item.pageRow.PageCreatedAt == nil {
 					item.pageRow.PageCreatedAt = renderedData.PublishedAt
 				}

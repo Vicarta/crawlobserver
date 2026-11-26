@@ -1670,6 +1670,40 @@ func (s *Server) handleStructuredData(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, items)
 }
 
+func (s *Server) handleStructuredDataReport(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	if !s.requireSessionAccess(w, r, sessionID) {
+		return
+	}
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	if status != "" && status != schema.StructuredDataNotChecked && status != schema.StructuredDataNoMarkup &&
+		status != schema.StructuredDataIssues && status != schema.StructuredDataClean {
+		writeError(w, http.StatusBadRequest, "unsupported structured-data status")
+		return
+	}
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format != "" && format != "json-ld" && format != "microdata" {
+		writeError(w, http.StatusBadRequest, "unsupported structured-data format")
+		return
+	}
+	typeFilter := strings.TrimSpace(r.URL.Query().Get("type"))
+	if len(typeFilter) > 256 {
+		writeError(w, http.StatusBadRequest, "structured-data type filter is too long")
+		return
+	}
+	limit, offset := clampPagination(queryInt(r, "limit", 50), queryInt(r, "offset", 0))
+	options := schema.StructuredDataReportOptions{
+		Limit: limit, Offset: offset, Status: status, Format: format,
+		Type: typeFilter, URL: strings.TrimSpace(r.URL.Query().Get("url")),
+	}
+	report, err := s.store.StructuredDataReport(r.Context(), sessionID, options)
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	writeJSON(w, report)
+}
+
 // handleReparseResources re-extracts page resources from stored body_html
 // and HTTP-checks each unique resource.
 func (s *Server) handleReparseResources(w http.ResponseWriter, r *http.Request) {

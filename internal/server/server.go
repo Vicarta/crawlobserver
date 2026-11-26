@@ -240,6 +240,7 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.HandleFunc("GET /api/sessions/{id}/near-duplicates", s.handleNearDuplicates)
 	mux.HandleFunc("GET /api/sessions/{id}/redirect-pages", s.handleRedirectPages)
 	mux.HandleFunc("GET /api/sessions/{id}/structured-data", s.handleStructuredData)
+	mux.HandleFunc("GET /api/sessions/{id}/structured-data/report", s.handleStructuredDataReport)
 	mux.HandleFunc("GET /api/sessions/{id}/url-patterns", s.handleURLPatterns)
 	mux.HandleFunc("GET /api/sessions/{id}/url-params", s.handleURLParams)
 	mux.HandleFunc("GET /api/sessions/{id}/url-directories", s.handleURLDirectories)
