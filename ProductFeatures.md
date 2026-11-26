@@ -109,7 +109,9 @@ ClickHouse-сховище, вебінтерфейс, REST API, CLI та desktop 
   та real-handler integration test.
 - Resume незавершеної сесії з попередніми параметрами.
 - Якщо параметри Resume змінені, UI вимагає підтвердити Full Recrawl.
-- Retry failed pages за status code.
+- Retry failed pages за status code без видалення попереднього результату: він
+  лишається доступним до запису нового результату, а незбережена повторна спроба
+  його не прибирає.
 - Rescan вибраних сторінок у наявній сесії.
 - Перейменування session label.
 - Видалення окремої сесії та очищення unassigned sessions.

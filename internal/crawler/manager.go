@@ -656,7 +656,7 @@ func (m *Manager) ResumeCrawl(sessionID string, overrides *CrawlRequest) (string
 }
 
 // RetryFailed retries pages with status_code = 0 (fetch errors) or a specific status code.
-// Deletes the failed rows, then runs a mini-crawl with those URLs.
+// Existing page rows remain visible until a retry stores a newer result.
 func (m *Manager) RetryFailed(sessionID string, overrides *CrawlRequest) (int, error) {
 	statusCode := 0
 	if overrides != nil && overrides.RetryStatusCode > 0 {
@@ -671,7 +671,6 @@ func (m *Manager) RetryFailed(sessionID string, overrides *CrawlRequest) (int, e
 	}
 
 	var failedURLs []string
-	var deleted int
 	var err error
 
 	if statusCode == 0 {
@@ -683,10 +682,6 @@ func (m *Manager) RetryFailed(sessionID string, overrides *CrawlRequest) (int, e
 		if len(failedURLs) == 0 {
 			return 0, fmt.Errorf("no failed pages (status 0) found for session %s", sessionID)
 		}
-		deleted, err = m.store.DeleteFailedPages(context.Background(), sessionID)
-		if err != nil {
-			return 0, fmt.Errorf("deleting failed pages: %w", err)
-		}
 	} else {
 		// Retry pages with specific status code
 		failedURLs, err = m.store.URLsByStatus(context.Background(), sessionID, statusCode)
@@ -695,10 +690,6 @@ func (m *Manager) RetryFailed(sessionID string, overrides *CrawlRequest) (int, e
 		}
 		if len(failedURLs) == 0 {
 			return 0, fmt.Errorf("no pages with status %d found for session %s", statusCode, sessionID)
-		}
-		deleted, err = m.store.DeletePagesByStatus(context.Background(), sessionID, statusCode)
-		if err != nil {
-			return 0, fmt.Errorf("deleting pages with status %d: %w", statusCode, err)
 		}
 	}
 
@@ -788,7 +779,7 @@ func (m *Manager) RetryFailed(sessionID string, overrides *CrawlRequest) (int, e
 		m.enqueue(sessionID, engine, failedURLs)
 	}
 
-	return deleted, nil
+	return len(failedURLs), nil
 }
 
 // RescanPages refetches explicit URLs inside an existing session without recomputing depth or PageRank.
